@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>X 入站互动排行</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>入站互动排行</h1>
+    <select id="account" title="切换账号"></select>
+  </header>
+
+  <div id="banners"></div>
+
+  <!-- 识别不到账号时手动绑定 -->
+  <section id="bind" hidden>
+    <p>没能自动识别当前登录的 X 账号。请先打开或刷新一个 x.com 页面；仍识别不到就手动填写：</p>
+    <div class="row">
+      <input id="bindHandle" placeholder="@handle" maxlength="16">
+      <button id="bindBtn">绑定</button>
+    </div>
+  </section>
+
+  <main id="main" hidden>
+    <nav class="tabs" id="boards">
+      <button data-board="total" class="on">综合</button>
+      <button data-board="reply">回复</button>
+      <button data-board="quote">引用</button>
+      <span class="spacer"></span>
+      <span class="seg" id="windows">
+        <button data-days="7">7 天</button>
+        <button data-days="30" class="on">30 天</button>
+      </span>
+    </nav>
+    <p class="hint" id="boardHint"></p>
+    <ol id="list"></ol>
+
+    <section class="card">
+      <h2>启动 / 初始化</h2>
+      <div class="row">
+        <label>回溯范围
+          <select id="range">
+            <option value="7">1 周</option>
+            <option value="15" selected>半个月</option>
+            <option value="30">1 个月</option>
+          </select>
+        </label>
+        <button id="start" class="primary">启动 / 初始化</button>
+      </div>
+      <p class="hint">会分小批、限速慢慢跑，通常要几小时；期间保持至少一个 x.com 标签页开着。随时可以重新选范围再跑。</p>
+      <div id="job" hidden>
+        <p id="jobStatus"></p>
+        <div class="row">
+          <button id="pause" hidden>暂停</button>
+          <button id="resume" hidden>继续</button>
+        </div>
+      </div>
+      <p class="hint" id="coverage"></p>
+    </section>
+
+    <section class="card">
+      <h2>设置</h2>
+      <label class="line"><input type="checkbox" id="fetchEnabled"> 后台抓取（关闭后只展示本地已有数据，不再发任何请求）</label>
+      <label class="line">自动增量
+        <select id="interval">
+          <option value="2">每 2 小时</option>
+          <option value="24">每天一次</option>
+          <option value="0">关闭</option>
+        </select>
+      </label>
+      <p class="hint" id="lastInc"></p>
+      <button id="clear" class="danger">清空该账号的数据</button>
+    </section>
+
+    <p class="risk">风险提示：后台读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；是否开启后台抓取由你决定，风险自担。数据只存在本机，不上传。</p>
+  </main>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

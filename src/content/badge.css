@@ -1,0 +1,38 @@
+.xir-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 0 6px;
+  height: 18px;
+  border-radius: 9px;
+  font: 500 11px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  color: #536471;
+  background: rgba(83, 100, 113, 0.14);
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+
+.xir-badge.xir-top {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.xir-tip {
+  position: fixed;
+  z-index: 2147483647;
+  max-width: 230px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font: 12px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: pre-line;
+  color: #fff;
+  background: rgba(15, 20, 25, 0.94);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.xir-tip[hidden] {
+  display: none;
+}

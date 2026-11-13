@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "X 入站互动排行",
+  "description": "统计谁来我的 X 帖子下回复、引用，并在时间线用户名旁标注排名。数据只存本地。",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["https://x.com/*", "https://twitter.com/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "X 入站互动排行",
+    "default_popup": "src/ui/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["src/x/fetcher.js", "src/content/content.js"],
+      "css": ["src/content/badge.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
