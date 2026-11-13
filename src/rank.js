@@ -4,6 +4,10 @@ export const DAY_MS = 86400000;
 export const WINDOWS = [7, 15]; // 可选的统计窗口（天）
 export const TOP_N = 100; // 榜单和标签最多到第几名
 export const MIN_COUNT = 2; // 窗口内只回复过 1 次的不上榜、不标
+// 标签颜色按回复次数分档，不按名次：名次靠后的一大片往往都只有两三次，名次本身说明不了「值不值得回」。
+export const TIER_HOT = 10; // 窗口内回复 >= 10 次：1 档（红）
+export const TIER_WARM = 5; // 5–9 次：2 档（橙）；其余 2–4 次：3 档（蓝灰）
+export const tierOf = (count) => (count >= TIER_HOT ? 1 : count >= TIER_WARM ? 2 : 3);
 
 /**
  * 只留「我的帖子下」的回复：对话根帖是我的才算，我去别人帖子下评论、对方回我的不算。
@@ -44,9 +48,9 @@ export function board(events, windowDays, now = Date.now()) {
   return rows.slice(0, TOP_N).map((r, i) => ({ rank: i + 1, ...r }));
 }
 
-/** 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, last } }。 */
+/** 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, tier, last } }。 */
 export function badgeSnapshot(events, windowDays, now = Date.now()) {
   const users = {};
-  for (const r of board(events, windowDays, now)) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, last: r.last };
+  for (const r of board(events, windowDays, now)) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, tier: tierOf(r.count), last: r.last };
   return users;
 }

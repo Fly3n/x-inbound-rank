@@ -1,27 +1,42 @@
 .xir-badge {
   display: inline-flex;
   align-items: center;
-  flex-shrink: 0;
+  /* 父容器是 flex，不压住的话标签会被横向拉满 */
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: fit-content;
   margin-left: 6px;
   padding: 0 7px;
   height: 18px;
   border-radius: 9px;
   font: 700 12px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   white-space: nowrap;
-  /* 默认是 51–100 名：蓝灰 */
+  /* 默认是 3 档（回复 2–4 次）：蓝灰 */
   color: #fff;
   background: #64748b;
   cursor: default;
   font-variant-numeric: tabular-nums;
 }
 
-/* 前 10 名：红 */
-.xir-badge.xir-r1 {
+.xir-badge svg {
+  width: 11px;
+  height: 11px;
+  margin-right: 2px;
+  fill: currentColor;
+}
+
+/* 名次和次数之间留一个空格的距离 */
+.xir-badge .xir-rank {
+  margin-right: 6px;
+}
+
+/* 1 档（回复 10 次及以上）：红 */
+.xir-badge.xir-t1 {
   background: #e11d48;
 }
 
-/* 11–50 名：橙 */
-.xir-badge.xir-r2 {
+/* 2 档（5–9 次）：橙 */
+.xir-badge.xir-t2 {
   background: #ea580c;
 }
 

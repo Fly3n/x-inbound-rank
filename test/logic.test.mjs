@@ -2,7 +2,7 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { board, badgeSnapshot, underMyPosts, DAY_MS } from '../src/rank.js';
+import { board, badgeSnapshot, underMyPosts, tierOf, DAY_MS } from '../src/rank.js';
 import { parseMentions, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
@@ -28,7 +28,9 @@ test('回复榜：最多前 100 名', () => {
 
 test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], 15, NOW);
-  assert.deepEqual(snap, { a: { rank: 1, count: 2, last: NOW - DAY_MS } });
+  assert.deepEqual(snap, { a: { rank: 1, count: 2, tier: 3, last: NOW - DAY_MS } });
+  // 颜色档位按次数，不按名次
+  assert.deepEqual([2, 4, 5, 9, 10, 50].map(tierOf), [3, 3, 2, 2, 1, 1]);
 });
 
 test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {

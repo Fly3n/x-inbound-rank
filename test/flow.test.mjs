@@ -110,7 +110,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 榜单：Other 那条是我去别人帖子下评论后的回复，不上榜
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
-  assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, last: store['snap:me'].users.fan.last });
+  assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, tier: 3, last: store['snap:me'].users.fan.last });
 
   // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
   assert.ok((await setWindow(30)).error, '只接受 7 或 15');

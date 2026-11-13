@@ -12,7 +12,7 @@
   const RESERVED = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'search', 'settings', 'compose', 'hashtag']);
 
   let account = null; // 当前账号（小写 handle）
-  let users = {}; // 快照：handle -> { rank, count, last }
+  let users = {}; // 快照：handle -> { rank, count, tier, last }
   let windowDays = 7; // 快照按几天的窗口算的
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
@@ -90,6 +90,10 @@
     return null;
   }
 
+  // 标签格式：[名次图标]名次 [回复图标]次数
+  const ICON_RANK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 14h3.5V8H1.5zM6.25 14h3.5V2.5h-3.5zM11 14h3.5V10H11z"/></svg>';
+  const ICON_REPLY = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H8.5L5 15v-3H3a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/></svg>';
+
   function mark(nameEl) {
     const handle = handleOf(nameEl);
     const u = handle && users[handle];
@@ -98,20 +102,22 @@
       badge?.remove();
       return;
     }
-    const text = `#${u.rank}`; // 只显示排名，次数和时间放悬停提示里
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'xir-badge';
+      badge.innerHTML = `${ICON_RANK}<span class="xir-rank"></span>${ICON_REPLY}<span class="xir-count"></span>`;
       badge.addEventListener('mouseenter', showTip);
       badge.addEventListener('mouseleave', hideTip);
       nameEl.appendChild(badge);
     }
     // X 的列表会复用节点，同一个节点可能换成另一个人，每次都按当前 handle 重写
-    if (badge.textContent !== text) badge.textContent = text;
+    const [rank, count] = [badge.children[1], badge.children[3]];
+    if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
+    if (count.textContent !== String(u.count)) count.textContent = u.count;
     badge.dataset.handle = handle;
-    // 颜色分三档：前 10 红、11–50 橙、51–100 蓝灰（默认色）
-    badge.classList.toggle('xir-r1', u.rank <= 10);
-    badge.classList.toggle('xir-r2', u.rank > 10 && u.rank <= 50);
+    // 颜色按回复次数分三档（档位由 rank.js 算好放在快照里）：1 红、2 橙、3 蓝灰（默认色）
+    badge.classList.toggle('xir-t1', u.tier === 1);
+    badge.classList.toggle('xir-t2', u.tier === 2);
   }
 
   let tip;
