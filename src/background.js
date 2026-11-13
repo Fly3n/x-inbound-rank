@@ -372,8 +372,8 @@ const handlers = {
       eventCount: (await getEvents(account)).length,
     };
   },
-  async getBoard({ account, boardKey, windowDays }) {
-    return { rows: board(await getEvents(account), boardKey, windowDays) };
+  async getBoard({ account, windowDays }) {
+    return { rows: board(await getEvents(account), windowDays) };
   },
   startBackfill: ({ account, rangeDays }) => startBackfill(account, rangeDays),
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),

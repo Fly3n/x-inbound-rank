@@ -12,7 +12,7 @@
   const RESERVED = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'search', 'settings', 'compose', 'hashtag']);
 
   let account = null; // 当前账号（小写 handle）
-  let users = {}; // 快照：handle -> { rank, r30, q30, r7, q7, last }
+  let users = {}; // 快照：handle -> { rank, c30, c7, last }
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
   const send = (msg) =>
@@ -89,9 +89,7 @@
   }
 
   function badgeText(u) {
-    let s = `#${u.rank} · 💬${u.r30}`;
-    if (u.q30) s += ` 🔁${u.q30}`;
-    return s;
+    return `#${u.rank} · 💬${u.c30}`;
   }
 
   function mark(nameEl) {
@@ -122,10 +120,9 @@
     if (!u) return;
     tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
     tip.textContent =
-      `在我这儿 30 天综合第 ${u.rank} 名\n` +
-      `30 天：回复 ${u.r30} · 引用 ${u.q30}\n` +
-      `7 天：回复 ${u.r7} · 引用 ${u.q7}\n` +
-      `最近互动：${fmtDate(u.last)}`;
+      `30 天回复我第 ${u.rank} 名\n` +
+      `30 天 ${u.c30} 次 · 7 天 ${u.c7} 次\n` +
+      `最近一次：${fmtDate(u.last)}`;
     const r = e.currentTarget.getBoundingClientRect();
     tip.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;
     tip.style.top = `${r.bottom + 6}px`;

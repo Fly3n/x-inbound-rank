@@ -26,7 +26,7 @@ function walk(node, visit) {
  * @param body 接口原始返回
  * @param me   { handle, userId } 当前账号
  * @returns {{
- *   events: Array,        // 入站回复/引用
+ *   events: Array,        // 别人对我的回复
  *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
  *   newestId: string|null, oldestId: string|null, oldestTs: number|null,
  *   bottomCursor: string|null
@@ -74,22 +74,8 @@ export function parseMentions(body, me) {
     const author = users[t.user_id_str];
     if (!author || isMe(t.user_id_str, author.screen_name)) continue;
 
-    let type = null;
-    let target = null;
-    if (isMe(t.in_reply_to_user_id_str, t.in_reply_to_screen_name) && t.in_reply_to_status_id_str) {
-      type = 'reply';
-      target = t.in_reply_to_status_id_str;
-    } else if (t.is_quote_status && t.quoted_status_id_str) {
-      const quoted = tweets[t.quoted_status_id_str];
-      const quotedAuthor = quoted && users[quoted.user_id_str];
-      const link = t.quoted_status_permalink?.expanded || '';
-      const linkHandle = (link.match(/(?:x|twitter)\.com\/([^/]+)\/status\//i) || [])[1];
-      if ((quoted && isMe(quoted.user_id_str, quotedAuthor?.screen_name)) || isMe(null, linkHandle)) {
-        type = 'quote';
-        target = t.quoted_status_id_str;
-      }
-    }
-    if (!type) continue; // 普通提及，或在别人帖子下的回复，不计
+    // 只收「直接回复我某条帖子/评论」的。引用、普通提及、回复别人时顺带 @ 我的，都不计
+    if (!t.in_reply_to_status_id_str || !isMe(t.in_reply_to_user_id_str, t.in_reply_to_screen_name)) continue;
 
     events.push({
       id,
@@ -97,9 +83,8 @@ export function parseMentions(body, me) {
       actor_handle: author.screen_name,
       actor_name: author.name,
       actor_avatar: author.profile_image_url_https || '',
-      type,
       created_at: ts,
-      target_post_id: target,
+      target_post_id: t.in_reply_to_status_id_str,
     });
   }
 

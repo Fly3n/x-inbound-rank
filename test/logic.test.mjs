@@ -6,26 +6,20 @@ import { board, badgeSnapshot, DAY_MS } from '../src/rank.js';
 import { parseMentions, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
-const ev = (id, actor, type, daysAgo) => ({
-  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', type, created_at: NOW - daysAgo * DAY_MS,
+const ev = (id, actor, daysAgo) => ({
+  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS,
 });
 
-test('榜单：时间窗、三个榜、同分按最近互动', () => {
-  const events = [
-    ev(1, 'a', 'reply', 1), ev(2, 'a', 'reply', 10), ev(3, 'a', 'quote', 20),
-    ev(4, 'b', 'quote', 2), ev(5, 'b', 'quote', 3),
-    ev(6, 'c', 'reply', 0.5), ev(7, 'c', 'reply', 40),
-  ];
-  assert.deepEqual(board(events, 'total', 30, NOW).map((r) => [r.handle, r.total]), [['A', 3], ['B', 2], ['C', 1]]);
-  // 7 天窗：a 只剩 1 条回复，b 2 条引用，c 1 条回复且比 a 更近
-  assert.deepEqual(board(events, 'total', 7, NOW).map((r) => r.handle), ['B', 'C', 'A']);
-  assert.deepEqual(board(events, 'reply', 30, NOW).map((r) => [r.handle, r.reply]), [['A', 2], ['C', 1]]);
-  assert.deepEqual(board(events, 'quote', 7, NOW).map((r) => r.handle), ['B']);
+test('回复榜：时间窗、同分按最近回复', () => {
+  const events = [ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'a', 20), ev(4, 'b', 2), ev(5, 'b', 3), ev(6, 'c', 0.5), ev(7, 'c', 40)];
+  assert.deepEqual(board(events, 30, NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 3], [2, 'B', 2], [3, 'C', 1]]);
+  // 7 天窗：a 只剩 1 条，c 也 1 条但更近
+  assert.deepEqual(board(events, 7, NOW).map((r) => r.handle), ['B', 'C', 'A']);
 });
 
-test('标签快照：按 30 天综合榜定名次，键为小写 handle', () => {
-  const snap = badgeSnapshot([ev(1, 'a', 'reply', 1), ev(2, 'a', 'reply', 10), ev(3, 'b', 'quote', 2), ev(4, 'c', 'reply', 31)], NOW);
-  assert.deepEqual(snap.a, { rank: 1, r30: 2, q30: 0, r7: 1, q7: 0, last: NOW - DAY_MS });
+test('标签快照：按 30 天回复榜定名次，键为小写 handle', () => {
+  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 31)], NOW);
+  assert.deepEqual(snap.a, { rank: 1, c30: 2, c7: 1, last: NOW - DAY_MS });
   assert.equal(snap.b.rank, 2);
   assert.equal(snap.c, undefined);
 });
@@ -48,7 +42,7 @@ const body = (tweets, entryIds, cursor = 'CURSOR') => ({
 });
 const me = { handle: 'me', userId: '1' };
 
-test('解析：只收对我帖子的回复和对我帖子的引用', () => {
+test('解析：只收直接回复我的，引用和提及不计', () => {
   const myOld = tweet('100', '1', { created_at: 'Thu Jan 01 00:00:00 +0000 2026' });
   const b = body(
     [
@@ -63,7 +57,7 @@ test('解析：只收对我帖子的回复和对我帖子的引用', () => {
     ['200', '201', '202', '203', '204', '205'],
   );
   const r = parseMentions(b, me);
-  assert.deepEqual(r.events.map((e) => [e.id, e.type, e.actor_handle, e.target_post_id]), [['200', 'reply', 'Fan', '100'], ['201', 'quote', 'Fan', '100']]);
+  assert.deepEqual(r.events.map((e) => [e.id, e.actor_handle, e.target_post_id]), [['200', 'Fan', '100']]);
   assert.equal(r.bottomCursor, 'CURSOR');
   assert.equal(r.newestId, '205');
   // 被引用的旧帖 100 不在时间线条目里，不能把「本页最早时间」拉回到 1 月

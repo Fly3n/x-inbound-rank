@@ -3,8 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, board: 'total', days: 30 };
-const BOARD_LABEL = { total: '综合（回复 + 引用）', reply: '回复', quote: '引用' };
+const view = { account: null, days: 30 };
 
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
@@ -42,8 +41,8 @@ async function render() {
   banners(items);
 
   // 榜单
-  const { rows } = await call('getBoard', { account: view.account, boardKey: view.board, windowDays: view.days });
-  $('boardHint').textContent = `最近 ${view.days} 天 · ${BOARD_LABEL[view.board]}次数 · 共 ${rows.length} 人。按次数排的启发式榜单，不是 X 官方评分。`;
+  const { rows } = await call('getBoard', { account: view.account, windowDays: view.days });
+  $('boardHint').textContent = `最近 ${view.days} 天回复过我的 ${rows.length} 人，按回复次数排。`;
   $('list').replaceChildren(
     ...(rows.length
       ? rows.map((r) =>
@@ -54,13 +53,10 @@ async function render() {
               el('a', { className: 'name', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', textContent: r.name }),
               el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
             ]),
-            el('div', { className: 'count' }, [
-              el('b', { textContent: r[view.board] }),
-              el('span', { textContent: view.board === 'total' ? `💬${r.reply} 🔁${r.quote}` : '' }),
-            ]),
+            el('div', { className: 'count' }, [el('b', { textContent: r.count }), el('span', { textContent: '次回复' })]),
           ]),
         )
-      : [el('li', { className: 'empty', textContent: s.eventCount ? '这个时间窗内没有互动' : '还没有数据，先点下方「启动 / 初始化」' })]),
+      : [el('li', { className: 'empty', textContent: s.eventCount ? '这个时间窗内没有人回复' : '还没有数据，先点下方「启动 / 初始化」' })]),
   );
 
   // 回填任务
@@ -90,7 +86,7 @@ async function render() {
   $('start').disabled = !isSession || !s.settings.fetchEnabled;
   $('resume').disabled = !isSession || !s.settings.fetchEnabled;
   $('coverage').textContent = s.cursor.earliestTs
-    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条回复/引用。`
+    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条回复。`
     : '';
 
   // 设置
@@ -107,12 +103,9 @@ async function act(type, extra) {
 }
 
 $('boards').addEventListener('click', (e) => {
-  const b = e.target.closest('[data-board]');
   const d = e.target.closest('[data-days]');
-  if (b) view.board = b.dataset.board;
-  if (d) view.days = Number(d.dataset.days);
-  if (!b && !d) return;
-  document.querySelectorAll('[data-board]').forEach((n) => n.classList.toggle('on', n.dataset.board === view.board));
+  if (!d) return;
+  view.days = Number(d.dataset.days);
   document.querySelectorAll('[data-days]').forEach((n) => n.classList.toggle('on', Number(n.dataset.days) === view.days));
   render();
 });
@@ -120,14 +113,14 @@ $('account').addEventListener('change', (e) => { view.account = e.target.value; 
 $('start').addEventListener('click', () => {
   const days = Number($('range').value);
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速回填最近 ${days} 天的回复与引用。${again}确定开始？`)) act('startBackfill', { rangeDays: days });
+  if (confirm(`将用你的 X 登录会话，限速回填最近 ${days} 天别人对你的回复。${again}确定开始？`)) act('startBackfill', { rangeDays: days });
 });
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 $('fetchEnabled').addEventListener('change', (e) => act('setSettings', { patch: { fetchEnabled: e.target.checked } }));
 $('interval').addEventListener('change', (e) => act('setSettings', { patch: { intervalHours: Number(e.target.value) } }));
 $('clear').addEventListener('click', () => {
-  if (confirm(`清空 @${view.account} 在本机的全部互动数据？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
+  if (confirm(`清空 @${view.account} 在本机的全部回复数据？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });
 $('bindBtn').addEventListener('click', async () => {
   const r = await call('setManualHandle', { handle: $('bindHandle').value });
