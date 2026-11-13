@@ -91,9 +91,7 @@ async function render() {
 
   // 设置
   $('fetchEnabled').checked = s.settings.fetchEnabled;
-  $('interval').value = String(s.settings.intervalHours);
-  $('interval').disabled = !s.settings.fetchEnabled;
-  $('lastInc').textContent = s.cursor.lastIncrementalAt ? `上次增量：${fmtTime(s.cursor.lastIncrementalAt)}` : '';
+  $('lastInc').textContent = s.cursor.lastIncrementalAt ? `上次自动更新：${fmtTime(s.cursor.lastIncrementalAt)}` : '';
 }
 
 async function act(type, extra) {
@@ -118,7 +116,6 @@ $('start').addEventListener('click', () => {
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 $('fetchEnabled').addEventListener('change', (e) => act('setSettings', { patch: { fetchEnabled: e.target.checked } }));
-$('interval').addEventListener('change', (e) => act('setSettings', { patch: { intervalHours: Number(e.target.value) } }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空 @${view.account} 在本机的全部回复数据？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });

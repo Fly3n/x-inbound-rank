@@ -71,7 +71,7 @@ export async function kvGet(key, fallback = null) {
 export const kvSet = (key, value) => chrome.storage.local.set({ [key]: value });
 export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 
-export const DEFAULT_SETTINGS = { fetchEnabled: true, intervalHours: 1 }; // intervalHours: 1 | 2 | 24 | 0(关闭自动增量)
+export const DEFAULT_SETTINGS = { fetchEnabled: true };
 
 export const keys = {
   accounts: 'accounts', // { [handle]: { handle, userId, seenAt } }

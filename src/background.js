@@ -15,7 +15,8 @@ const PACE = {
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
   incPageGapMs: [3_000, 6_000], // 增量：页与页之间的间隔
-  incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）
+  incIntervalMs: 60 * 60_000, // 增量：固定每小时一次
+  incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
 };
 
@@ -268,23 +269,23 @@ async function maybeIncremental() {
   const account = await kvGet(keys.current);
   if (!account) return;
   const settings = await getSettings(account);
-  if (!settings.fetchEnabled || !settings.intervalHours) return;
+  if (!settings.fetchEnabled) return;
   const cur = await kvGet(keys.cursor(account), {});
   if (!cur.syncedId) return; // 还没完成过初始化，不自动抓
   const job = await kvGet(keys.job(account));
   if (job && ['running', 'waiting_tab'].includes(job.status)) return;
   if (job && job.status === 'paused' && job.auto) return; // 限流退避中
   const t = now();
-  if (t - (cur.lastIncrementalAt || 0) < settings.intervalHours * 3600_000) return;
+  if (t - (cur.lastIncrementalAt || 0) < PACE.incIntervalMs) return;
   if (t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return;
 
   busy = true;
   try {
     // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少页。
-    // 接续点只在真正读到它之后才前移；中途失败下次从头重读这一段，靠主键去重，不留缺口。
+    // 出错中断时接续点不动，下次重读这一段，靠主键去重。
+    // 读满上限还没接上（一小时超过约 800 条）就到此为止：接续点照样前移，没读到的那段放弃，不提示（负责人定，不需要那么严格）。
     const stopAt = cur.syncedId;
     let cursor = null;
-    let reached = false;
     let topId = null;
     for (let page = 0; page < PACE.incMaxPages; page++) {
       if (page) await sleep(rand(PACE.incPageGapMs));
@@ -306,18 +307,14 @@ async function maybeIncremental() {
       const p = res.parsed;
       if (page === 0) topId = p.newestId;
       if (!p.entryIds.length || !idGt(p.oldestId, stopAt) || !p.bottomCursor) {
-        reached = true;
         break;
       }
       cursor = p.bottomCursor;
     }
     const c = await kvGet(keys.cursor(account), {});
     c.lastIncrementalAt = now();
-    if (reached && topId && idGt(topId, c.syncedId)) c.syncedId = topId;
+    if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
     await kvSet(keys.cursor(account), c);
-    if (!reached) {
-      await setAlert(account, `这一轮增量读了 ${PACE.incMaxPages} 页还没接上次的位置，新回复太多。本轮读到的已入库，没读到的那段请点「启动 / 初始化」补齐`);
-    }
   } finally {
     busy = false;
   }
