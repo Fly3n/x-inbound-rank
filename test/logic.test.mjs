@@ -10,18 +10,25 @@ const ev = (id, actor, daysAgo) => ({
   id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, root_mine: true,
 });
 
-test('回复榜：时间窗、同分按最近回复', () => {
+test('回复榜：时间窗、同分按最近回复、只回 1 次的不上榜', () => {
   const events = [ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'a', 20), ev(4, 'b', 2), ev(5, 'b', 3), ev(6, 'c', 0.5), ev(7, 'c', 40)];
-  assert.deepEqual(board(events, 30, NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 3], [2, 'B', 2], [3, 'C', 1]]);
-  // 7 天窗：a 只剩 1 条，c 也 1 条但更近
-  assert.deepEqual(board(events, 7, NOW).map((r) => r.handle), ['B', 'C', 'A']);
+  // 15 天窗：a、b 都是 2 条，a 最近一次更近；c 只有 1 条不上榜
+  assert.deepEqual(board(events, 15, NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 2], [2, 'B', 2]]);
+  // 7 天窗：a 只剩 1 条，也掉出去
+  assert.deepEqual(board(events, 7, NOW).map((r) => r.handle), ['B']);
 });
 
-test('标签快照：按 30 天回复榜定名次，键为小写 handle', () => {
-  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 31)], NOW);
-  assert.deepEqual(snap.a, { rank: 1, c30: 2, c7: 1, last: NOW - DAY_MS });
-  assert.equal(snap.b.rank, 2);
-  assert.equal(snap.c, undefined);
+test('回复榜：最多前 100 名', () => {
+  const events = [];
+  for (let i = 0; i < 120; i++) events.push(ev(i * 2, 'u' + i, 1), ev(i * 2 + 1, 'u' + i, 2));
+  const rows = board(events, 7, NOW);
+  assert.equal(rows.length, 100);
+  assert.equal(rows.at(-1).rank, 100);
+});
+
+test('标签快照：就是榜上的人，键为小写 handle', () => {
+  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], 15, NOW);
+  assert.deepEqual(snap, { a: { rank: 1, count: 2, last: NOW - DAY_MS } });
 });
 
 test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {

@@ -71,7 +71,7 @@ export async function kvGet(key, fallback = null) {
 export const kvSet = (key, value) => chrome.storage.local.set({ [key]: value });
 export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 
-export const DEFAULT_SETTINGS = { fetchEnabled: true };
+export const DEFAULT_SETTINGS = { fetchEnabled: true, windowDays: 7 }; // windowDays：统计窗口，7 或 15，回填范围、榜单、标签都用它
 
 export const keys = {
   accounts: 'accounts', // { [handle]: { handle, userId, seenAt } }

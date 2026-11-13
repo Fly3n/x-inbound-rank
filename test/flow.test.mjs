@@ -26,7 +26,7 @@ const mention = (daysAgo, uid, conv, replyTo) => ({
 const feed = [
   mention(0.1, '2', '50', '50'), mention(1, '2', '50', '50'), mention(2, '3', '60', '61'), // 第三条：我在别人帖子(60)下评论，对方回我
   mention(3, '2', '51', '51'), mention(5, '2', '51', '51'), mention(8, '2', '52', '52'),
-  mention(12, '2', '52', '52'), mention(20, '2', '53', '53'),
+  mention(12, '2', '52', '52'), mention(14, '2', '53', '53'),
 ];
 const otherRoot = { id_str: '60', user_id_str: '3', created_at: new Date(Date.now() - 3 * DAY).toUTCString() };
 const server = { calls: 0, fail429Once: false };
@@ -79,14 +79,16 @@ async function fireJob() {
   await listeners.alarm({ name: 'job' });
 }
 const count = async () => (await send({ type: 'getAccountState', account: 'me' })).eventCount;
-const boardRows = async (days) => (await send({ type: 'getBoard', account: 'me', windowDays: days })).rows;
+const boardRows = async () => (await send({ type: 'getBoard', account: 'me' })).rows;
+const setWindow = (days) => send({ type: 'setSettings', account: 'me', patch: { windowDays: days } });
 
 test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(await send({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
 
-  // 回填 7 天：第 1 页
-  assert.deepEqual(await send({ type: 'startBackfill', account: 'me', rangeDays: 7 }), { ok: true });
+  // 回填，默认窗口 7 天：第 1 页
+  assert.deepEqual(await send({ type: 'startBackfill', account: 'me' }), { ok: true });
+  assert.equal(job().rangeDays, 7);
   await until(() => job().pages === 1 && job().nextAt, '第 1 页');
   assert.equal(job().status, 'running');
   assert.ok(job().nextAt - Date.now() >= 7_000, '两页之间要等，不连着拉');
@@ -107,18 +109,26 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(await count(), 6);
 
   // 榜单：Other 那条是我去别人帖子下评论后的回复，不上榜
-  assert.deepEqual((await boardRows(30)).map((r) => [r.handle, r.count]), [['Fan', 5]]);
-  assert.deepEqual((await boardRows(7)).map((r) => [r.handle, r.count]), [['Fan', 4]]);
-  assert.deepEqual(Object.keys(store['snap:me'].users), ['fan']);
+  assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
+  assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, last: store['snap:me'].users.fan.last });
 
-  // 重新初始化 30 天：一直翻到列表到底，如实标记没翻够；重复的不重复计数
-  await send({ type: 'startBackfill', account: 'me', rangeDays: 30 });
+  // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
+  assert.ok((await setWindow(30)).error, '只接受 7 或 15');
+  await setWindow(15);
+  assert.equal(server.calls, 3);
+  assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 5]]);
+  assert.equal(store['snap:me'].windowDays, 15);
+  assert.equal(store['snap:me'].users.fan.count, 5);
+
+  // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
+  await send({ type: 'startBackfill', account: 'me' });
   await until(() => job().pages === 1 && job().nextAt, '重跑第 1 页');
   while (job().status === 'running') await fireJob();
   assert.equal(job().status, 'done');
   assert.equal(job().reachedEnd, true);
   assert.equal(await count(), 8);
-  assert.deepEqual((await boardRows(30)).map((r) => [r.handle, r.count]), [['Fan', 7]]);
+  assert.equal(job().rangeDays, 15);
+  assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
   // 增量：间隔里来了 7 条（跨 3 页），一轮读完，读到上次的位置就停
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
@@ -138,13 +148,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
   Object.assign(store['cursor:me'], { lastIncrementalAt: 0, lastAttemptAt: 0 });
   await listeners.alarm({ name: 'tick' });
-  assert.ok((await send({ type: 'startBackfill', account: 'me', rangeDays: 7 })).error);
+  assert.ok((await send({ type: 'startBackfill', account: 'me' })).error);
   assert.equal(server.calls, before);
 
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });
   assert.equal(await count(), 0);
-  assert.deepEqual(await boardRows(30), []);
+  assert.deepEqual(await boardRows(), []);
   assert.equal(store['snap:me'], undefined);
   assert.equal(store['cursor:me'], undefined);
   assert.equal(store['settings:me'].fetchEnabled, false);

@@ -64,9 +64,6 @@ button.danger { color: var(--err-fg); }
 
 .tabs { display: flex; align-items: center; gap: 4px; }
 .tabs .spacer { flex: 1; }
-.tabs button { border-color: transparent; }
-.tabs button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-.seg button { padding: 2px 8px; font-size: 12px; }
 
 #list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 300px; overflow-y: auto; }
 #list li { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--line); }

@@ -3,20 +3,26 @@
   align-items: center;
   flex-shrink: 0;
   margin-left: 6px;
-  padding: 0 6px;
+  padding: 0 7px;
   height: 18px;
   border-radius: 9px;
-  font: 500 11px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font: 700 12px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   white-space: nowrap;
-  color: #536471;
-  background: rgba(83, 100, 113, 0.14);
+  /* 默认是 51–100 名：蓝灰 */
+  color: #fff;
+  background: #64748b;
   cursor: default;
   font-variant-numeric: tabular-nums;
 }
 
-.xir-badge.xir-top {
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.2);
+/* 前 10 名：红 */
+.xir-badge.xir-r1 {
+  background: #e11d48;
+}
+
+/* 11–50 名：橙 */
+.xir-badge.xir-r2 {
+  background: #ea580c;
 }
 
 .xir-tip {

@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, days: 30 };
+const view = { account: null };
 
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
@@ -41,8 +41,10 @@ async function render() {
   banners(items);
 
   // 榜单
-  const { rows } = await call('getBoard', { account: view.account, windowDays: view.days });
-  $('boardHint').textContent = `最近 ${view.days} 天回复过我的 ${rows.length} 人，按回复次数排。`;
+  const { rows, windowDays } = await call('getBoard', { account: view.account });
+  const label = windowDays === 15 ? '半个月' : `${windowDays} 天`;
+  $('window').value = String(windowDays);
+  $('boardHint').textContent = `最近${label}回复我 2 次及以上的人，按次数排，最多显示前 100 名（现在 ${rows.length} 人）。时间线上的排名标签也按这个榜。`;
   $('list').replaceChildren(
     ...(rows.length
       ? rows.map((r) =>
@@ -56,7 +58,7 @@ async function render() {
             el('div', { className: 'count' }, [el('b', { textContent: r.count }), el('span', { textContent: '次回复' })]),
           ]),
         )
-      : [el('li', { className: 'empty', textContent: s.eventCount ? '这个时间窗内没有人回复' : '还没有数据，先点下方「启动 / 初始化」' })]),
+      : [el('li', { className: 'empty', textContent: s.eventCount ? '这个窗口内还没有人回复我 2 次及以上' : '还没有数据，先点下方「启动 / 初始化」' })]),
   );
 
   // 回填任务
@@ -85,8 +87,10 @@ async function render() {
   $('start').textContent = active ? '重新初始化' : '启动 / 初始化';
   $('start').disabled = !isSession || !s.settings.fetchEnabled;
   $('resume').disabled = !isSession || !s.settings.fetchEnabled;
+  const short = s.cursor.earliestTs > Date.now() - windowDays * 86400000;
   $('coverage').textContent = s.cursor.earliestTs
-    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条直接回复（只有你帖子下的上榜）。`
+    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条直接回复（只有你帖子下的上榜）。` +
+      (short ? `还没覆盖满${label}，要补齐就点「启动 / 初始化」。` : '')
     : '';
 
   // 设置
@@ -100,18 +104,12 @@ async function act(type, extra) {
   await render();
 }
 
-$('boards').addEventListener('click', (e) => {
-  const d = e.target.closest('[data-days]');
-  if (!d) return;
-  view.days = Number(d.dataset.days);
-  document.querySelectorAll('[data-days]').forEach((n) => n.classList.toggle('on', Number(n.dataset.days) === view.days));
-  render();
-});
+$('window').addEventListener('change', (e) => act('setSettings', { patch: { windowDays: Number(e.target.value) } }));
 $('account').addEventListener('change', (e) => { view.account = e.target.value; render(); });
 $('start').addEventListener('click', () => {
-  const days = Number($('range').value);
+  const days = Number($('window').value);
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速回填最近 ${days} 天别人对你的回复。${again}确定开始？`)) act('startBackfill', { rangeDays: days });
+  if (confirm(`将用你的 X 登录会话，限速回填最近 ${days} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
 });
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));

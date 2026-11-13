@@ -1,6 +1,9 @@
 // 统计层：纯函数，不依赖 X 的接口或页面结构。只统计回复。
 
 export const DAY_MS = 86400000;
+export const WINDOWS = [7, 15]; // 可选的统计窗口（天）
+export const TOP_N = 100; // 榜单和标签最多到第几名
+export const MIN_COUNT = 2; // 窗口内只回复过 1 次的不上榜、不标
 
 /**
  * 只留「我的帖子下」的回复：对话根帖是我的才算，我去别人帖子下评论、对方回我的不算。
@@ -34,22 +37,16 @@ export function aggregate(events, windowDays, now = Date.now()) {
   return byActor;
 }
 
-/** 回复榜。次数相同按最近回复时间排，再按 handle。 */
+/** 回复榜：窗口内回复至少 MIN_COUNT 次的人，最多前 TOP_N 名。次数相同按最近回复时间排，再按 handle。 */
 export function board(events, windowDays, now = Date.now()) {
-  const rows = [...aggregate(events, windowDays, now).values()];
+  const rows = [...aggregate(events, windowDays, now).values()].filter((r) => r.count >= MIN_COUNT);
   rows.sort((a, b) => b.count - a.count || b.last - a.last || a.handle.localeCompare(b.handle));
-  return rows.map((r, i) => ({ rank: i + 1, ...r }));
+  return rows.slice(0, TOP_N).map((r, i) => ({ rank: i + 1, ...r }));
 }
 
-/**
- * 给内联标签用的快照：以 30 天回复榜定排名，附 7 天次数。
- * 返回 { handle小写: { rank, c30, c7, last } }，只含 30 天内回复过的人。
- */
-export function badgeSnapshot(events, now = Date.now()) {
-  const d7 = aggregate(events, 7, now);
+/** 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, last } }。 */
+export function badgeSnapshot(events, windowDays, now = Date.now()) {
   const users = {};
-  for (const r of board(events, 30, now)) {
-    users[r.handle.toLowerCase()] = { rank: r.rank, c30: r.count, c7: d7.get(r.actor_id)?.count || 0, last: r.last };
-  }
+  for (const r of board(events, windowDays, now)) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, last: r.last };
   return users;
 }

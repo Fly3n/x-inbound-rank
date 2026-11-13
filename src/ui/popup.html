@@ -26,10 +26,12 @@
     <nav class="tabs" id="boards">
       <strong>回复榜</strong>
       <span class="spacer"></span>
-      <span class="seg" id="windows">
-        <button data-days="7">7 天</button>
-        <button data-days="30" class="on">30 天</button>
-      </span>
+      <label>统计窗口
+        <select id="window">
+          <option value="7">7 天</option>
+          <option value="15">半个月</option>
+        </select>
+      </label>
     </nav>
     <p class="hint" id="boardHint"></p>
     <ol id="list"></ol>
@@ -37,16 +39,9 @@
     <section class="card">
       <h2>启动 / 初始化</h2>
       <div class="row">
-        <label>回溯范围
-          <select id="range">
-            <option value="7">1 周</option>
-            <option value="15" selected>半个月</option>
-            <option value="30">1 个月</option>
-          </select>
-        </label>
         <button id="start" class="primary">启动 / 初始化</button>
       </div>
-      <p class="hint">限速执行，每小时大约能读 4000 多条提及；期间保持至少一个 x.com 标签页开着。随时可以重新选范围再跑。</p>
+      <p class="hint">按上面的统计窗口往回读（7 天或半个月）。限速执行，每小时大约能读 4000 多条提及，半个月要读的更多、耗时大约翻倍；期间保持至少一个 x.com 标签页开着。每次点都是从最新一条重新往回读，已有的不会重复计数。</p>
       <div id="job" hidden>
         <p id="jobStatus"></p>
         <div class="row">

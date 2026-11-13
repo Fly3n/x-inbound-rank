@@ -12,7 +12,8 @@
   const RESERVED = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'search', 'settings', 'compose', 'hashtag']);
 
   let account = null; // 当前账号（小写 handle）
-  let users = {}; // 快照：handle -> { rank, c30, c7, last }
+  let users = {}; // 快照：handle -> { rank, count, last }
+  let windowDays = 7; // 快照按几天的窗口算的
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
   const send = (msg) =>
@@ -44,7 +45,12 @@
   async function useAccount(next) {
     account = next;
     const key = `snap:${account}`;
-    users = (await chrome.storage.local.get(key))[key]?.users || {};
+    useSnap((await chrome.storage.local.get(key))[key]);
+  }
+
+  function useSnap(snap) {
+    users = snap?.users || {};
+    windowDays = snap?.windowDays || 7;
     rescan();
   }
 
@@ -55,14 +61,10 @@
       if (changes.current.newValue) useAccount(changes.current.newValue);
       else {
         account = null;
-        users = {};
-        rescan();
+        useSnap(null);
       }
     }
-    if (account && changes[`snap:${account}`]) {
-      users = changes[`snap:${account}`].newValue?.users || {};
-      rescan();
-    }
+    if (account && changes[`snap:${account}`]) useSnap(changes[`snap:${account}`].newValue);
   });
 
   // ---------- 代后台抓取 ----------
@@ -88,10 +90,6 @@
     return null;
   }
 
-  function badgeText(u) {
-    return `#${u.rank} · 💬${u.c30}`;
-  }
-
   function mark(nameEl) {
     const handle = handleOf(nameEl);
     const u = handle && users[handle];
@@ -100,7 +98,7 @@
       badge?.remove();
       return;
     }
-    const text = badgeText(u);
+    const text = `#${u.rank}`; // 只显示排名，次数和时间放悬停提示里
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'xir-badge';
@@ -111,7 +109,9 @@
     // X 的列表会复用节点，同一个节点可能换成另一个人，每次都按当前 handle 重写
     if (badge.textContent !== text) badge.textContent = text;
     badge.dataset.handle = handle;
-    badge.classList.toggle('xir-top', u.rank <= 10);
+    // 颜色分三档：前 10 红、11–50 橙、51–100 蓝灰（默认色）
+    badge.classList.toggle('xir-r1', u.rank <= 10);
+    badge.classList.toggle('xir-r2', u.rank > 10 && u.rank <= 50);
   }
 
   let tip;
@@ -120,8 +120,7 @@
     if (!u) return;
     tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
     tip.textContent =
-      `30 天回复我第 ${u.rank} 名\n` +
-      `30 天 ${u.c30} 次 · 7 天 ${u.c7} 次\n` +
+      `最近 ${windowDays} 天回复我第 ${u.rank} 名，共 ${u.count} 次\n` +
       `最近一次：${fmtDate(u.last)}`;
     const r = e.currentTarget.getBoundingClientRect();
     tip.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;

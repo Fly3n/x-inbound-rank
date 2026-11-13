@@ -2,7 +2,7 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, ParseError, idGt } from './x/parser.js';
-import { board, badgeSnapshot, DAY_MS } from './rank.js';
+import { board, badgeSnapshot, DAY_MS, WINDOWS } from './rank.js';
 import { putEvents, getEvents, clearEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
@@ -109,8 +109,8 @@ async function pull(account, cursor) {
 }
 
 async function refreshSnapshot(account) {
-  const users = badgeSnapshot(await getEvents(account));
-  await kvSet(keys.snap(account), { at: now(), users });
+  const { windowDays } = await getSettings(account);
+  await kvSet(keys.snap(account), { at: now(), windowDays, users: badgeSnapshot(await getEvents(account), windowDays) });
 }
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
@@ -126,9 +126,10 @@ async function scheduleJob(job, delayMs) {
   await chrome.alarms.create(JOB_ALARM, { when: job.nextAt });
 }
 
-async function startBackfill(account, rangeDays) {
-  if (![7, 15, 30].includes(rangeDays)) return { error: '范围只能是 7 / 15 / 30 天' };
-  if (!(await getSettings(account)).fetchEnabled) return { error: '后台抓取已关闭，先在设置里打开' };
+async function startBackfill(account) {
+  const settings = await getSettings(account);
+  if (!settings.fetchEnabled) return { error: '后台抓取已关闭，先在设置里打开' };
+  const rangeDays = settings.windowDays; // 回填范围就是统计窗口
   const job = {
     status: 'running',
     rangeDays,
@@ -378,16 +379,19 @@ const handlers = {
       eventCount: (await getEvents(account)).length,
     };
   },
-  async getBoard({ account, windowDays }) {
-    return { rows: board(await getEvents(account), windowDays) };
+  async getBoard({ account }) {
+    const { windowDays } = await getSettings(account);
+    return { windowDays, rows: board(await getEvents(account), windowDays) };
   },
-  startBackfill: ({ account, rangeDays }) => startBackfill(account, rangeDays),
+  startBackfill: ({ account }) => startBackfill(account),
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
     const next = { ...(await getSettings(account)), ...patch };
+    if (!WINDOWS.includes(next.windowDays)) return { error: '统计窗口只能是 7 天或 15 天' };
     await kvSet(keys.settings(account), next);
     if (!next.fetchEnabled) await pauseJob(account, '后台抓取已关闭，任务暂停');
+    if ('windowDays' in patch) await refreshSnapshot(account);
     return { ok: true };
   },
   clearData: async ({ account }) => (await clearData(account), { ok: true }),
