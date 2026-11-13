@@ -11,9 +11,9 @@
   border-radius: 9px;
   font: 700 12px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   white-space: nowrap;
-  /* 默认是 3 档（回复 2–4 次）：蓝灰 */
+  /* 默认是 4 档（回复 2–4 次）：灰 */
   color: #fff;
-  background: #64748b;
+  background: #6b7280;
   cursor: default;
   font-variant-numeric: tabular-nums;
 }
@@ -30,14 +30,19 @@
   margin-right: 6px;
 }
 
-/* 1 档（回复 10 次及以上）：红 */
+/* 1 档（回复 20 次及以上）：红 */
 .xir-badge.xir-t1 {
   background: #e11d48;
 }
 
-/* 2 档（5–9 次）：橙 */
+/* 2 档（10–19 次）：橙 */
 .xir-badge.xir-t2 {
   background: #ea580c;
+}
+
+/* 3 档（5–9 次）：蓝 */
+.xir-badge.xir-t3 {
+  background: #2563eb;
 }
 
 .xir-tip {

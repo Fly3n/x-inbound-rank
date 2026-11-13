@@ -115,9 +115,8 @@
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
     if (count.textContent !== String(u.count)) count.textContent = u.count;
     badge.dataset.handle = handle;
-    // 颜色按回复次数分三档（档位由 rank.js 算好放在快照里）：1 红、2 橙、3 蓝灰（默认色）
-    badge.classList.toggle('xir-t1', u.tier === 1);
-    badge.classList.toggle('xir-t2', u.tier === 2);
+    // 颜色按回复次数分四档（档位由 rank.js 算好放在快照里）：1 红、2 橙、3 蓝、4 灰（默认色）
+    for (const t of [1, 2, 3]) badge.classList.toggle(`xir-t${t}`, u.tier === t);
   }
 
   let tip;

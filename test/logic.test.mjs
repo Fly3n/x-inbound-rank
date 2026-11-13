@@ -28,9 +28,9 @@ test('回复榜：最多前 100 名', () => {
 
 test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], 15, NOW);
-  assert.deepEqual(snap, { a: { rank: 1, count: 2, tier: 3, last: NOW - DAY_MS } });
+  assert.deepEqual(snap, { a: { rank: 1, count: 2, tier: 4, last: NOW - DAY_MS } });
   // 颜色档位按次数，不按名次
-  assert.deepEqual([2, 4, 5, 9, 10, 50].map(tierOf), [3, 3, 2, 2, 1, 1]);
+  assert.deepEqual([2, 4, 5, 9, 10, 19, 20, 50].map(tierOf), [4, 4, 3, 3, 2, 2, 1, 1]);
 });
 
 test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {
