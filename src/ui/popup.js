@@ -86,7 +86,7 @@ async function render() {
   $('start').disabled = !isSession || !s.settings.fetchEnabled;
   $('resume').disabled = !isSession || !s.settings.fetchEnabled;
   $('coverage').textContent = s.cursor.earliestTs
-    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条回复。`
+    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条直接回复（只有你帖子下的上榜）。`
     : '';
 
   // 设置

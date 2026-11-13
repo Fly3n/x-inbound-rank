@@ -2,11 +2,20 @@
 
 export const DAY_MS = 86400000;
 
-/** 按回复者聚合时间窗内的回复。返回 Map<actor_id, row>。 */
+/**
+ * 只留「我的帖子下」的回复：对话根帖是我的才算，我去别人帖子下评论、对方回我的不算。
+ * root_mine 为 null 的（抓取时那一页看不出根帖是谁的），如果同一对话里有别的回复已证明根帖是我的，也算；否则不算。
+ */
+export function underMyPosts(events) {
+  const mine = new Set(events.filter((e) => e.root_mine === true).map((e) => e.conversation_id));
+  return events.filter((e) => e.root_mine === true || (e.root_mine === null && mine.has(e.conversation_id)));
+}
+
+/** 按回复者聚合时间窗内、我帖子下的回复。返回 Map<actor_id, row>。 */
 export function aggregate(events, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
   const byActor = new Map();
-  for (const e of events) {
+  for (const e of underMyPosts(events)) {
     if (e.created_at < since || e.created_at > now) continue;
     let row = byActor.get(e.actor_id);
     if (!row) {

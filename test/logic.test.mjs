@@ -2,12 +2,12 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { board, badgeSnapshot, DAY_MS } from '../src/rank.js';
+import { board, badgeSnapshot, underMyPosts, DAY_MS } from '../src/rank.js';
 import { parseMentions, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
 const ev = (id, actor, daysAgo) => ({
-  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS,
+  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, root_mine: true,
 });
 
 test('回复榜：时间窗、同分按最近回复', () => {
@@ -22,6 +22,17 @@ test('标签快照：按 30 天回复榜定名次，键为小写 handle', () => 
   assert.deepEqual(snap.a, { rank: 1, c30: 2, c7: 1, last: NOW - DAY_MS });
   assert.equal(snap.b.rank, 2);
   assert.equal(snap.c, undefined);
+});
+
+test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {
+  const e = (id, conversation_id, root_mine) => ({ ...ev(id, 'a', 1), conversation_id, root_mine });
+  const kept = underMyPosts([
+    e(1, 'mine', true), // 直接评论我的帖子
+    e(2, 'mine', null), // 同一对话里的深层回复，根帖已被上一条证明是我的
+    e(3, 'theirs', false), // 我在别人帖子下评论，对方回我
+    e(4, 'unknown', null), // 看不出根帖是谁的，也没有旁证
+  ]);
+  assert.deepEqual(kept.map((x) => x.id), ['1', '2']);
 });
 
 const user = (id, screen_name) => ({ id_str: id, screen_name, name: screen_name, profile_image_url_https: `https://pbs.twimg.com/${id}.jpg` });
@@ -47,26 +58,29 @@ test('解析：只收直接回复我的，引用和提及不计', () => {
   const b = body(
     [
       myOld,
-      tweet('200', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100' }), // 回复我
+      tweet('200', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' }), // 评论我的帖子
+      tweet('150', '3', {}), // 别人的帖子
+      tweet('206', '3', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '160', conversation_id_str: '150' }), // 我在别人帖下评论，对方回我
+      tweet('207', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '170', conversation_id_str: '90' }), // 深层回复，根帖 90 不在这一页里
       tweet('201', '2', { is_quote_status: true, quoted_status_id_str: '100' }), // 引用我
       tweet('202', '2', { in_reply_to_user_id_str: '3', in_reply_to_screen_name: 'Other', in_reply_to_status_id_str: '150' }), // 在别人帖下提到我
       tweet('203', '3', {}), // 普通提及
       tweet('204', '1', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100' }), // 我自己接自己的帖
       tweet('205', '3', { is_quote_status: true, quoted_status_id_str: '202' }), // 引用的是别人的帖
     ],
-    ['200', '201', '202', '203', '204', '205'],
+    ['200', '201', '202', '203', '204', '205', '206', '207'],
   );
   const r = parseMentions(b, me);
-  assert.deepEqual(r.events.map((e) => [e.id, e.actor_handle, e.target_post_id]), [['200', 'Fan', '100']]);
+  assert.deepEqual(r.events.map((e) => [e.id, e.actor_handle, e.root_mine]), [['200', 'Fan', true], ['206', 'Other', false], ['207', 'Fan', null]]);
   assert.equal(r.bottomCursor, 'CURSOR');
-  assert.equal(r.newestId, '205');
+  assert.equal(r.newestId, '207');
   // 被引用的旧帖 100 不在时间线条目里，不能把「本页最早时间」拉回到 1 月
   assert.equal(r.oldestId, '200');
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10);
 });
 
 test('解析：只有手填 handle、没有用户 ID 时靠 screen_name 匹配', () => {
-  const b = body([tweet('300', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'ME', in_reply_to_status_id_str: '100' })], ['300']);
+  const b = body([tweet('300', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'ME', in_reply_to_status_id_str: '100', conversation_id_str: '100' })], ['300']);
   assert.equal(parseMentions(b, { handle: 'me', userId: null }).events.length, 1);
 });
 

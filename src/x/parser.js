@@ -77,6 +77,15 @@ export function parseMentions(body, me) {
     // 只收「直接回复我某条帖子/评论」的。引用、普通提及、回复别人时顺带 @ 我的，都不计
     if (!t.in_reply_to_status_id_str || !isMe(t.in_reply_to_user_id_str, t.in_reply_to_screen_name)) continue;
 
+    // 这串对话是不是从我的帖子开始的：只有「我的帖子下」的回复才上榜，
+    // 我去别人帖子下评论、对方回我的不算。conversation_id_str 是对话根帖的 ID。
+    const conv = t.conversation_id_str;
+    if (!conv) throw new ParseError('回复里没有 conversation_id_str，无法判断是不是我帖子下的回复');
+    const root = tweets[conv];
+    let rootMine = null; // null = 这一页里看不出来，留给统计层用已知的根帖归属补判
+    if (conv === t.in_reply_to_status_id_str) rootMine = true; // 直接回的就是根帖，而被回的人是我
+    else if (root) rootMine = isMe(root.user_id_str, users[root.user_id_str]?.screen_name) || false;
+
     events.push({
       id,
       actor_id: t.user_id_str,
@@ -85,6 +94,8 @@ export function parseMentions(body, me) {
       actor_avatar: author.profile_image_url_https || '',
       created_at: ts,
       target_post_id: t.in_reply_to_status_id_str,
+      conversation_id: conv,
+      root_mine: rootMine,
     });
   }
 
