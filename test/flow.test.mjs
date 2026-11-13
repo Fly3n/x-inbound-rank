@@ -85,6 +85,7 @@ const setWindow = (days) => send({ type: 'setSettings', account: 'me', patch: { 
 test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(await send({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
+  assert.deepEqual(store['snap:me'].users, {}, '页面上线时重算快照');
 
   // 回填，默认窗口 7 天：第 1 页
   assert.deepEqual(await send({ type: 'startBackfill', account: 'me' }), { ok: true });
@@ -138,6 +139,11 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(server.calls - before, 3);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
+
+  // 旧版本留下的快照缺字段：页面再上线时重算补齐
+  delete store['snap:me'].users.fan.tier;
+  await send({ type: 'xir:hello', handle: 'Me', userId: '1' });
+  assert.equal(store['snap:me'].users.fan.tier, 2);
 
   // 没到间隔不抓
   before = server.calls;

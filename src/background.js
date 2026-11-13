@@ -354,7 +354,11 @@ const handlers = {
   // 内容脚本
   async 'xir:hello'(msg) {
     const account = await resolveAccount(msg);
-    if (account) wakeJob(true).then(maybeIncremental);
+    if (account) {
+      // 每次有 X 页面上线都重算一次快照：插件更新后旧快照可能缺新字段（实测：缺 tier 时标签全是默认灰色）
+      await refreshSnapshot(account);
+      wakeJob(true).then(maybeIncremental);
+    }
     return { account };
   },
   async 'xir:dom'(msg) {
