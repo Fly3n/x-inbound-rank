@@ -15,13 +15,14 @@ const PACE = {
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
   incPageGapMs: [3_000, 6_000], // 增量：页与页之间的间隔
-  incIntervalMs: 60 * 60_000, // 增量：固定每小时一次
+  incIntervalMs: [50 * 60_000, 70 * 60_000], // 增量：大约每小时一次，每轮结束后在这个范围里随机定下一次，不卡整点
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
 };
 
 const TICK_ALARM = 'tick';
 const JOB_ALARM = 'job';
+const INC_ALARM = 'inc';
 const ACTIVE_JOB = 'activeJobAccount';
 
 const rand = ([a, b]) => a + Math.floor(Math.random() * (b - a));
@@ -115,6 +116,13 @@ async function refreshSnapshot(account) {
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
 
+/** 记下这一轮增量的时间，并随机定好下一次（专门约一个闹钟，不等 30 分钟一次的兜底闹钟）。 */
+async function planNextInc(cur, from) {
+  cur.lastIncrementalAt = from;
+  cur.nextIncAt = from + rand(PACE.incIntervalMs);
+  await chrome.alarms.create(INC_ALARM, { when: Math.max(cur.nextIncAt, now() + 1000) });
+}
+
 // ---------- 回填 ----------
 
 async function saveJob(account, job) {
@@ -158,7 +166,7 @@ async function finishJob(account, job, { reachedEnd }) {
   cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
   // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读回到它为止
   if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
-  cur.lastIncrementalAt = job.startedAt; // 回填期间新来的回复留给下一次增量
+  await planNextInc(cur, job.startedAt); // 回填期间新来的回复留给下一次增量
   await kvSet(keys.cursor(account), cur);
   await refreshSnapshot(account);
 }
@@ -277,7 +285,7 @@ async function maybeIncremental() {
   if (job && ['running', 'waiting_tab'].includes(job.status)) return;
   if (job && job.status === 'paused' && job.auto) return; // 限流退避中
   const t = now();
-  if (t - (cur.lastIncrementalAt || 0) < PACE.incIntervalMs) return;
+  if (t < (cur.nextIncAt || 0)) return;
   if (t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return;
 
   busy = true;
@@ -296,7 +304,7 @@ async function maybeIncremental() {
       c.lastAttemptAt = now();
       await kvSet(keys.cursor(account), c);
       if (res.kind === 'rate') {
-        c.lastIncrementalAt = now(); // 这一轮放弃，等下个周期
+        await planNextInc(c, now()); // 这一轮放弃，等下个周期
         await kvSet(keys.cursor(account), c);
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
         return;
@@ -313,7 +321,7 @@ async function maybeIncremental() {
       cursor = p.bottomCursor;
     }
     const c = await kvGet(keys.cursor(account), {});
-    c.lastIncrementalAt = now();
+    await planNextInc(c, now());
     if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
     await kvSet(keys.cursor(account), c);
   } finally {
@@ -342,6 +350,7 @@ chrome.runtime.onStartup.addListener(ensureTick);
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === JOB_ALARM) return wakeJob(false);
+  if (alarm.name === INC_ALARM) return maybeIncremental();
   if (alarm.name === TICK_ALARM) {
     const account = await kvGet(keys.current);
     if (account) await refreshSnapshot(account); // 时间窗会随时间滑动，定期重算，不发请求

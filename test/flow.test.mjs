@@ -133,12 +133,23 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 增量：间隔里来了 7 条（跨 3 页），一轮读完，读到上次的位置就停
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
-  Object.assign(store['cursor:me'], { lastIncrementalAt: 0, lastAttemptAt: 0 });
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
   await listeners.alarm({ name: 'tick' });
   assert.equal(server.calls - before, 3);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
+  // 下一次随机定在 50–70 分钟后，并约好闹钟
+  const gap = store['cursor:me'].nextIncAt - Date.now();
+  assert.ok(gap > 49 * 60_000 && gap < 70 * 60_000);
+  assert.equal(alarms.inc.when, store['cursor:me'].nextIncAt);
+
+  // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时只读 1 页
+  store['cursor:me'].nextIncAt = 0;
+  store['cursor:me'].lastAttemptAt = 0;
+  before = server.calls;
+  await listeners.alarm({ name: 'inc' });
+  assert.equal(server.calls - before, 1);
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.tier;
@@ -152,7 +163,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 关掉抓取开关：到了间隔也不发请求，初始化也被拒
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
-  Object.assign(store['cursor:me'], { lastIncrementalAt: 0, lastAttemptAt: 0 });
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   await listeners.alarm({ name: 'tick' });
   assert.ok((await send({ type: 'startBackfill', account: 'me' })).error);
   assert.equal(server.calls, before);

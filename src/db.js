@@ -78,7 +78,7 @@ export const keys = {
   current: 'current', // 当前 X 会话登录的 handle
   pendingUserId: 'pendingUserId', // 识别不到 handle 时，等用户手动填
   settings: (a) => `settings:${a}`,
-  cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, lastAttemptAt, lastBackfill }
+  cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill }
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
   alert: (a) => `alert:${a}`, // 最近一次抓取/解析错误
