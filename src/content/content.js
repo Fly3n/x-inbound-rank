@@ -97,7 +97,7 @@
   function mark(nameEl) {
     const handle = handleOf(nameEl);
     const u = handle && users[handle];
-    let badge = nameEl.querySelector(':scope > .xir-badge');
+    let badge = nameEl.querySelector('.xir-badge');
     if (!u) {
       badge?.remove();
       return;
@@ -108,8 +108,12 @@
       badge.innerHTML = `${ICON_RANK}<span class="xir-rank"></span>${ICON_REPLY}<span class="xir-count"></span>`;
       badge.addEventListener('mouseenter', showTip);
       badge.addEventListener('mouseleave', hideTip);
-      nameEl.appendChild(badge);
     }
+    // 标签放进用户名区域的最后一行里（@handle · 时间 那一行），不直接挂在用户名区域下面：
+    // 别的插件（实测 FeedSieve）会把「用户名区域的最后一个子节点」当成那一行，往里塞自己的标记；
+    // 我们要是成了最后一个子节点，它的标记就会塞进我们的标签里，把标签撑长。
+    const host = nameEl.lastElementChild || nameEl;
+    if (badge.parentElement !== host) host.appendChild(badge);
     // X 的列表会复用节点，同一个节点可能换成另一个人，每次都按当前 handle 重写
     const [rank, count] = [badge.children[1], badge.children[3]];
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
