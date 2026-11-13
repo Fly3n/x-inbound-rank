@@ -5,12 +5,13 @@ import { parseMentions, ParseError, idGt } from './x/parser.js';
 import { board, badgeSnapshot, DAY_MS } from './rank.js';
 import { putEvents, getEvents, clearEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
 
-// 【待实测】请求节奏。当前取保守值，实测后按 README「实测结论」第 5 项调整。
+// 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
+// 每小时约 220 页 ≈ 4400 条提及。X 的行为风控不公开，要再调快先小步试。
 const PACE = {
-  pageGapMs: [40_000, 80_000], // 回填：两页之间的随机间隔
-  batchPages: 6, // 回填：每批页数
-  batchRestMs: [10 * 60_000, 20 * 60_000], // 回填：批与批之间的随机休息
-  maxPagesPerRun: 150, // 回填：单次运行的页数上限，到了就暂停等用户确认
+  pageGapMs: [8_000, 15_000], // 回填：两页之间的随机间隔
+  batchPages: 20, // 回填：每批页数
+  batchRestMs: [60_000, 120_000], // 回填：批与批之间的随机休息
+  maxPagesPerRun: 600, // 回填：单次运行的页数上限，到了就暂停等用户确认
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
   incPageGapMs: [5_000, 10_000], // 增量：需要翻第二页时的间隔

@@ -89,7 +89,7 @@ test('后台全流程', async () => {
   assert.deepEqual(await send({ type: 'startBackfill', account: 'me', rangeDays: 7 }), { ok: true });
   await until(() => job().pages === 1 && job().nextAt, '第 1 页');
   assert.equal(job().status, 'running');
-  assert.ok(job().nextAt - Date.now() >= 39_000, '两页之间要等，不连着拉');
+  assert.ok(job().nextAt - Date.now() >= 7_000, '两页之间要等，不连着拉');
 
   // 第 2 次请求被限流：暂停、定好自动恢复时间、不丢进度
   server.fail429Once = true;
