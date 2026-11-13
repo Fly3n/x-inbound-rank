@@ -42,6 +42,8 @@ async function render() {
 
   // 榜单
   const { rows, windowDays } = await call('getBoard', { account: view.account });
+  Object.assign(view, { rows, windowDays });
+  $('export').disabled = !rows.length;
   const label = windowDays === 15 ? '半个月' : `${windowDays} 天`;
   $('window').value = String(windowDays);
   $('boardHint').textContent = `最近${label}回复我 2 次及以上的人，按次数排，最多显示前 100 名（现在 ${rows.length} 人）。时间线上的排名标签也按这个榜。`;
@@ -105,6 +107,22 @@ async function act(type, extra) {
 }
 
 $('window').addEventListener('change', (e) => act('setSettings', { patch: { windowDays: Number(e.target.value) } }));
+// 导出当前榜单为 CSV（带 BOM，Excel 直接打开不乱码）。纯本地生成文件，不发请求。
+$('export').addEventListener('click', () => {
+  const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  const lines = [
+    ['名次', '名字', 'ID', '回复次数', '最近一次回复', '主页'],
+    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, new Date(r.last).toLocaleString('zh-CN', { hour12: false }), `https://x.com/${r.handle}`]),
+  ];
+  const csv = '\ufeff' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
+  const d = new Date();
+  const a = el('a', {
+    href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
+    download: `回复榜_${view.account}_${view.windowDays}天_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
 $('account').addEventListener('change', (e) => { view.account = e.target.value; render(); });
 $('start').addEventListener('click', () => {
   const days = Number($('window').value);
