@@ -49,6 +49,10 @@ export function parseMentions(body, me) {
     if (n.tweet && typeof n.tweet.id === 'string') entryIds.push(n.tweet.id);
     if (n.cursor && n.cursor.cursorType === 'Bottom' && typeof n.cursor.value === 'string') bottomCursor = n.cursor.value;
   });
+  // 返回里明明有帖子，时间线却一条都没引用到：说明条目结构变了，不能当成「列表为空」
+  if (!entryIds.length && Object.keys(tweets).length) {
+    throw new ParseError('返回里有帖子，但时间线条目里找不到对它们的引用');
+  }
 
   const myHandle = me.handle.toLowerCase();
   const isMe = (userId, screenName) =>

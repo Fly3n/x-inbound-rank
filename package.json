@@ -1,0 +1,11 @@
+{
+  "name": "x-inbound-rank",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  }
+}
