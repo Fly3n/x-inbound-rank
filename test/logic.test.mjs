@@ -1,4 +1,4 @@
-// 运行：node --test projects/x-inbound-rank/test
+// 运行：node --test test
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
