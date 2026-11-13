@@ -71,14 +71,14 @@ export async function kvGet(key, fallback = null) {
 export const kvSet = (key, value) => chrome.storage.local.set({ [key]: value });
 export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 
-export const DEFAULT_SETTINGS = { fetchEnabled: true, intervalHours: 2 }; // intervalHours: 2 | 24 | 0(关闭自动增量)
+export const DEFAULT_SETTINGS = { fetchEnabled: true, intervalHours: 1 }; // intervalHours: 1 | 2 | 24 | 0(关闭自动增量)
 
 export const keys = {
   accounts: 'accounts', // { [handle]: { handle, userId, seenAt } }
   current: 'current', // 当前 X 会话登录的 handle
   pendingUserId: 'pendingUserId', // 识别不到 handle 时，等用户手动填
   settings: (a) => `settings:${a}`,
-  cursor: (a) => `cursor:${a}`, // { newestId, earliestTs, lastIncrementalAt, lastBackfill }
+  cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, lastAttemptAt, lastBackfill }
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
   alert: (a) => `alert:${a}`, // 最近一次抓取/解析错误

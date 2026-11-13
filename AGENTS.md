@@ -61,8 +61,8 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `accounts` | `{ [handle小写]: { handle, userId, seenAt } }` |
 | `current` | 当前 X 会话登录的账号 |
 | `pendingUserId` | 识别不到 handle、等用户手填时暂存的用户 ID |
-| `settings:<账号>` | `{ fetchEnabled, intervalHours }`，`intervalHours` 取 2 / 24 / 0（关） |
-| `cursor:<账号>` | `{ newestId, earliestTs, lastIncrementalAt, lastAttemptAt, lastBackfill }` |
+| `settings:<账号>` | `{ fetchEnabled, intervalHours }`，`intervalHours` 取 1（默认）/ 2 / 24 / 0（关） |
+| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, lastAttemptAt, lastBackfill }`。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量只有真正读回到它之后才前移，中途失败则下次重读这一段（靠主键去重），不留缺口 |
 | `job:<账号>` | 回填任务状态，见下 |
 | `snap:<账号>` | 标签快照 `{ at, users: { handle小写: { rank, c30, c7, last } } }` |
 | `alert:<账号>` | 最近一次抓取或解析错误，下次成功后清除 |
@@ -87,7 +87,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | 回填分批 | 每 20 页休息随机 1–2 分钟 | 合计约每小时 220 页 ≈ 4400 条提及；约为硬额度的三成 |
 | 单次页数上限 | 600 页（约 1.2 万条）后暂停等用户确认 | 防止失控 |
 | 限流退避 | 429 → 暂停；等待时间取「接口给的重置时间」和「15 分钟起、逐次翻倍、最长 4 小时」中的较大者；成功一页后退避重置 | |
-| 增量 | 默认每 2 小时，最多 5 页，页间 5–10 秒，两次尝试至少隔 10 分钟 | 正常一页即停 |
+| 增量 | 默认每小时（可选 2 小时 / 每天 / 关），从最新读回到上次的接续点为止，页间 3–6 秒，单次最多 40 页（约 800 条），两次尝试至少隔 10 分钟 | 间隔里来多少读多少；40 页上限是为了不超过 Service Worker 单次事件约 5 分钟的时限 |
 | 增量被限流 | 放弃本轮，等下个周期 | |
 | 并发 | 全局 `busy` 锁，同一时刻只有一个抓取动作 | |
 | 首次抓取 | 必须用户手动点「启动 / 初始化」；没初始化过的账号不自动抓 | |

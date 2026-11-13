@@ -14,8 +14,8 @@ const PACE = {
   maxPagesPerRun: 600, // 回填：单次运行的页数上限，到了就暂停等用户确认
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
-  incPageGapMs: [5_000, 10_000], // 增量：需要翻第二页时的间隔
-  incMaxPages: 5, // 增量：单次最多页数
+  incPageGapMs: [3_000, 6_000], // 增量：页与页之间的间隔
+  incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
 };
 
@@ -154,7 +154,9 @@ async function finishJob(account, job, { reachedEnd }) {
   await saveJob(account, job);
   const cur = await kvGet(keys.cursor(account), {});
   cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
-  cur.lastIncrementalAt = job.startedAt; // 回填期间新来的互动留给下一次增量
+  // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读回到它为止
+  if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
+  cur.lastIncrementalAt = job.startedAt; // 回填期间新来的回复留给下一次增量
   await kvSet(keys.cursor(account), cur);
   await refreshSnapshot(account);
 }
@@ -186,6 +188,7 @@ async function stepBackfill() {
       await setAlert(account, res.message);
     } else {
       const p = res.parsed;
+      if (job.pages === 0) job.topId = p.newestId; // 本次回填的起点，完成后作为增量的接续点
       job.pages++;
       job.batchPages++;
       job.added += res.added;
@@ -267,7 +270,7 @@ async function maybeIncremental() {
   const settings = await getSettings(account);
   if (!settings.fetchEnabled || !settings.intervalHours) return;
   const cur = await kvGet(keys.cursor(account), {});
-  if (!cur.newestId) return; // 还没初始化过，不自动抓
+  if (!cur.syncedId) return; // 还没完成过初始化，不自动抓
   const job = await kvGet(keys.job(account));
   if (job && ['running', 'waiting_tab'].includes(job.status)) return;
   if (job && job.status === 'paused' && job.auto) return; // 限流退避中
@@ -277,9 +280,12 @@ async function maybeIncremental() {
 
   busy = true;
   try {
-    const stopAt = cur.newestId;
+    // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少页。
+    // 接续点只在真正读到它之后才前移；中途失败下次从头重读这一段，靠主键去重，不留缺口。
+    const stopAt = cur.syncedId;
     let cursor = null;
     let reached = false;
+    let topId = null;
     for (let page = 0; page < PACE.incMaxPages; page++) {
       if (page) await sleep(rand(PACE.incPageGapMs));
       const res = await pull(account, cursor);
@@ -298,6 +304,7 @@ async function maybeIncremental() {
         return;
       }
       const p = res.parsed;
+      if (page === 0) topId = p.newestId;
       if (!p.entryIds.length || !idGt(p.oldestId, stopAt) || !p.bottomCursor) {
         reached = true;
         break;
@@ -306,9 +313,10 @@ async function maybeIncremental() {
     }
     const c = await kvGet(keys.cursor(account), {});
     c.lastIncrementalAt = now();
+    if (reached && topId && idGt(topId, c.syncedId)) c.syncedId = topId;
     await kvSet(keys.cursor(account), c);
     if (!reached) {
-      await setAlert(account, `两次增量之间的新互动超过 ${PACE.incMaxPages} 页，中间可能有缺口。可点「启动 / 初始化」补齐`);
+      await setAlert(account, `这一轮增量读了 ${PACE.incMaxPages} 页还没接上次的位置，新回复太多。本轮读到的已入库，没读到的那段请点「启动 / 初始化」补齐`);
     }
   } finally {
     busy = false;

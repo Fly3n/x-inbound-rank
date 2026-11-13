@@ -81,7 +81,7 @@ async function fireJob() {
 const count = async () => (await send({ type: 'getAccountState', account: 'me' })).eventCount;
 const boardRows = async (days) => (await send({ type: 'getBoard', account: 'me', windowDays: days })).rows;
 
-test('后台全流程', async () => {
+test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(await send({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
 
@@ -120,14 +120,14 @@ test('后台全流程', async () => {
   assert.equal(await count(), 8);
   assert.deepEqual((await boardRows(30)).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
-  // 增量：来了 1 条新的，只请求 1 页
-  feed.unshift({ ...mention(0, '2', '50', '50'), id_str: '2000' });
+  // 增量：间隔里来了 7 条（跨 3 页），一轮读完，读到上次的位置就停
+  for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { lastIncrementalAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
   await listeners.alarm({ name: 'tick' });
-  assert.equal(server.calls - before, 1);
-  assert.equal(await count(), 9);
-  assert.equal(store['cursor:me'].newestId, '2000');
+  assert.equal(server.calls - before, 3);
+  assert.equal(await count(), 15);
+  assert.equal(store['cursor:me'].syncedId, '2006');
 
   // 没到间隔不抓
   before = server.calls;
