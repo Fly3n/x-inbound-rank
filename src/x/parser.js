@@ -33,10 +33,12 @@ function walk(node, visit) {
  * }}
  */
 export function parseMentions(body, me) {
-  const tweets = body?.globalObjects?.tweets;
-  const users = body?.globalObjects?.users;
+  const go = body?.globalObjects;
   const instructions = body?.timeline?.instructions;
-  if (!tweets || !users || !Array.isArray(instructions)) {
+  // 实测：列表为空时 globalObjects 是 {}，没有 tweets / users 这两个键
+  const tweets = go?.tweets || {};
+  const users = go?.users || {};
+  if (!go || typeof go !== 'object' || !Array.isArray(instructions)) {
     throw new ParseError('返回结构不是预期的 globalObjects + timeline.instructions');
   }
 

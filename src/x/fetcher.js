@@ -2,8 +2,9 @@
 // 只负责「用当前已登录的网页会话读一页提及列表」，返回原始 JSON；不解析、不存储、不做任何写操作。
 // X 改接口时只改这个文件和 parser.js。
 //
-// 【待实测】下面的接口路径、参数、请求头按 X 网页版已知形态写成，尚未在真实会话上验证，
-// 结论见 README「实测结论」。
+// 实测（2026-11-13，小号）：这个旧版 REST 接口用下面的请求头能返回 200，不需要 x-client-transaction-id；
+// 限流额度 180 次 / 15 分钟。网页版自己已改用 GraphQL 的 NotificationsTimeline，本接口随时可能下线。
+// 带真实回复数据的字段尚未验证，见 README「实测结论」。
 
 // eslint-disable-next-line no-unused-vars
 const XIRFetcher = (() => {

@@ -88,4 +88,7 @@ test('解析：结构不对就报错，不返回空结果', () => {
   assert.throws(() => parseMentions({ data: {} }, me), ParseError);
   assert.throws(() => parseMentions(body([], ['999']), me), ParseError);
   assert.equal(parseMentions(body([], [], null), me).bottomCursor, null); // 空列表是合法的「到底了」
+  // 实测到的空账号返回：globalObjects 是 {}，时间线里只有一个 Top 游标
+  const empty = { globalObjects: {}, timeline: { id: 'x', instructions: [{ clearCache: {} }, { addEntries: { entries: [{ entryId: 'cursor-top-1', content: { operation: { cursor: { value: 'T', cursorType: 'Top' } } } }] } }] } };
+  assert.deepEqual(parseMentions(empty, me), { events: [], entryIds: [], newestId: null, oldestId: null, oldestTs: null, bottomCursor: null });
 });
