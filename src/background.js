@@ -80,6 +80,22 @@ async function fetchViaTab(req) {
   return { ok: false, error: 'no_tab' };
 }
 
+/** 问一圈开着的 X 页面：有没有连着插件的、是哪一版、见过哪些接口请求。没有连着的返回 null。 */
+async function pingPages() {
+  const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
+  const seen = [];
+  for (const tab of tabs) {
+    try {
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:ping' });
+      if (r?.ok) seen.push(r);
+    } catch {
+      // 这个标签页没有（当前版本的）内容脚本
+    }
+  }
+  if (!seen.length) return null;
+  return { versions: [...new Set(seen.map((r) => r.version).filter(Boolean))], ops: [...new Set(seen.flatMap((r) => r.ops || []))] };
+}
+
 /** 抓一页并入库。返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'error',message} */
 async function pull(account, cursor) {
   if (!(await getSettings(account)).fetchEnabled) return { kind: 'error', message: '后台抓取已关闭' };
@@ -497,7 +513,7 @@ const handlers = {
     return { account };
   },
   async 'xir:tpl'({ url }) {
-    if (typeof url !== 'string' || url.length > 8000) return {};
+    if (typeof url !== 'string' || url.length > 30000) return {};
     await kvSet(keys.tpl, { url, at: now() });
     // 之前因为没有模板没读成的，现在马上补读
     const account = await kvGet(keys.current);
@@ -521,7 +537,7 @@ const handlers = {
   async getState() {
     const accounts = await kvGet(keys.accounts, {});
     const current = await kvGet(keys.current);
-    const state = { accounts, current, pendingUserId: await kvGet(keys.pendingUserId), domWarning: await kvGet(keys.domWarning) };
+    const state = { accounts, current, pendingUserId: await kvGet(keys.pendingUserId), domWarning: await kvGet(keys.domWarning), page: await pingPages() };
     return state;
   },
   async getAccountState({ account }) {
@@ -550,7 +566,13 @@ const handlers = {
     // 点了一定要有回应：读不了的原因当场说，能读的在设置页「我回别人」那一行显示进度
     if (!(await kvGet(keys.tpl))) {
       await saveOut(account, { status: 'need_tpl', message: NEED_TPL });
-      return { error: `现在还读不了：插件还没看到 X 是怎么读「回复」列表的。\n${NEED_TPL}（在 x.com 点自己的头像进主页，再点「回复」），然后回来再点「初始化」。` };
+      const page = await pingPages();
+      if (!page) return { error: '开着的 x.com 页面没有连上插件（插件刷新或更新后，x.com 页面也要刷新一次）。\n请刷新 x.com 页面，再打开自己主页的「回复」栏，然后回来点「初始化」。' };
+      return {
+        error:
+          `现在还读不了：插件还没看到 X 是怎么读「回复」列表的。\n${NEED_TPL}（在 x.com 点自己的头像进主页，再点「回复」；已经在那一栏的话刷新一下页面），然后回来再点「初始化」。` +
+          (page.ops.length ? `\n\n如果已经这样做过还是不行，把下面这行发给维护者：\n页面见过的请求：${page.ops.join('、')}` : ''),
+      };
     }
     if (busy) {
       await saveOut(account, { fullFor: 0, resume: null });

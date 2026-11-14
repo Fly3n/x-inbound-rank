@@ -75,6 +75,11 @@
   // ---------- 代后台抓取 ----------
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    // 后台问：这个页面连着插件吗、是哪一版、见过哪些接口请求（认不出「回复」列表时拿来诊断）
+    if (msg?.type === 'xir:ping') {
+      sendResponse({ ok: true, version: chrome.runtime.getManifest().version, ops: [...XIRRel.ops] });
+      return false;
+    }
     if (msg?.type !== 'xir:fetch') return false;
     (msg.kind === 'out' ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor) : XIRFetcher.fetchMentions(msg.cursor)).then(sendResponse);
     return true;
@@ -96,9 +101,8 @@
     send({ type: 'xir:tpl', url });
   }
   // tap.js 也会把它看到的这个请求地址报过来
-  window.addEventListener('message', (e) => {
-    if (e.source === window && e.origin === location.origin && typeof e.data?.xirTpl === 'string') noteTpl(e.data.xirTpl);
-  });
+  XIRRel.onTpl = noteTpl;
+  if (XIRRel.tpl) noteTpl(XIRRel.tpl); // 这个脚本就绪之前页面已经发过的
   try {
     new PerformanceObserver((list) => list.getEntries().forEach((e) => noteTpl(e.name))).observe({ type: 'resource', buffered: true });
   } catch {

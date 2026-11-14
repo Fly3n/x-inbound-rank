@@ -3,10 +3,16 @@
 // 不发任何请求，不改请求，也不改返回给页面的内容。出任何错都吞掉，不能影响 X 页面本身。
 (() => {
   const API = /\/i\/api\/(graphql|2)\//;
-  const REPLIES = /\/i\/api\/graphql\/[\w-]+\/UserTweetsAndReplies\?/; // 我自己主页「回复」栏的列表
-  const note = (url) => {
+  // 每个接口请求报一下名字（诊断用：插件认不出「回复」列表时，能看到页面实际发的是哪些请求）；
+  // 名字像「回复」列表的（User…Replies…），把完整地址也报上去，插件照着它读我自己的回复
+  const OP = /\/i\/api\/graphql\/[\w-]+\/(\w+)/;
+  const note = (url, method) => {
     try {
-      if (REPLIES.test(url)) window.postMessage({ xirTpl: new URL(url, location.href).href }, location.origin);
+      const op = url.match(OP)?.[1];
+      if (!op) return;
+      const msg = { xirOp: `${op}${String(method || 'GET').toUpperCase() === 'GET' ? '' : '(POST)'}` };
+      if (/^User\w*Replies/.test(op)) msg.xirTpl = new URL(url, location.href).href;
+      window.postMessage(msg, location.origin);
     } catch {
       // 忽略
     }
@@ -24,7 +30,7 @@
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     try {
-      note(String(url));
+      note(String(url), method);
       if (API.test(String(url))) {
         this.addEventListener('load', () => {
           try {
@@ -42,11 +48,11 @@
   };
 
   const origFetch = window.fetch;
-  window.fetch = function (input) {
+  window.fetch = function (input, init) {
     const p = origFetch.apply(this, arguments);
     try {
       const url = typeof input === 'string' ? input : input?.url;
-      note(String(url));
+      note(String(url), init?.method || input?.method);
       if (API.test(String(url))) {
         p.then((res) => res.clone().text().then(post)).catch(() => {});
       }

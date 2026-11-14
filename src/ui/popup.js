@@ -156,6 +156,9 @@ async function render() {
   if (!view.account || !g.accounts[view.account]) view.account = g.current || handles[0] || null;
 
   const items = [];
+  // 插件刷新或更新后，之前打开的 x.com 页面里还是旧脚本，连不上后台：读取和新功能都不生效，要刷新页面
+  const ver = chrome.runtime.getManifest().version;
+  if (g.current && (!g.page || (g.page.versions.length && !g.page.versions.includes(ver)))) items.push(['warn', '开着的 x.com 页面还没连上这一版插件：请刷新 x.com 页面（没开就打开一个）。']);
   if (g.domWarning) items.push(['warn', 'X 页面结构可能变了：时间线里找不到用户名位置，内联标签暂时无法显示，需要更新插件。']);
 
   $('bind').hidden = !!g.current;
@@ -190,7 +193,7 @@ async function render() {
   const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
   $('outStatus').textContent =
     (running ? `正在读取：已读 ${running.pages} 页…` : '') +
-    (s.tplAt ? '' : '还没看到 X 的「回复」列表请求：先在 X 上打开自己主页的「回复」栏一次。') +
+    (s.tplAt ? '' : `还没看到 X 的「回复」列表请求：先在 X 上打开自己主页的「回复」栏一次${g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}。`) +
     span(s.db.out) +
     (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
     (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +

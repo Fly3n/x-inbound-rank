@@ -99,7 +99,8 @@ const XIRFetcher = (() => {
   // ---- 我自己的回复列表（个人主页「回复」栏背后的 GraphQL 接口）----
   // 这个接口的查询 ID 和一长串 features 参数随 X 发版变化，不写死：
   // 内容脚本记下 X 页面自己发过的那条请求地址（模板），这里只把其中的 userId、count、cursor 换掉再发。
-  const REPLIES_RE = /\/i\/api\/graphql\/[\w-]+\/UserTweetsAndReplies\?/;
+  // 名字按经验是 UserTweetsAndReplies；X 改过名也认，只要是 User 开头、带 Replies 的
+  const REPLIES_RE = /\/i\/api\/graphql\/[\w-]+\/User\w*Replies\w*\?/;
 
   /** 读一页「我的帖子和回复」。tpl 是 X 页面自己发过的请求地址。【待实测】 */
   function fetchMyReplies(tpl, cursor) {
