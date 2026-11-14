@@ -29,7 +29,7 @@ const feed = [
   mention(12, '2', '52', '52'), mention(14, '2', '53', '53'),
 ];
 const otherRoot = { id_str: '60', user_id_str: '3', created_at: new Date(Date.now() - 3 * DAY).toUTCString() };
-const server = { calls: 0, fail429Once: false, outCalls: 0, outUrls: [] };
+const server = { calls: 0, fail429Once: false, outCalls: 0, outUrls: [], opened: [], closed: [], tplOnOpen: null };
 
 // ---- 假的「我的回复」列表（GraphQL 形态），每页 2 条，按时间倒序 ----
 const mine = (id, daysAgo, rootUid) => ({
@@ -79,7 +79,16 @@ globalThis.chrome = {
     onAlarm: hook('alarm'),
   },
   runtime: { onInstalled: hook('installed'), onStartup: hook('startup'), onMessage: hook('message') },
-  tabs: { query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : respond(msg.cursor)) },
+  tabs: {
+    // 后台自己开「回复」栏取请求地址：server.tplOnOpen 有值时，开出来的页面会报上这条地址；没值就当开不了
+    create: async ({ url }) => {
+      server.opened.push(url);
+      if (!server.tplOnOpen) throw new Error('no window');
+      await listeners.message({ type: 'xir:tpl', url: server.tplOnOpen }, {}, () => {});
+      return { id: 9 };
+    },
+    remove: async (id) => void server.closed.push(id),
+    query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : respond(msg.cursor)) },
 };
 
 await import('../src/background.js');
@@ -138,6 +147,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await listeners.alarm({ name: 'out' });
   assert.equal(store['cursor:me'].out.status, 'need_tpl');
   assert.equal(server.outCalls, 0);
+  assert.deepEqual(server.opened, ['https://x.com/Me/with_replies'], '没有请求地址时自己去开「回复」栏取');
+  await listeners.alarm({ name: 'out' });
+  assert.equal(server.opened.length, 1, '自动读没取到，短时间内不反复开标签页');
   assert.equal((await boardRows())[0].replied, 0);
   // 页面上出现了那条请求：记下地址，马上补读。7 天窗口读到 9 天前那条为止（2 页）
   delete alarms.out;
@@ -185,7 +197,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   for (let i = 0; i < 10 && !redone(); i++) await until(redone, '手动初始化我回别人').catch(() => {});
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual([server.outCalls - outBefore, store['cursor:me'].out.fullFor], [3, 15], '手动初始化我回别人');
-  // X 换了接口参数（404）：丢掉旧地址，提示再打开一次回复栏
+  // X 换了接口参数（404）：丢掉旧地址，约好下一轮；下一轮自己开「回复」栏取到新地址，接着读，取完把标签页关掉
   const realSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async () => ({ ok: false, status: 404, userId: '1' });
   await listeners.alarm({ name: 'out' });
@@ -193,7 +205,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store['cursor:me'].out.status, 'need_tpl');
   assert.equal(store['tpl:replies'], undefined);
   assert.equal((await boardRows())[0].replied, 4, '已有的数还在');
-  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
+  assert.ok(alarms.out, '约好下一轮');
+  delete store.tplTry;
+  delete alarms.out;
+  server.tplOnOpen = 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D';
+  await listeners.alarm({ name: 'out' });
+  assert.deepEqual([store['cursor:me'].out.status, server.closed, server.outUrls.at(-1).includes('QID2'), alarms.out], ['ok', [9], true, undefined]);
 
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
   await send({ type: 'startBackfill', account: 'me' });

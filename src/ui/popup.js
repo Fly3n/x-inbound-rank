@@ -193,12 +193,12 @@ async function render() {
   const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
   $('outStatus').textContent =
     (running ? `正在读取：已读 ${running.pages} 页…` : '') +
-    (s.tplAt ? '' : `还没看到 X 的「回复」列表请求：先在 X 上打开自己主页的「回复」栏一次${g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}。`) +
+    (running && !s.tplAt ? '（第一次读：正在后台开一个标签页看 X 怎么读这个列表，几秒后自动关掉）' : '') +
     span(s.db.out) +
     (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
     (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +
     (out?.resume ? '还在继续往回读…' : '') +
-    (outBad ? `${outBad}。` : '') +
+    (outBad ? `${outBad}。${out.status === 'need_tpl' && g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}` : '') +
     (!out ? '「别人回我」初始化完成后一两分钟会自动开始，也可以直接点「初始化」。' : '') +
     (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
   $('outLine').hidden = !(outBad && s.eventCount);

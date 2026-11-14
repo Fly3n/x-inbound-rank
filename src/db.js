@@ -105,6 +105,7 @@ export const keys = {
   settings: (a) => `settings:${a}`,
   cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt, out }
   tpl: 'tpl:replies', // { url, at }：X 页面自己读「回复」栏时的请求地址，读我的回复列表时照着它发
+  tplTry: 'tplTry', // 最近一次自己去取上面这个地址的时间（自动读的时候隔一阵才再试）
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
   alert: (a) => `alert:${a}`, // 最近一次抓取/解析错误

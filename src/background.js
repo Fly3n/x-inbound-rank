@@ -21,6 +21,8 @@ const PACE = {
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
   outMaxPages: 40, // 我的回复：单次（一个闹钟事件里）最多页数
   outMaxRounds: 10, // 我的回复：一次完整读最多接着读几轮（共约 8000 条帖子），再多就到此为止
+  tplWaitMs: 25_000, // 我的回复：自己开标签页取请求地址时，最多等这么久
+  tplRetryMs: 6 * 60 * 60_000, // 我的回复：自动读的时候没取到，隔这么久才再开一次标签页；手动点「初始化」不受限
 };
 
 // 本地只留最近这么多天的回复：最长的统计范围是 30 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
@@ -363,6 +365,31 @@ async function maybeIncremental() {
 
 const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
 
+/**
+ * 读「回复」列表要照着 X 页面自己发的那条请求（查询 ID 和参数随 X 发版变，不能写死）。
+ * 手里没有的时候自己去取：在后台开一个标签页到我主页的「回复」栏，X 页面会发那条请求，
+ * 那个页面里的内容脚本记下地址（xir:tpl）后，把这个标签页关掉。用户不用做任何事。
+ * force：手动点的，不受重试间隔限制。取不到返回 null。
+ */
+async function grabTpl(me, force) {
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(me.handle || '')) return null;
+  if (!force && now() - (await kvGet(keys.tplTry, 0)) < PACE.tplRetryMs) return null;
+  await kvSet(keys.tplTry, now());
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: `https://x.com/${me.handle}/with_replies`, active: false });
+    for (const until = now() + PACE.tplWaitMs; now() < until; await sleep(500)) {
+      const tpl = await kvGet(keys.tpl);
+      if (tpl) return tpl;
+    }
+  } catch {
+    // 开不了标签页就当没取到
+  } finally {
+    if (tab?.id != null) await chrome.tabs.remove(tab.id).catch(() => {});
+  }
+  return null;
+}
+
 // 先读后写，所以排队一个一个来：两次保存交叠的话，后写的会把先写的那几项盖掉
 let outQueue = Promise.resolve();
 function saveOut(account, patch) {
@@ -385,8 +412,6 @@ async function syncOut(force = false) {
   const cur = await kvGet(keys.cursor(account), {});
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return;
-  const tpl = await kvGet(keys.tpl);
-  if (!tpl) return saveOut(account, { status: 'need_tpl', message: NEED_TPL });
 
   const targetTs = now() - settings.windowDays * DAY_MS;
   const prev = cur.out || {};
@@ -399,6 +424,8 @@ async function syncOut(force = false) {
   try {
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     await saveOut(account, { running: { at: now(), pages: 0 } });
+    const tpl = (await kvGet(keys.tpl)) || (await grabTpl(me, force));
+    if (!tpl) return saveOut(account, { status: 'need_tpl', message: `没能自动取到 X 读「回复」列表的方式。${NEED_TPL}（x.com/${me.handle}/with_replies），插件看到后会自己开始读` });
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let reachedTs = null;
@@ -412,8 +439,9 @@ async function syncOut(force = false) {
       if (r.userId && me.userId && r.userId !== me.userId) return force && saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
       if (r.status === 429) return saveOut(account, { status: 'error', message: '被 X 限流（429），下一轮再读' });
       if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
-        await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数），等页面再发一次新的
-        return saveOut(account, { status: 'need_tpl', message: `X 的回复列表接口参数变了（${r.status || '模板无效'}），${NEED_TPL}` });
+        await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
+        await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+        return saveOut(account, { status: 'need_tpl', message: `X 的回复列表接口参数变了（${r.status || '模板无效'}），一两分钟后自动重新取一次再读` });
       }
       if (!r.ok) return saveOut(account, { status: 'error', message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
 
@@ -518,7 +546,7 @@ const handlers = {
     // 之前因为没有模板没读成的，现在马上补读
     const account = await kvGet(keys.current);
     const out = account && (await kvGet(keys.cursor(account), {})).out;
-    if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 });
+    if (out?.status === 'need_tpl' && !busy) await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 }); // busy：正在读的那一轮自己会用上
     return {};
   },
   // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
@@ -563,17 +591,7 @@ const handlers = {
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
     if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
-    // 点了一定要有回应：读不了的原因当场说，能读的在设置页「我回别人」那一行显示进度
-    if (!(await kvGet(keys.tpl))) {
-      await saveOut(account, { status: 'need_tpl', message: NEED_TPL });
-      const page = await pingPages();
-      if (!page) return { error: '开着的 x.com 页面没有连上插件（插件刷新或更新后，x.com 页面也要刷新一次）。\n请刷新 x.com 页面，再打开自己主页的「回复」栏，然后回来点「初始化」。' };
-      return {
-        error:
-          `现在还读不了：插件还没看到 X 是怎么读「回复」列表的。\n${NEED_TPL}（在 x.com 点自己的头像进主页，再点「回复」；已经在那一栏的话刷新一下页面），然后回来再点「初始化」。` +
-          (page.ops.length ? `\n\n如果已经这样做过还是不行，把下面这行发给维护者：\n页面见过的请求：${page.ops.join('、')}` : ''),
-      };
-    }
+    // 点了一定要有回应：进度和读不了的原因都显示在设置页「我回别人」那一行
     if (busy) {
       await saveOut(account, { fullFor: 0, resume: null });
       await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
