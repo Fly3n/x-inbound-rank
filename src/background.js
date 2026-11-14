@@ -2,7 +2,7 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, ParseError, idGt } from './x/parser.js';
-import { board, badgeSnapshot, DAY_MS, WINDOWS } from './rank.js';
+import { ranking, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
 import { putEvents, getEvents, clearEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
@@ -110,8 +110,8 @@ async function pull(account, cursor) {
 }
 
 async function refreshSnapshot(account) {
-  const { windowDays } = await getSettings(account);
-  await kvSet(keys.snap(account), { at: now(), windowDays, users: badgeSnapshot(await getEvents(account), windowDays) });
+  const rules = await getSettings(account);
+  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, users: badgeSnapshot(await getEvents(account), rules) });
 }
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
@@ -393,18 +393,18 @@ const handlers = {
     };
   },
   async getBoard({ account }) {
-    const { windowDays } = await getSettings(account);
-    return { windowDays, rows: board(await getEvents(account), windowDays) };
+    return ranking(await getEvents(account), await getSettings(account)); // { rows, people, replies }
   },
   startBackfill: ({ account }) => startBackfill(account),
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
-    const next = { ...(await getSettings(account)), ...patch };
-    if (!WINDOWS.includes(next.windowDays)) return { error: '统计窗口只能是 7 天或 15 天' };
+    if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '统计窗口只能是 7 天或 15 天' };
+    const merged = { ...(await getSettings(account)), ...patch };
+    const next = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) }; // 其余越界的值夹回范围
     await kvSet(keys.settings(account), next);
     if (!next.fetchEnabled) await pauseJob(account, '后台抓取已关闭，任务暂停');
-    if ('windowDays' in patch) await refreshSnapshot(account);
+    await refreshSnapshot(account); // 口径或颜色变了，标签立刻跟着变
     return { ok: true };
   },
   clearData: async ({ account }) => (await clearData(account), { ok: true }),

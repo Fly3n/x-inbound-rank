@@ -111,7 +111,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 榜单：Other 那条是我去别人帖子下评论后的回复，不上榜
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
-  assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, tier: 4, last: store['snap:me'].users.fan.last });
+  assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, color: 'gray', last: store['snap:me'].users.fan.last });
 
   // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
   assert.ok((await setWindow(30)).error, '只接受 7 或 15');
@@ -120,6 +120,19 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 5]]);
   assert.equal(store['snap:me'].windowDays, 15);
   assert.equal(store['snap:me'].users.fan.count, 5);
+
+  // 改口径和颜色：榜单和标签立刻跟着变；越界的值夹回范围
+  const set = (patch) => send({ type: 'setSettings', account: 'me', patch });
+  await set({ minCount: 6 });
+  assert.deepEqual(await boardRows(), []);
+  assert.deepEqual(store['snap:me'].users, {});
+  await set({ minCount: 2, topN: 9999, tiers: [{ min: 5, color: 'green' }], baseColor: 'purple' });
+  assert.equal(store['settings:me'].topN, 500);
+  assert.equal(store['snap:me'].users.fan.color, 'green');
+  const full = await send({ type: 'getBoard', account: 'me' });
+  assert.deepEqual([full.people, full.replies], [1, 5]);
+  await set({ topN: 100, tiers: [{ min: 20, color: 'red' }, { min: 10, color: 'orange' }, { min: 5, color: 'blue' }], baseColor: 'gray' });
+  assert.equal(server.calls, 3, '改设置不发请求');
 
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
   await send({ type: 'startBackfill', account: 'me' });
@@ -152,9 +165,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(server.calls - before, 1);
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
-  delete store['snap:me'].users.fan.tier;
+  delete store['snap:me'].users.fan.color;
   await send({ type: 'xir:hello', handle: 'Me', userId: '1' });
-  assert.equal(store['snap:me'].users.fan.tier, 2);
+  assert.equal(store['snap:me'].users.fan.color, 'orange');
 
   // 没到间隔不抓
   before = server.calls;

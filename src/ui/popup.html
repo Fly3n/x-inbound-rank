@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <title>X 入站互动排行</title>
+  <!-- 标签的调色板和时间线上用的是同一份 -->
+  <link rel="stylesheet" href="../content/badge.css">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -23,44 +25,75 @@
   </section>
 
   <main id="main" hidden>
-    <nav class="tabs" id="boards">
-      <strong>回复榜</strong>
-      <span class="spacer"></span>
-      <label>统计窗口
-        <select id="window">
-          <option value="7">7 天</option>
-          <option value="15">半个月</option>
-        </select>
-      </label>
-      <button id="export" title="把当前榜单导出成 CSV 表格">导出</button>
+    <nav class="tabs" id="tabs">
+      <button data-tab="board">榜单</button>
+      <button data-tab="settings">设置</button>
     </nav>
-    <p class="hint" id="boardHint"></p>
-    <ol id="list"></ol>
 
-    <section class="card">
-      <h2>启动 / 初始化</h2>
-      <div class="row">
-        <button id="start" class="primary">启动 / 初始化</button>
+    <!-- 榜单页 -->
+    <section id="view-board">
+      <div class="row toolbar">
+        <select id="window" title="统计窗口">
+          <option value="7">最近 7 天</option>
+          <option value="15">最近半个月</option>
+        </select>
+        <input id="search" type="search" placeholder="搜名字或 @ID">
+        <button id="export" title="把当前榜单导出成 CSV 表格">导出</button>
       </div>
-      <p class="hint">按上面的统计窗口往回读（7 天或半个月）。限速执行，每小时大约能读 4000 多条提及，半个月要读的更多、耗时大约翻倍；期间保持至少一个 x.com 标签页开着。每次点都是从最新一条重新往回读，已有的不会重复计数。</p>
-      <div id="job" hidden>
-        <p id="jobStatus"></p>
+      <p class="hint" id="boardHint"></p>
+      <p class="hint" id="jobLine" hidden></p>
+      <ol id="list"></ol>
+    </section>
+
+    <!-- 设置页 -->
+    <section id="view-settings" hidden>
+      <section class="card">
+        <h2>数据</h2>
         <div class="row">
+          <button id="start" class="primary">启动 / 初始化</button>
           <button id="pause" hidden>暂停</button>
           <button id="resume" hidden>继续</button>
         </div>
+        <p class="hint">按榜单页选的统计窗口往回读（7 天或半个月）。限速执行，每小时大约能读 4000 多条提及，半个月要读的更多、耗时大约翻倍；期间保持至少一个 x.com 标签页开着。每次点都是从最新一条重新往回读，已有的不会重复计数。</p>
+        <p id="jobStatus" hidden></p>
+        <p class="hint" id="coverage"></p>
+        <label class="line"><input type="checkbox" id="fetchEnabled"> 后台抓取：大约每小时自动读一次新回复（关闭后只展示本地已有数据，不再发任何请求）</label>
+        <p class="hint" id="lastInc"></p>
+      </section>
+
+      <section class="card">
+        <h2>榜单口径</h2>
+        <div class="row field">
+          <span>最多到第</span>
+          <span class="stepper" data-key="topN"><button data-dir="-1">−</button><input type="number" id="topN" min="10" max="500"><button data-dir="1">+</button></span>
+          <span>名</span>
+        </div>
+        <div class="row field">
+          <span>至少回复</span>
+          <span class="stepper" data-key="minCount"><button data-dir="-1">−</button><input type="number" id="minCount" min="1" max="99"><button data-dir="1">+</button></span>
+          <span>次才上榜</span>
+        </div>
+        <p class="hint">榜单和时间线标签用同一套口径。名次上限 10–500，次数 1–99，可以直接输入数字。</p>
+      </section>
+
+      <section class="card">
+        <h2>标签颜色</h2>
+        <p class="hint">按统计窗口内的回复次数定颜色，从上往下先满足哪一档就用哪个颜色。最多 5 种颜色。</p>
+        <div id="tiers"></div>
+        <div class="row">
+          <button id="addTier">＋ 加一档</button>
+        </div>
+        <p class="hint">效果预览：</p>
+        <div class="row" id="preview"></div>
+      </section>
+
+      <div class="row actions">
+        <button id="reset">口径和颜色恢复默认</button>
+        <button id="clear" class="danger">清空该账号的数据</button>
       </div>
-      <p class="hint" id="coverage"></p>
-    </section>
 
-    <section class="card">
-      <h2>设置</h2>
-      <label class="line"><input type="checkbox" id="fetchEnabled"> 后台抓取：大约每小时自动读一次新回复（关闭后只展示本地已有数据，不再发任何请求）</label>
-      <p class="hint" id="lastInc"></p>
-      <button id="clear" class="danger">清空该账号的数据</button>
+      <p class="risk">风险提示：后台读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；是否开启后台抓取由你决定，风险自担。数据只存在本机，不上传。</p>
     </section>
-
-    <p class="risk">风险提示：后台读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；是否开启后台抓取由你决定，风险自担。数据只存在本机，不上传。</p>
   </main>
 
   <script type="module" src="popup.js"></script>

@@ -12,7 +12,7 @@
   const RESERVED = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'search', 'settings', 'compose', 'hashtag']);
 
   let account = null; // 当前账号（小写 handle）
-  let users = {}; // 快照：handle -> { rank, count, tier, last }
+  let users = {}; // 快照：handle -> { rank, count, color, last }
   let windowDays = 7; // 快照按几天的窗口算的
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
@@ -119,8 +119,8 @@
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
     if (count.textContent !== String(u.count)) count.textContent = u.count;
     badge.dataset.handle = handle;
-    // 颜色按回复次数分四档（档位由 rank.js 算好放在快照里）：1 红、2 橙、3 蓝、4 灰（默认色）
-    for (const t of [1, 2, 3]) badge.classList.toggle(`xir-t${t}`, u.tier === t);
+    // 颜色由统计层按回复次数和用户设置算好，放在快照里；色值在 badge.css 的 [data-xir-c]
+    badge.dataset.xirC = u.color || 'gray';
   }
 
   let tip;

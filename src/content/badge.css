@@ -11,9 +11,8 @@
   border-radius: 9px;
   font: 700 12px/18px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   white-space: nowrap;
-  /* 默认是 4 档（回复 2–4 次）：灰 */
-  color: #fff;
-  background: #6b7280;
+  color: var(--xir-fg, #fff);
+  background: var(--xir-bg, #6b7280);
   cursor: default;
   font-variant-numeric: tabular-nums;
 }
@@ -30,20 +29,19 @@
   margin-right: 6px;
 }
 
-/* 1 档（回复 20 次及以上）：红 */
-.xir-badge.xir-t1 {
-  background: #e11d48;
-}
-
-/* 2 档（10–19 次）：橙 */
-.xir-badge.xir-t2 {
-  background: #ea580c;
-}
-
-/* 3 档（5–9 次）：蓝 */
-.xir-badge.xir-t3 {
-  background: #2563eb;
-}
+/*
+ * 调色板：8 种颜色，名字与 rank.js 的 COLORS 一一对应；弹窗里的色块和次数小块也用这一份。
+ * 都是实心底色配固定文字色，不依赖页面背景，X 的白色、暗蓝、纯黑三种主题下都清楚。
+ * 黄和青偏亮，配深色字；其余配白字。
+ */
+[data-xir-c="red"] { --xir-bg: #e11d48; --xir-fg: #fff; }
+[data-xir-c="orange"] { --xir-bg: #ea580c; --xir-fg: #fff; }
+[data-xir-c="yellow"] { --xir-bg: #facc15; --xir-fg: #1f2937; }
+[data-xir-c="green"] { --xir-bg: #16a34a; --xir-fg: #fff; }
+[data-xir-c="cyan"] { --xir-bg: #22d3ee; --xir-fg: #083344; }
+[data-xir-c="blue"] { --xir-bg: #2563eb; --xir-fg: #fff; }
+[data-xir-c="purple"] { --xir-bg: #9333ea; --xir-fg: #fff; }
+[data-xir-c="gray"] { --xir-bg: #6b7280; --xir-fg: #fff; }
 
 .xir-tip {
   position: fixed;

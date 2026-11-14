@@ -1,16 +1,21 @@
-// 弹窗：榜单、初始化、设置。只和后台通信，不直接发任何 X 请求。
+// 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
+import { COLORS, LIMITS, DEFAULT_RULES, colorOf } from '../rank.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null };
+const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '' };
 
+const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const windowLabel = (days) => (days === 15 ? '半个月' : ` ${days} 天`);
 
 function el(tag, props = {}, children = []) {
-  const n = Object.assign(document.createElement(tag), props);
+  const { dataset, ...rest } = props;
+  const n = Object.assign(document.createElement(tag), rest);
+  Object.assign(n.dataset, dataset);
   n.append(...children);
   return n;
 }
@@ -18,6 +23,107 @@ function el(tag, props = {}, children = []) {
 function banners(items) {
   $('banners').replaceChildren(...items.map(([kind, text]) => el('div', { className: `banner ${kind}`, textContent: text })));
 }
+
+/** 用户正在输入的框不去覆盖它的值。 */
+function setValue(input, value) {
+  if (document.activeElement !== input) input.value = String(value);
+}
+
+function jobText(job) {
+  const reached = job.oldestTs ? `，已回溯到 ${fmtDay(job.oldestTs)}` : '';
+  const progress = `已读 ${job.pages} 页、入库 ${job.added} 条${reached}`;
+  const next = job.nextAt && job.nextAt > Date.now() ? `，下一次请求约 ${fmtTime(job.nextAt)}` : '';
+  return {
+    running: `进行中（范围 ${job.rangeDays} 天）：${progress}${next}`,
+    waiting_tab: `等待中：${job.message}。${progress}`,
+    paused: `已暂停：${job.message}。${progress}${job.auto ? next : ''}`,
+    error: `出错停止：${job.message}。${progress}`,
+    done: job.reachedEnd
+      ? job.oldestTs
+        ? `已完成，但没翻到 ${job.rangeDays} 天前：X 的提及列表到底了，最早只拿到 ${fmtDay(job.oldestTs)}。共入库 ${job.added} 条`
+        : '已完成：X 的提及列表是空的，没有可回填的数据'
+      : `已完成：回溯到 ${fmtDay(job.oldestTs)}（范围 ${job.rangeDays} 天），共读 ${job.pages} 页、入库 ${job.added} 条`,
+  }[job.status];
+}
+
+// ---------- 榜单页 ----------
+
+function renderList() {
+  const { eventCount } = view;
+  const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
+  const rows = q ? view.rows.filter((r) => r.handle.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) : view.rows;
+  const empty = !eventCount
+    ? '还没有数据，到「设置」页点「启动 / 初始化」'
+    : q
+      ? '榜上没有匹配的人'
+      : `这个窗口内还没有人回复我 ${view.rules.minCount} 次及以上`;
+  $('list').replaceChildren(
+    ...(rows.length
+      ? rows.map((r) =>
+          el('li', {}, [
+            el('span', { className: 'rank', textContent: r.rank }),
+            el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
+            el('div', { className: 'who' }, [
+              el('a', { className: 'name', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', textContent: r.name }),
+              el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
+            ]),
+            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '窗口内的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
+          ]),
+        )
+      : [el('li', { className: 'empty', textContent: empty })]),
+  );
+}
+
+// ---------- 设置页：颜色档位 ----------
+
+function swatches(current, onPick) {
+  return el(
+    'span',
+    { className: 'swatches' },
+    COLORS.map((c) => {
+      const b = el('button', { className: c === current ? 'on' : '', title: COLOR_NAMES[c], dataset: { xirC: c } });
+      b.addEventListener('click', () => onPick(c));
+      return b;
+    }),
+  );
+}
+
+const saveRules = (patch) => act('setSettings', { patch });
+
+function renderTiers(rules) {
+  const key = JSON.stringify([rules.tiers, rules.baseColor, rules.minCount]);
+  if (key === view.tiersKey) return; // 没变就不重建，免得打断正在输入的框
+  view.tiersKey = key;
+
+  const rows = rules.tiers.map((t, i) => {
+    const input = el('input', { type: 'number', min: 1, value: t.min });
+    input.addEventListener('change', () => saveRules({ tiers: rules.tiers.map((x, j) => (j === i ? { ...x, min: Number(input.value) } : x)) }));
+    const del = el('button', { className: 'icon', title: '删掉这一档', textContent: '×' });
+    del.addEventListener('click', () => saveRules({ tiers: rules.tiers.filter((_, j) => j !== i) }));
+    return el('div', { className: 'row tier' }, [
+      el('span', { className: 'cond' }, ['≥ ', input, ' 次']),
+      swatches(t.color, (c) => saveRules({ tiers: rules.tiers.map((x, j) => (j === i ? { ...x, color: c } : x)) })),
+      del,
+    ]);
+  });
+  rows.push(
+    el('div', { className: 'row tier' }, [
+      el('span', { className: 'cond', textContent: '其余上榜的' }),
+      swatches(rules.baseColor, (c) => saveRules({ baseColor: c })),
+      el('span', { className: 'icon' }),
+    ]),
+  );
+  $('tiers').replaceChildren(...rows);
+  $('addTier').disabled = rules.tiers.length >= LIMITS.maxTiers;
+
+  // 预览：每一档拿它的门槛次数当例子
+  const samples = [...rules.tiers.map((t) => t.min), rules.minCount].filter((n, i, a) => a.indexOf(n) === i && n >= rules.minCount);
+  $('preview').replaceChildren(
+    ...samples.map((n) => el('span', { className: 'chip', dataset: { xirC: colorOf(n, rules) }, textContent: `${n} 次起` })),
+  );
+}
+
+// ---------- 整体渲染 ----------
 
 async function render() {
   const g = await call('getState');
@@ -35,69 +141,54 @@ async function render() {
   if (!view.account) return banners(items);
 
   const s = await call('getAccountState', { account: view.account });
+  const rules = s.settings;
   const isSession = view.account === g.current;
   if (!isSession) items.push(['warn', `@${g.accounts[view.account].handle} 不是当前登录 X 的账号，这里只能查看它已有的数据。`]);
   if (s.alert) items.push(['err', `${fmtTime(s.alert.at)} ${s.alert.message}`]);
   banners(items);
 
-  // 榜单
-  const { rows, windowDays } = await call('getBoard', { account: view.account });
-  Object.assign(view, { rows, windowDays });
-  $('export').disabled = !rows.length;
-  const label = windowDays === 15 ? '半个月' : `${windowDays} 天`;
-  $('window').value = String(windowDays);
-  $('boardHint').textContent = `最近${label}回复我 2 次及以上的人，按次数排，最多显示前 100 名（现在 ${rows.length} 人）。时间线上的排名标签也按这个榜。`;
-  $('list').replaceChildren(
-    ...(rows.length
-      ? rows.map((r) =>
-          el('li', {}, [
-            el('span', { className: 'rank', textContent: r.rank }),
-            el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
-            el('div', { className: 'who' }, [
-              el('a', { className: 'name', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', textContent: r.name }),
-              el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
-            ]),
-            el('div', { className: 'count' }, [el('b', { textContent: r.count }), el('span', { textContent: '次回复' })]),
-          ]),
-        )
-      : [el('li', { className: 'empty', textContent: s.eventCount ? '这个窗口内还没有人回复我 2 次及以上' : '还没有数据，先点下方「启动 / 初始化」' })]),
-  );
+  // 还没有任何数据时先落在设置页，那里有启动按钮
+  view.tab ??= s.eventCount || s.job ? 'board' : 'settings';
+  for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === view.tab);
+  $('view-board').hidden = view.tab !== 'board';
+  $('view-settings').hidden = view.tab !== 'settings';
 
-  // 回填任务
+  // 榜单页
+  const { rows, people, replies } = await call('getBoard', { account: view.account });
+  Object.assign(view, { rows, rules, eventCount: s.eventCount });
+  const label = windowLabel(rules.windowDays);
+  $('window').value = String(rules.windowDays);
+  $('export').disabled = !rows.length;
+  $('boardHint').textContent =
+    `最近${label}共 ${people} 人在我的帖子下回复了 ${replies} 次；上榜 ${rows.length} 人` +
+    `（回复 ${rules.minCount} 次及以上，最多前 ${rules.topN} 名）。`;
   const job = s.job;
+  const unfinished = job && job.status !== 'done';
+  $('jobLine').hidden = !unfinished;
+  if (unfinished) $('jobLine').textContent = `数据还在读取，榜单会继续变。${jobText(job)}`;
+  renderList();
+
+  // 设置页：数据
   const active = job && ['running', 'waiting_tab', 'paused', 'error'].includes(job.status);
-  $('job').hidden = !job;
-  if (job) {
-    const reached = job.oldestTs ? `，已回溯到 ${fmtDay(job.oldestTs)}` : '';
-    const progress = `已读 ${job.pages} 页、入库 ${job.added} 条${reached}`;
-    const next = job.nextAt && job.nextAt > Date.now() ? `，下一次请求约 ${fmtTime(job.nextAt)}` : '';
-    const text = {
-      running: `进行中（范围 ${job.rangeDays} 天）：${progress}${next}`,
-      waiting_tab: `等待中：${job.message}。${progress}`,
-      paused: `已暂停：${job.message}。${progress}${job.auto ? next : ''}`,
-      error: `出错停止：${job.message}。${progress}`,
-      done: job.reachedEnd
-        ? job.oldestTs
-          ? `已完成，但没翻到 ${job.rangeDays} 天前：X 的提及列表到底了，最早只拿到 ${fmtDay(job.oldestTs)}。共入库 ${job.added} 条`
-          : '已完成：X 的提及列表是空的，没有可回填的数据'
-        : `已完成：回溯到 ${fmtDay(job.oldestTs)}（范围 ${job.rangeDays} 天），共读 ${job.pages} 页、入库 ${job.added} 条`,
-    }[job.status];
-    $('jobStatus').textContent = text;
-  }
+  $('jobStatus').hidden = !job;
+  if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
   $('start').textContent = active ? '重新初始化' : '启动 / 初始化';
-  $('start').disabled = !isSession || !s.settings.fetchEnabled;
-  $('resume').disabled = !isSession || !s.settings.fetchEnabled;
-  const short = s.cursor.earliestTs > Date.now() - windowDays * 86400000;
+  $('start').disabled = !isSession || !rules.fetchEnabled;
+  $('resume').disabled = !isSession || !rules.fetchEnabled;
+  const short = s.cursor.earliestTs > Date.now() - rules.windowDays * 86400000;
   $('coverage').textContent = s.cursor.earliestTs
     ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条直接回复（只有你帖子下的上榜）。` +
       (short ? `还没覆盖满${label}，要补齐就点「启动 / 初始化」。` : '')
     : '';
-
-  // 设置
-  $('fetchEnabled').checked = s.settings.fetchEnabled;
+  $('fetchEnabled').checked = rules.fetchEnabled;
   $('lastInc').textContent = s.cursor.lastIncrementalAt ? `上次自动更新：${fmtTime(s.cursor.lastIncrementalAt)}` : '';
+
+  // 设置页：口径与颜色
+  setValue($('topN'), rules.topN);
+  setValue($('minCount'), rules.minCount);
+  renderTiers(rules);
 }
 
 async function act(type, extra) {
@@ -106,7 +197,46 @@ async function act(type, extra) {
   await render();
 }
 
-$('window').addEventListener('change', (e) => act('setSettings', { patch: { windowDays: Number(e.target.value) } }));
+// ---------- 事件 ----------
+
+$('tabs').addEventListener('click', (e) => {
+  const tab = e.target.dataset.tab;
+  if (!tab) return;
+  view.tab = tab;
+  render();
+});
+$('window').addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
+$('search').addEventListener('input', renderList);
+
+// 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1；也可以直接输入，越界的由后台夹回范围
+const STEP = {
+  topN: (v, dir) => (dir > 0 ? (v < 50 ? 50 : v + 50) : v <= 50 ? LIMITS.topN[0] : v - 50),
+  minCount: (v, dir) => v + dir,
+};
+for (const box of document.querySelectorAll('.stepper')) {
+  const key = box.dataset.key;
+  const input = box.querySelector('input');
+  box.addEventListener('click', (e) => {
+    const dir = Number(e.target.dataset.dir);
+    if (dir) saveRules({ [key]: STEP[key](view.rules[key], dir) });
+  });
+  input.addEventListener('change', async () => {
+    await saveRules({ [key]: Number(input.value) });
+    input.value = String(view.rules[key]); // 显示夹回范围后的实际值
+  });
+}
+
+$('addTier').addEventListener('click', () => {
+  const { tiers, minCount } = view.rules;
+  const min = tiers.length ? tiers[0].min * 2 : Math.max(5, minCount + 1);
+  const used = new Set([...tiers.map((t) => t.color), view.rules.baseColor]);
+  saveRules({ tiers: [{ min, color: COLORS.find((c) => !used.has(c)) || 'red' }, ...tiers] });
+});
+$('reset').addEventListener('click', () => {
+  const { topN, minCount, tiers, baseColor } = DEFAULT_RULES;
+  if (confirm('把名次上限、最少次数和标签颜色恢复成默认？数据不受影响。')) saveRules({ topN, minCount, tiers, baseColor });
+});
+
 // 导出当前榜单为 CSV（带 BOM，Excel 直接打开不乱码）。纯本地生成文件，不发请求。
 $('export').addEventListener('click', () => {
   const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
@@ -114,24 +244,24 @@ $('export').addEventListener('click', () => {
     ['名次', '名字', 'ID', '回复次数', '最近一次回复', '主页'],
     ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, new Date(r.last).toLocaleString('zh-CN', { hour12: false }), `https://x.com/${r.handle}`]),
   ];
-  const csv = '\ufeff' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
+  const csv = '﻿' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
   const d = new Date();
   const a = el('a', {
     href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
-    download: `回复榜_${view.account}_${view.windowDays}天_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
+    download: `回复榜_${view.account}_${view.rules.windowDays}天_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
   });
   a.click();
   URL.revokeObjectURL(a.href);
 });
-$('account').addEventListener('change', (e) => { view.account = e.target.value; render(); });
+
+$('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; render(); });
 $('start').addEventListener('click', () => {
-  const days = Number($('window').value);
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速回填最近 ${days} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
+  if (confirm(`将用你的 X 登录会话，限速回填最近 ${view.rules.windowDays} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
 });
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
-$('fetchEnabled').addEventListener('change', (e) => act('setSettings', { patch: { fetchEnabled: e.target.checked } }));
+$('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空 @${view.account} 在本机的全部回复数据？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });

@@ -1,5 +1,7 @@
 // 存储层：互动事件放 IndexedDB，按账号隔离；小状态放 chrome.storage.local。
 
+import { DEFAULT_RULES, cleanRules } from './rank.js';
+
 const DB_NAME = 'xir';
 const STORE = 'events';
 let dbPromise;
@@ -71,7 +73,8 @@ export async function kvGet(key, fallback = null) {
 export const kvSet = (key, value) => chrome.storage.local.set({ [key]: value });
 export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 
-export const DEFAULT_SETTINGS = { fetchEnabled: true, windowDays: 7 }; // windowDays：统计窗口，7 或 15，回填范围、榜单、标签都用它
+// 设置 = 抓取总开关 + 榜单规则（统计窗口、名次上限、最少次数、颜色档位，定义和默认值在 rank.js）
+export const DEFAULT_SETTINGS = { fetchEnabled: true, ...DEFAULT_RULES };
 
 export const keys = {
   accounts: 'accounts', // { [handle]: { handle, userId, seenAt } }
@@ -85,4 +88,8 @@ export const keys = {
   domWarning: 'domWarning',
 };
 
-export const getSettings = async (a) => ({ ...DEFAULT_SETTINGS, ...(await kvGet(keys.settings(a), {})) });
+/** 读出来的设置总是合法的：缺的补默认，越界的夹回范围。 */
+export async function getSettings(a) {
+  const raw = { ...DEFAULT_SETTINGS, ...(await kvGet(keys.settings(a), {})) };
+  return { fetchEnabled: raw.fetchEnabled !== false, ...cleanRules(raw) };
+}

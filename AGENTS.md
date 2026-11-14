@@ -6,8 +6,10 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 
 - 只统计**回复**，只有一个回复榜。引用、点赞、转发、综合榜都不做（2026-11-13 负责人定）。
 - 只有一个**统计窗口**：7 天（默认）或 15 天，没有 30 天。回填范围、榜单、时间线标签都用它（设置项 `windowDays`）。
-- 榜单和标签只有两个条件：窗口内回复至少 2 次；最多前 100 名（`rank.js` 的 `MIN_COUNT`、`TOP_N`）。不足 100 人就有多少显示多少。
-- 时间线标签显示「名次图标 + 名次、回复图标 + 次数」。颜色按**回复次数**分四档，不按名次（名次靠后的往往都只有两三次，负责人要的是一眼判断值不值得回）：≥20 次红、10–19 次橙、5–9 次蓝、2–4 次灰（负责人 2026-11-13 按一周的量定）。阈值在 `rank.js` 的 `TIERS`，7 天和 15 天窗口共用。
+- 榜单和标签只有两个条件：窗口内回复至少 `minCount` 次；最多前 `topN` 名。两个值用户可调（2026-11-13 负责人定）：`topN` 默认 100、范围 10–500、界面每次加减 50；`minCount` 默认 2、范围 1–99、每次加减 1。不足名次上限就有多少显示多少。
+- 时间线标签显示「名次图标 + 名次、回复图标 + 次数」。颜色按**回复次数**分档，不按名次（名次靠后的往往都只有两三次，负责人要的是一眼判断值不值得回）。默认：≥20 次红、10–19 次橙、5–9 次蓝、其余灰（负责人 2026-11-13 按一周的量定），7 天和 15 天窗口共用。用户可改每档的门槛和颜色、加档删档，最多 4 个门槛档加 1 个兜底色共 5 种；可选 8 色（`rank.js` 的 `COLORS`，色值在 `badge.css` 的 `[data-xir-c]`，弹窗通过引入同一份 CSS 共用）。颜色都是实心底色配固定字色，不随 X 的主题变。
+- 规则的默认值、范围和合法化都在 `rank.js`（`DEFAULT_RULES`、`LIMITS`、`cleanRules`）；设置读出时总会过一遍 `cleanRules`，所以别处不用再校验。「恢复默认」只恢复 `topN`、`minCount`、`tiers`、`baseColor`。
+- 弹窗分「榜单」「设置」两页；榜单页有搜索、窗口内总量汇总、导出 CSV。
 - 每次「启动 / 初始化」都从最新一条重新往回读，不做接续翻页（负责人知情后定）。
 - 只算**我的帖子下**别人直接回复我的；我去别人帖子下评论后对方回我的不算（同日定）。
 - 数据来源是 X 网页版「通知 → 提及」的内部接口，用已登录的网页会话读。不走官方 API，不逐帖抓评论（请求量大、接口更脆，已比较过）。
@@ -37,7 +39,7 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 | `src/x/parser.js` | 解析层：原始 JSON → `{ events, entryIds, newestId, oldestId, oldestTs, bottomCursor }`。结构不符抛 `ParseError` | X 改返回结构 |
 | `src/content/content.js` | 账号识别、代发请求、画标签。页面选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | 调度：回填、增量、限流退避、账号绑定、消息处理。节奏参数集中在顶部 `PACE` | 调节奏、改流程 |
-| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照 | 改统计口径 |
+| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照；榜单规则的默认值、范围、合法化 | 改统计口径、规则默认值 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 | 改数据模型 |
 | `src/ui/` | 弹窗 | 改界面 |
 
@@ -65,10 +67,10 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `accounts` | `{ [handle小写]: { handle, userId, seenAt } }` |
 | `current` | 当前 X 会话登录的账号 |
 | `pendingUserId` | 识别不到 handle、等用户手填时暂存的用户 ID |
-| `settings:<账号>` | `{ fetchEnabled, windowDays }`，`windowDays` 取 7（默认）或 15 |
+| `settings:<账号>` | `{ fetchEnabled, windowDays, topN, minCount, tiers: [{ min, color }], baseColor }`，后五项是榜单规则，见 `rank.js` 的 `DEFAULT_RULES` |
 | `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill }`。`nextIncAt` 是下一次增量最早什么时候跑。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量正常结束或读满上限时前移到本轮最新一条，出错中断时不动、下次重读这一段（靠主键去重） |
 | `job:<账号>` | 回填任务状态，见下 |
-| `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, tier, last } } }`，内容就是回复榜；改统计窗口时立刻重算 |
+| `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, color, last } } }`，内容就是回复榜；改任何设置、有 X 页面上线时都立刻重算 |
 | `alert:<账号>` | 最近一次抓取或解析错误，下次成功后清除 |
 | `activeJobAccount` | 当前回填任务属于哪个账号（同一时刻只有一个） |
 | `domWarning` | 内容脚本发现页面结构对不上时置位 |
@@ -146,10 +148,12 @@ npm install
 npm test
 ```
 
-- `test/logic.test.mjs`：榜单、口径过滤、解析分类与边界。
+- `test/logic.test.mjs`：榜单、口径过滤、规则合法化、颜色分档、解析分类与边界。
 - `test/flow.test.mjs`：用假的 chrome API 和假接口跑后台全流程（回填、429 退避与续跑、去重、增量、关开关、清空）。
 
 两者的假数据都是按「预期的接口形态」写的，能证明逻辑自洽，**不能证明 X 真实返回长这样**。`fake-indexeddb` 只是测试依赖，插件本身零依赖、无需构建。
+
+弹窗没有自动测试。改弹窗后可以临时做一个预览页来看：把 `src/ui/popup.html` 复制一份，在前面插一段模块脚本，用内存里的假数据实现 `chrome.runtime.sendMessage`（`getState`、`getAccountState`、`getBoard`、`setSettings`）和 `chrome.storage.onChanged`，用本地静态服务器打开。预览页用完删掉，不进仓库。
 
 ## 约定
 

@@ -2,7 +2,7 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { board, badgeSnapshot, underMyPosts, tierOf, DAY_MS } from '../src/rank.js';
+import { board, ranking, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
 import { parseMentions, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
@@ -10,27 +10,46 @@ const ev = (id, actor, daysAgo) => ({
   id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, root_mine: true,
 });
 
-test('回复榜：时间窗、同分按最近回复、只回 1 次的不上榜', () => {
+const rules = (o = {}) => cleanRules({ ...DEFAULT_RULES, ...o });
+
+test('回复榜：时间窗、同分按最近回复、次数不够的不上榜', () => {
   const events = [ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'a', 20), ev(4, 'b', 2), ev(5, 'b', 3), ev(6, 'c', 0.5), ev(7, 'c', 40)];
   // 15 天窗：a、b 都是 2 条，a 最近一次更近；c 只有 1 条不上榜
-  assert.deepEqual(board(events, 15, NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 2], [2, 'B', 2]]);
+  assert.deepEqual(board(events, rules({ windowDays: 15 }), NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 2], [2, 'B', 2]]);
   // 7 天窗：a 只剩 1 条，也掉出去
-  assert.deepEqual(board(events, 7, NOW).map((r) => r.handle), ['B']);
+  assert.deepEqual(board(events, rules(), NOW).map((r) => r.handle), ['B']);
+  // 最少次数调到 1：都上榜；总量不受口径影响
+  const all = ranking(events, rules({ minCount: 1 }), NOW);
+  assert.deepEqual(all.rows.map((r) => r.handle), ['B', 'C', 'A']);
+  assert.deepEqual([all.people, all.replies], [3, 4]);
+  assert.deepEqual([ranking(events, rules(), NOW).people, ranking(events, rules(), NOW).replies], [3, 4]);
 });
 
-test('回复榜：最多前 100 名', () => {
+test('回复榜：名次上限可调，默认 100', () => {
   const events = [];
   for (let i = 0; i < 120; i++) events.push(ev(i * 2, 'u' + i, 1), ev(i * 2 + 1, 'u' + i, 2));
-  const rows = board(events, 7, NOW);
-  assert.equal(rows.length, 100);
-  assert.equal(rows.at(-1).rank, 100);
+  assert.equal(board(events, rules(), NOW).length, 100);
+  assert.equal(board(events, rules({ topN: 10 }), NOW).length, 10);
+  assert.equal(board(events, rules({ topN: 500 }), NOW).length, 120);
+});
+
+test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
+  assert.deepEqual(cleanRules({}), DEFAULT_RULES);
+  const r = cleanRules({ windowDays: 30, topN: 9999, minCount: 0, baseColor: 'pink', tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  assert.equal(cleanRules({ topN: 3 }).topN, 10);
+  assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
+  assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
+});
+
+test('标签颜色：按次数分档，不按名次', () => {
+  assert.deepEqual([2, 4, 5, 9, 10, 19, 20, 50].map((n) => colorOf(n, DEFAULT_RULES)), ['gray', 'gray', 'blue', 'blue', 'orange', 'orange', 'red', 'red']);
+  assert.equal(colorOf(99, cleanRules({ tiers: [], baseColor: 'purple' })), 'purple');
 });
 
 test('标签快照：就是榜上的人，键为小写 handle', () => {
-  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], 15, NOW);
-  assert.deepEqual(snap, { a: { rank: 1, count: 2, tier: 4, last: NOW - DAY_MS } });
-  // 颜色档位按次数，不按名次
-  assert.deepEqual([2, 4, 5, 9, 10, 19, 20, 50].map(tierOf), [4, 4, 3, 3, 2, 2, 1, 1]);
+  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW);
+  assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
 });
 
 test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {
