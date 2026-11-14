@@ -145,7 +145,7 @@ async function scheduleJob(job, delayMs) {
 
 async function startBackfill(account) {
   const settings = await getSettings(account);
-  if (!settings.fetchEnabled) return { error: '后台抓取已关闭，先在设置里打开' };
+  if (!settings.fetchEnabled) return { error: '自动更新已关闭，先在设置里打开' };
   const rangeDays = settings.windowDays; // 回填范围就是统计窗口
   const job = {
     status: 'running',
@@ -358,7 +358,6 @@ async function syncOut() {
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return;
   const cur = await kvGet(keys.cursor(account), {});
-  if (!cur.syncedId) return; // 还没初始化过
   const me = (await kvGet(keys.accounts, {}))[account];
   const tpl = await kvGet(keys.tpl);
   if (!tpl) return saveOut(account, { status: 'need_tpl', message: NEED_TPL });
@@ -512,6 +511,12 @@ const handlers = {
   },
   getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account)),
   startBackfill: ({ account }) => startBackfill(account),
+  async syncOutNow({ account }) {
+    if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
+    if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
+    syncOut(); // 不等待，进度看设置页「我回别人」那一行
+    return { ok: true };
+  },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {

@@ -231,6 +231,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   await listeners.alarm({ name: 'tick' });
   assert.ok((await send({ type: 'startBackfill', account: 'me' })).error);
+  assert.ok((await send({ type: 'syncOutNow', account: 'me' })).error, '关了开关，手动读我的回复也被拒');
   assert.equal(server.calls, before);
 
   // 点开某人：返回他在窗口内的回复

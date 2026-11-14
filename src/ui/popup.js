@@ -179,16 +179,16 @@ async function render() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   Object.assign(view, { rows, rules, eventCount: s.eventCount, outReady: !!out?.coverTs });
-  // 「我回」那一列的数据状态
-  const outText = !s.cursor.syncedId
-    ? ''
-    : !out
-      ? '「我回」（我在他帖子下回复了几次）还没读，初始化完成后一两分钟开始。'
-      : out.status !== 'ok'
-        ? `「我回」${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}${out.coverTs ? '。现在显示的是之前读到的数' : ''}`
-        : `「我回」= 同一窗口内我在他帖子下回复了几次，已读到 ${fmtDay(out.coverTs)}，更新于 ${fmtTime(out.lastAt)}。`;
-  $('outLine').hidden = !outText;
-  $('outLine').textContent = outText;
+  // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
+  const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
+  $('outStatus').textContent = !out
+    ? '还没读过。「别人回我」初始化完成后一两分钟会自动开始，也可以点「立即读取」。'
+    : outBad
+      ? `${outBad}${out.coverTs ? '。榜单上显示的是之前读到的数' : ''}`
+      : `已读到 ${fmtDay(out.coverTs)}，更新于 ${fmtTime(out.lastAt)}。`;
+  $('outLine').hidden = !(outBad && s.eventCount);
+  $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
+  $('outSync').disabled = !isSession || !rules.fetchEnabled;
   const label = windowLabel(rules.windowDays);
   $('window').value = String(rules.windowDays);
   $('export').disabled = !rows.length;
@@ -213,7 +213,7 @@ async function render() {
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const short = s.cursor.earliestTs > Date.now() - rules.windowDays * 86400000;
   $('coverage').textContent = s.cursor.earliestTs
-    ? `本地数据最早覆盖到 ${fmtDay(s.cursor.earliestTs)}，共 ${s.eventCount} 条直接回复（只有你帖子下的上榜）。` +
+    ? `已读到 ${fmtDay(s.cursor.earliestTs)}，本机共 ${s.eventCount} 条。` +
       (short ? `还没覆盖满${label}，要补齐就点「启动 / 初始化」。` : '')
     : '';
   $('fetchEnabled').checked = rules.fetchEnabled;
@@ -305,11 +305,12 @@ $('start').addEventListener('click', () => {
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
   if (confirm(`将用你的 X 登录会话，限速回填最近 ${view.rules.windowDays} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
 });
+$('outSync').addEventListener('click', () => act('syncOutNow'));
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 $('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
-  if (confirm(`清空 @${view.account} 在本机的全部回复数据？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
+  if (confirm(`清空 @${view.account} 在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });
 $('bindBtn').addEventListener('click', async () => {
   const r = await call('setManualHandle', { handle: $('bindHandle').value });

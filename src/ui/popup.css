@@ -58,7 +58,20 @@ button.danger { color: var(--err-fg); }
 .hint { color: var(--dim); font-size: 12px; }
 .risk { color: var(--dim); font-size: 11px; margin-top: 10px; }
 .card { background: var(--card); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
-.actions { margin-top: 10px; justify-content: space-between; }
+.actions { margin-top: 10px; justify-content: flex-end; }
+.between { justify-content: space-between; }
+
+/* 数据读取卡片里的两份数据，各占一块 */
+.src { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.src:first-of-type { padding-top: 0; }
+.src p { margin: 4px 0 0; }
+
+/* 默认折叠的块：帮助、清空数据 */
+.fold summary { cursor: pointer; font-weight: 600; }
+.fold[open] summary { margin-bottom: 6px; }
+.fold h3 { margin: 10px 0 2px; font-size: 12px; }
+.fold p { margin: 4px 0; font-size: 12px; color: var(--dim); }
+.fold p b { color: var(--fg); }
 
 .banner { border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
 .banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
