@@ -29,6 +29,25 @@
   margin-right: 6px;
 }
 
+/* 关系标签：描边小字，跟在名次标签后面。颜色固定，X 的三种主题下都看得清 */
+.xir-rel {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: fit-content;
+  margin-left: 6px;
+  padding: 0 6px;
+  height: 18px;
+  box-sizing: border-box;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  font: 600 11px/16px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  cursor: default;
+  color: #8b98a5;
+}
+.xir-rel[data-xir-rel="mutual"] { color: #1d9bf0; }
+.xir-rel[data-xir-rel="fan"] { color: #16a34a; }
+
 /*
  * 调色板：8 种颜色，名字与 rank.js 的 COLORS 一一对应；弹窗里的色块和次数小块也用这一份。
  * 都是实心底色配固定文字色，不依赖页面背景，X 的白色、暗蓝、纯黑三种主题下都清楚。

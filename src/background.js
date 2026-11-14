@@ -2,7 +2,7 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
-import { ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
+import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
@@ -490,6 +490,12 @@ const handlers = {
     const out = account && (await kvGet(keys.cursor(account), {})).out;
     if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 });
     return {};
+  },
+  // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
+  async 'xir:where'({ ids }) {
+    const account = await kvGet(keys.current);
+    if (!account || !Array.isArray(ids)) return { places: {} };
+    return { places: replyPlaces(await getEvents(account), await getEvents(account, OUT), ids.slice(0, 200).map(String)) };
   },
   async 'xir:dom'(msg) {
     if (msg.broken) await kvSet(keys.domWarning, { at: now() });

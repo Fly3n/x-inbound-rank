@@ -1,6 +1,7 @@
-// 内容脚本：① 识别当前登录账号 ② 代后台读一页列表（抓取层在 fetcher.js）③ 在用户名旁注入排名标签 ④ 记下 X 读「回复」栏的请求地址。
-// 标签只读 chrome.storage.local 里的本地快照，渲染过程不发任何网络请求。
-/* global XIRFetcher */
+// 内容脚本：① 识别当前登录账号 ② 代后台读一页列表（抓取层在 fetcher.js）③ 在用户名旁注入排名标签 ④ 记下 X 读「回复」栏的请求地址
+// ⑤ 在用户名旁标出他和我的关注关系，通知列表里再标出这条回复是在谁的帖子下（数据来自 rel.js）。
+// 标签只读 chrome.storage.local 里的本地快照和页面已经加载的数据，渲染过程不发任何网络请求。
+/* global XIRFetcher, XIRRel */
 
 (() => {
   // 页面结构相关的选择器集中在这里，X 改版时只改这一处
@@ -8,6 +9,7 @@
     profileLink: 'a[data-testid="AppTabBar_Profile_Link"]',
     tweet: 'article[data-testid="tweet"]',
     userName: '[data-testid="User-Name"]',
+    statusLink: 'a[href*="/status/"]', // 帖子里带时间的那个链接，从它拿帖子 ID
   };
   const RESERVED = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'search', 'settings', 'compose', 'hashtag']);
 
@@ -50,6 +52,7 @@
 
   function useSnap(snap) {
     users = snap?.users || {};
+    places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
     windowDays = snap?.windowDays || 7;
     rescan();
   }
@@ -119,6 +122,7 @@
     const handle = handleOf(nameEl);
     const u = handle && users[handle];
     let badge = nameEl.querySelector('.xir-badge');
+    markRel(nameEl, handle);
     if (!u) {
       badge?.remove();
       return;
@@ -134,7 +138,9 @@
     // 别的插件（实测 FeedSieve）会把「用户名区域的最后一个子节点」当成那一行，往里塞自己的标记；
     // 我们要是成了最后一个子节点，它的标记就会塞进我们的标签里，把标签撑长。
     const host = nameEl.lastElementChild || nameEl;
-    if (badge.parentElement !== host) host.appendChild(badge);
+    // 名次标签排在关系标签前面
+    const relEl = host.querySelector(':scope > .xir-rel');
+    if (badge.parentElement !== host || (relEl && badge.nextElementSibling !== relEl)) host.insertBefore(badge, relEl);
     // X 的列表会复用节点，同一个节点可能换成另一个人，每次都按当前 handle 重写
     const [rank, count] = [badge.children[1], badge.children[3]];
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
@@ -142,6 +148,65 @@
     badge.dataset.handle = handle;
     // 颜色由统计层按回复次数和用户设置算好，放在快照里；色值在 badge.css 的 [data-xir-c]
     badge.dataset.xirC = u.color || 'gray';
+  }
+
+  // ---------- 关系标签 ----------
+  // 用户名旁的小字：通知列表里是「我帖 · 互关」这样两段，其他地方只有关系一段。
+  const REL = { mutual: '互关', fan: '粉丝', following: '已关注' };
+  const REL_TIP = { mutual: '你们互相关注', fan: '他关注了你，你没有关注他', following: '你关注了他，他没有关注你' };
+  const PLACE = { me: '我帖', him: '他帖', other: '别人帖' };
+  const PLACE_TIP = { me: '这条回复在我的帖子下', him: '这条回复在他自己的帖子下', other: '这条回复在别人的帖子下' };
+  const places = new Map(); // 帖子 ID -> 'me' | 'him' | 'other' | null（问过后台、本机数据也看不出来）
+  let asking = new Set();
+  let askTimer = null;
+
+  function askPlaces() {
+    askTimer = null;
+    const ids = [...asking];
+    asking = new Set();
+    send({ type: 'xir:where', ids }).then((res) => {
+      for (const id of ids) places.set(id, res?.places?.[id] ?? null);
+      if (ids.some((id) => places.get(id))) rescan();
+    });
+  }
+
+  /** 通知列表里，这个用户名所在的那条帖子是在谁的帖子下；不在通知列表或看不出来返回 null。 */
+  function placeFor(nameEl) {
+    if (!location.pathname.startsWith('/notifications')) return null;
+    const article = nameEl.closest(SEL.tweet);
+    if (!article || article.querySelector(SEL.userName) !== nameEl) return null; // 只标这条帖子的作者，不标被引用的帖子
+    const link = [...article.querySelectorAll(SEL.statusLink)].find((a) => a.querySelector('time'));
+    const id = link?.getAttribute('href').match(/\/status\/(\d+)/)?.[1];
+    if (!id) return null;
+    const known = XIRRel.placeOf(id, XIRFetcher.sessionUserId(), XIRRel.tweets);
+    if (known) return known;
+    if (places.has(id)) return places.get(id);
+    if (account && alive) {
+      asking.add(id);
+      askTimer ??= setTimeout(askPlaces, 300);
+    }
+    return null;
+  }
+
+  function markRel(nameEl, handle) {
+    const rel = handle && handle !== account ? XIRRel.rel.get(handle) : null;
+    const place = handle && handle !== account ? placeFor(nameEl) : null;
+    const parts = [PLACE[place], REL[rel]].filter(Boolean);
+    let el = nameEl.querySelector('.xir-rel');
+    if (!parts.length) {
+      el?.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('span');
+      el.className = 'xir-rel';
+    }
+    const host = nameEl.lastElementChild || nameEl;
+    if (el.parentElement !== host) host.appendChild(el);
+    const text = parts.join(' · ');
+    if (el.textContent !== text) el.textContent = text;
+    el.dataset.xirRel = REL[rel] ? rel : 'place';
+    el.title = [PLACE_TIP[place], REL_TIP[rel]].filter(Boolean).join('；');
   }
 
   let tip;
@@ -167,14 +232,16 @@
   }
 
   let scheduled = false;
-  new MutationObserver(() => {
+  function scheduleScan() {
     if (scheduled || !alive) return;
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
       rescan();
     });
-  }).observe(document.body, { childList: true, subtree: true });
+  }
+  new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
+  XIRRel.onChange = scheduleScan; // 页面又加载了一批数据，关系可能有新的
 
   // ---------- 页面结构自检 ----------
   // 页面上有帖子却一个用户名节点都找不到，说明 X 改了结构，告诉后台在界面上提示。
