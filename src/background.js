@@ -2,8 +2,8 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, ParseError, idGt } from './x/parser.js';
-import { ranking, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
-import { putEvents, getEvents, clearEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
+import { ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
+import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
 // 每小时约 220 页 ≈ 4400 条提及。X 的行为风控不公开，要再调快先小步试。
@@ -19,6 +19,9 @@ const PACE = {
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
 };
+
+// 本地只留最近这么多天的回复：最长的统计窗口是 15 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
+const KEEP_DAYS = 30;
 
 const TICK_ALARM = 'tick';
 const JOB_ALARM = 'job';
@@ -329,6 +332,17 @@ async function maybeIncremental() {
   }
 }
 
+// ---------- 清理过期数据 ----------
+
+async function maybePrune(account) {
+  const cur = await kvGet(keys.cursor(account), {});
+  if (now() - (cur.lastPruneAt || 0) < DAY_MS) return; // 一天最多清一次
+  await pruneEvents(account, now() - KEEP_DAYS * DAY_MS);
+  const c = await kvGet(keys.cursor(account), {});
+  c.lastPruneAt = now();
+  await kvSet(keys.cursor(account), c);
+}
+
 // ---------- 清空 ----------
 
 async function clearData(account) {
@@ -353,7 +367,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === INC_ALARM) return maybeIncremental();
   if (alarm.name === TICK_ALARM) {
     const account = await kvGet(keys.current);
-    if (account) await refreshSnapshot(account); // 时间窗会随时间滑动，定期重算，不发请求
+    if (account) {
+      await maybePrune(account);
+      await refreshSnapshot(account); // 时间窗会随时间滑动，定期重算，不发请求
+    }
     await wakeJob(false);
     await maybeIncremental();
   }
@@ -395,6 +412,7 @@ const handlers = {
   async getBoard({ account }) {
     return ranking(await getEvents(account), await getSettings(account)); // { rows, people, replies }
   },
+  getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account)),
   startBackfill: ({ account }) => startBackfill(account),
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),

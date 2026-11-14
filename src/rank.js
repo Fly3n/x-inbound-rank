@@ -99,6 +99,15 @@ export function ranking(events, rules, now = Date.now()) {
 
 export const board = (events, rules, now = Date.now()) => ranking(events, rules, now).rows;
 
+/** 某个人在窗口内、我帖子下的回复，新的在前。total 是总数，items 最多 limit 条。 */
+export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50) {
+  const since = now - rules.windowDays * DAY_MS;
+  const mine = underMyPosts(events)
+    .filter((e) => e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
+    .sort((a, b) => b.created_at - a.created_at);
+  return { total: mine.length, items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })) };
+}
+
 /** 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, color, last } }。 */
 export function badgeSnapshot(events, rules, now = Date.now()) {
   const users = {};

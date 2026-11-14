@@ -16,6 +16,9 @@ export function tweetTime(tweet) {
 
 export const idGt = (a, b) => BigInt(a) > BigInt(b);
 
+/** 回复内容的摘要：去掉开头的 @某人，最多留 100 个字。只给弹窗「点开某人」时看，拿不到就是空串，不影响统计。 */
+const snippet = (raw) => (typeof raw === 'string' ? [...raw.replace(/^(@\w+\s+)+/, '').trim()].slice(0, 100).join('') : '');
+
 function walk(node, visit) {
   if (!node || typeof node !== 'object') return;
   visit(node);
@@ -102,6 +105,7 @@ export function parseMentions(body, me) {
       target_post_id: t.in_reply_to_status_id_str,
       conversation_id: conv,
       root_mine: rootMine,
+      text: snippet(t.full_text ?? t.text),
     });
   }
 

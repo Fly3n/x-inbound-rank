@@ -2,7 +2,7 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { board, ranking, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import { board, ranking, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
 import { parseMentions, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
@@ -47,6 +47,13 @@ test('标签颜色：按次数分档，不按名次', () => {
   assert.equal(colorOf(99, cleanRules({ tiers: [], baseColor: 'purple' })), 'purple');
 });
 
+test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
+  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, ev(5, 'b', 1)];
+  const d = repliesOf(events, 'a', rules(), NOW);
+  assert.deepEqual([d.total, d.items.map((x) => [x.id, x.text])], [2, [['1', '早'], ['2', '']]]);
+  assert.equal(repliesOf(events, 'a', rules(), NOW, 1).items.length, 1);
+});
+
 test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW);
   assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
@@ -86,7 +93,7 @@ test('解析：只收直接回复我的，引用和提及不计', () => {
   const b = body(
     [
       myOld,
-      tweet('200', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' }), // 评论我的帖子
+      tweet('200', '2', { full_text: '@Me @Other 说得对', in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' }), // 评论我的帖子
       tweet('150', '3', {}), // 别人的帖子
       tweet('206', '3', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '160', conversation_id_str: '150' }), // 我在别人帖下评论，对方回我
       tweet('207', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '170', conversation_id_str: '90' }), // 深层回复，根帖 90 不在这一页里
@@ -100,6 +107,7 @@ test('解析：只收直接回复我的，引用和提及不计', () => {
   );
   const r = parseMentions(b, me);
   assert.deepEqual(r.events.map((e) => [e.id, e.actor_handle, e.root_mine]), [['200', 'Fan', true], ['206', 'Other', false], ['207', 'Fan', null]]);
+  assert.deepEqual(r.events.map((e) => e.text), ['说得对', '', ''], '摘要去掉开头的 @，拿不到内容就是空串');
   assert.equal(r.bottomCursor, 'CURSOR');
   assert.equal(r.newestId, '207');
   // 被引用的旧帖 100 不在时间线条目里，不能把「本页最早时间」拉回到 1 月

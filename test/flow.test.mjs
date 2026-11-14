@@ -181,6 +181,11 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok((await send({ type: 'startBackfill', account: 'me' })).error);
   assert.equal(server.calls, before);
 
+  // 点开某人：返回他在窗口内的回复
+  const detail = await send({ type: 'getReplies', account: 'me', actorId: '2' });
+  assert.equal(detail.total, 14);
+  assert.equal(await send({ type: 'getReplies', account: 'me', actorId: '3' }).then((d) => d.total), 0, '别人帖子下的不算');
+
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });
   assert.equal(await count(), 0);
@@ -188,4 +193,14 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store['snap:me'], undefined);
   assert.equal(store['cursor:me'], undefined);
   assert.equal(store['settings:me'].fetchEnabled, false);
+
+  // 过期清理：只留最近 30 天，一天最多清一次
+  const { putEvents } = await import('../src/db.js');
+  const old = (id, daysAgo) => ({ id, actor_id: '2', actor_handle: 'Fan', actor_name: 'Fan', actor_avatar: '', created_at: Date.now() - daysAgo * DAY, conversation_id: '1', root_mine: true });
+  await putEvents('me', [old('1', 1), old('2', 29), old('3', 31), old('4', 90)]);
+  await listeners.alarm({ name: 'tick' });
+  assert.equal(await count(), 2);
+  await putEvents('me', [old('5', 40)]);
+  await listeners.alarm({ name: 'tick' });
+  assert.equal(await count(), 3, '24 小时内不重复清');
 });

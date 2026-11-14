@@ -9,7 +9,7 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - 榜单和标签只有两个条件：窗口内回复至少 `minCount` 次；最多前 `topN` 名。两个值用户可调（2026-11-13 负责人定）：`topN` 默认 100、范围 10–500、界面每次加减 50；`minCount` 默认 2、范围 1–99、每次加减 1。不足名次上限就有多少显示多少。
 - 时间线标签显示「名次图标 + 名次、回复图标 + 次数」。颜色按**回复次数**分档，不按名次（名次靠后的往往都只有两三次，负责人要的是一眼判断值不值得回）。默认：≥20 次红、10–19 次橙、5–9 次蓝、其余灰（负责人 2026-11-13 按一周的量定），7 天和 15 天窗口共用。用户可改每档的门槛和颜色、加档删档，最多 4 个门槛档加 1 个兜底色共 5 种；可选 8 色（`rank.js` 的 `COLORS`，色值在 `badge.css` 的 `[data-xir-c]`，弹窗通过引入同一份 CSS 共用）。颜色都是实心底色配固定字色，不随 X 的主题变。
 - 规则的默认值、范围和合法化都在 `rank.js`（`DEFAULT_RULES`、`LIMITS`、`cleanRules`）；设置读出时总会过一遍 `cleanRules`，所以别处不用再校验。「恢复默认」只恢复 `topN`、`minCount`、`tiers`、`baseColor`。
-- 弹窗分「榜单」「设置」两页；榜单页有搜索、窗口内总量汇总、导出 CSV。
+- 弹窗分「榜单」「设置」两页；榜单页有搜索、窗口内总量汇总、导出 CSV；点某一行展开这个人在窗口内的回复列表（只用本地已有数据，不发请求）。
 - 每次「启动 / 初始化」都从最新一条重新往回读，不做接续翻页（负责人知情后定）。
 - 只算**我的帖子下**别人直接回复我的；我去别人帖子下评论后对方回我的不算（同日定）。
 - 数据来源是 X 网页版「通知 → 提及」的内部接口，用已登录的网页会话读。不走官方 API，不逐帖抓评论（请求量大、接口更脆，已比较过）。
@@ -57,8 +57,11 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `target_post_id` | 被回复的那条（我的帖子或评论） |
 | `conversation_id` | 对话根帖 ID |
 | `root_mine` | 根帖是不是我的：`true` / `false` / `null`（抓取时那页看不出来） |
+| `text` | 回复内容摘要：去掉开头的 @、最多 100 字；只给弹窗「点开某人」看，拿不到是空串。2026-11-14 之前入库的没有这个字段，重新初始化会补上 |
 
 表里存的是**所有直接回复我的**，包括 `root_mine` 为 `false` 的；是否上榜在 `rank.js` 的 `underMyPosts` 里过滤。这样以后改口径不用重新抓。`root_mine === null` 的，只有同一 `conversation_id` 下存在 `root_mine === true` 的记录时才计入。
+
+**保留期**：只留最近 30 天（`background.js` 的 `KEEP_DAYS`），兜底闹钟里每天最多清一次。最长的统计窗口是 15 天，更早的用不上；不清的话库会无限增长，而每次重算快照都要把该账号的事件全读一遍。量级参考：一条约 300–500 字节，一周 1 万条回复时 30 天约 4 万多条、十几 MB，全读一遍在百毫秒级。要做「和上一个窗口比名次变化」这类功能，30 天正好够 15 天窗口用。
 
 `chrome.storage.local` 键（定义在 `db.js` 的 `keys`）：
 
@@ -68,7 +71,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `current` | 当前 X 会话登录的账号 |
 | `pendingUserId` | 识别不到 handle、等用户手填时暂存的用户 ID |
 | `settings:<账号>` | `{ fetchEnabled, windowDays, topN, minCount, tiers: [{ min, color }], baseColor }`，后五项是榜单规则，见 `rank.js` 的 `DEFAULT_RULES` |
-| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill }`。`nextIncAt` 是下一次增量最早什么时候跑。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量正常结束或读满上限时前移到本轮最新一条，出错中断时不动、下次重读这一段（靠主键去重） |
+| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt }`。`nextIncAt` 是下一次增量最早什么时候跑。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量正常结束或读满上限时前移到本轮最新一条，出错中断时不动、下次重读这一段（靠主键去重） |
 | `job:<账号>` | 回填任务状态，见下 |
 | `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, color, last } } }`，内容就是回复榜；改任何设置、有 X 页面上线时都立刻重算 |
 | `alert:<账号>` | 最近一次抓取或解析错误，下次成功后清除 |

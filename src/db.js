@@ -63,6 +63,25 @@ export async function clearEvents(account) {
   await done(tx);
 }
 
+/** 删掉早于 beforeTs 的事件，返回删了几条。 */
+export async function pruneEvents(account, beforeTs) {
+  const db = await open();
+  const tx = db.transaction(STORE, 'readwrite');
+  let removed = 0;
+  const req = tx.objectStore(STORE).openCursor(accountRange(account));
+  req.onsuccess = () => {
+    const c = req.result;
+    if (!c) return;
+    if (c.value.created_at < beforeTs) {
+      c.delete();
+      removed++;
+    }
+    c.continue();
+  };
+  await done(tx);
+  return removed;
+}
+
 // ---- chrome.storage.local ----
 
 export async function kvGet(key, fallback = null) {
@@ -81,7 +100,7 @@ export const keys = {
   current: 'current', // 当前 X 会话登录的 handle
   pendingUserId: 'pendingUserId', // 识别不到 handle 时，等用户手动填
   settings: (a) => `settings:${a}`,
-  cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill }
+  cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt }
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
   alert: (a) => `alert:${a}`, // 最近一次抓取/解析错误

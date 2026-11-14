@@ -4,7 +4,7 @@ import { COLORS, LIMITS, DEFAULT_RULES, colorOf } from '../rank.js';
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '' };
+const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null }; // open：榜单里点开的那个人
 
 const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 const pad = (n) => String(n).padStart(2, '0');
@@ -48,6 +48,24 @@ function jobText(job) {
 
 // ---------- 榜单页 ----------
 
+const fetchDetail = () => call('getReplies', { account: view.account, actorId: view.open });
+
+/** 点开某个人后，他那一行下面展开的回复列表。每条点了跳到 X 上的那条回复。 */
+function detailRow() {
+  const d = view.detail;
+  if (!d) return el('li', { className: 'detail hint', textContent: '读取中…' });
+  const more = d.total > d.items.length ? `，这里显示最近 ${d.items.length} 条` : '';
+  return el('li', { className: 'detail' }, [
+    el('div', { className: 'hint', textContent: `窗口内在我的帖子下回复了 ${d.total} 次${more}：` }),
+    ...d.items.map((it) =>
+      el('a', { className: 'reply', href: `https://x.com/i/status/${it.id}`, target: '_blank', rel: 'noreferrer' }, [
+        el('span', { className: 'time', textContent: fmtTime(it.created_at) }),
+        el('span', { className: 'text', textContent: it.text || '（没存内容，点开看原文）' }),
+      ]),
+    ),
+  ]);
+}
+
 function renderList() {
   const { eventCount } = view;
   const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
@@ -59,8 +77,8 @@ function renderList() {
       : `这个窗口内还没有人回复我 ${view.rules.minCount} 次及以上`;
   $('list').replaceChildren(
     ...(rows.length
-      ? rows.map((r) =>
-          el('li', {}, [
+      ? rows.flatMap((r) => [
+          el('li', { className: 'person', title: '点开看他回复了哪几条', dataset: { actor: r.actor_id } }, [
             el('span', { className: 'rank', textContent: r.rank }),
             el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
             el('div', { className: 'who' }, [
@@ -69,7 +87,8 @@ function renderList() {
             ]),
             el('span', { className: 'chip', dataset: { xirC: r.color }, title: '窗口内的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
-        )
+          ...(view.open === r.actor_id ? [detailRow()] : []),
+        ])
       : [el('li', { className: 'empty', textContent: empty })]),
   );
 }
@@ -166,6 +185,7 @@ async function render() {
   const unfinished = job && job.status !== 'done';
   $('jobLine').hidden = !unfinished;
   if (unfinished) $('jobLine').textContent = `数据还在读取，榜单会继续变。${jobText(job)}`;
+  if (view.open) view.detail = await fetchDetail();
   renderList();
 
   // 设置页：数据
@@ -207,6 +227,18 @@ $('tabs').addEventListener('click', (e) => {
 });
 $('window').addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
 $('search').addEventListener('input', renderList);
+$('list').addEventListener('click', async (e) => {
+  if (e.target.closest('a')) return; // 名字和回复条目是链接，照常跳转
+  const li = e.target.closest('li.person');
+  if (!li) return;
+  view.open = view.open === li.dataset.actor ? null : li.dataset.actor;
+  view.detail = null;
+  renderList();
+  if (view.open) {
+    view.detail = await fetchDetail();
+    renderList();
+  }
+});
 
 // 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1；也可以直接输入，越界的由后台夹回范围
 const STEP = {
@@ -254,7 +286,7 @@ $('export').addEventListener('click', () => {
   URL.revokeObjectURL(a.href);
 });
 
-$('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; render(); });
+$('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
 $('start').addEventListener('click', () => {
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
   if (confirm(`将用你的 X 登录会话，限速回填最近 ${view.rules.windowDays} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
