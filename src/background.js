@@ -342,15 +342,20 @@ async function maybeIncremental() {
 // ---------- 我在别人帖子下的回复 ----------
 // 数据来自我自己主页「回复」栏的列表（里面混着原创帖和转发，解析时只留回复）。
 // 状态放在 cursor.out：{ status: 'ok'|'need_tpl'|'error', message, syncedId, coverTs, lastAt, pages }
-//   syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的统计范围（天），比当前范围小就要重新完整读；
+//   running：{ at, pages } 正在读、已读几页（读完清掉）；syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的统计范围（天），比当前范围小就要重新完整读；
 //   resume：完整读被页数上限截断时的续读位置；lastAt：最近一次读完的时间；lastFullAt / lastFullDays：最近一次完整读（初始化）完成的时间和范围。
 
 const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
 
-async function saveOut(account, patch) {
-  const cur = await kvGet(keys.cursor(account), {});
-  cur.out = { ...cur.out, ...patch };
-  await kvSet(keys.cursor(account), cur);
+// 先读后写，所以排队一个一个来：两次保存交叠的话，后写的会把先写的那几项盖掉
+let outQueue = Promise.resolve();
+function saveOut(account, patch) {
+  outQueue = outQueue.then(async () => {
+    const cur = await kvGet(keys.cursor(account), {});
+    cur.out = { ...cur.out, ...patch };
+    await kvSet(keys.cursor(account), cur);
+  });
+  return outQueue;
 }
 
 /** force：手动点「初始化」，不管上次读到哪，按统计范围重新读一遍。 */
@@ -363,6 +368,7 @@ async function syncOut(force = false) {
   if (force) await saveOut(account, { fullFor: 0, resume: null });
   const cur = await kvGet(keys.cursor(account), {});
   const me = (await kvGet(keys.accounts, {}))[account];
+  if (!me) return;
   const tpl = await kvGet(keys.tpl);
   if (!tpl) return saveOut(account, { status: 'need_tpl', message: NEED_TPL });
 
@@ -375,6 +381,8 @@ async function syncOut(force = false) {
 
   busy = true;
   try {
+    // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
+    await saveOut(account, { running: { at: now(), pages: 0 } });
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let reachedTs = null;
@@ -383,8 +391,9 @@ async function syncOut(force = false) {
     for (; pages < PACE.outMaxPages; pages++) {
       if (pages) await sleep(rand(PACE.incPageGapMs));
       const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor });
-      if (r.error === 'no_tab') return; // 没有 X 标签页，下一轮再读
-      if (r.userId && me.userId && r.userId !== me.userId) return;
+      // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
+      if (r.error === 'no_tab') return force && saveOut(account, { status: 'error', message: '没有可用的 X 标签页。打开或刷新一个 x.com 页面后再点「初始化」' });
+      if (r.userId && me.userId && r.userId !== me.userId) return force && saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
       if (r.status === 429) return saveOut(account, { status: 'error', message: '被 X 限流（429），下一轮再读' });
       if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
         await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数），等页面再发一次新的
@@ -399,6 +408,7 @@ async function syncOut(force = false) {
         return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
       }
       await putEvents(account, p.events, OUT);
+      await saveOut(account, { running: { at: now(), pages: pages + 1 } });
       if (pages === 0 && !resume) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
@@ -420,7 +430,11 @@ async function syncOut(force = false) {
     }
     // 完整读结束（读到了范围起点、列表到底，或续读轮数用完）：记下完成时间
     await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.windowDays, resume: null, lastAt: now(), lastFullAt: now(), lastFullDays: settings.windowDays });
+  } catch (e) {
+    // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
+    await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
   } finally {
+    await saveOut(account, { running: null });
     busy = false;
   }
 }
@@ -521,6 +535,7 @@ const handlers = {
       alert: await kvGet(keys.alert(account)),
       eventCount: db.in.count,
       db,
+      tplAt: (await kvGet(keys.tpl))?.at || null, // 什么时候看到过 X 读「回复」列表的请求；没看到过就读不了「我回别人」
     };
   },
   async getBoard({ account }) {
@@ -532,7 +547,17 @@ const handlers = {
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
     if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
-    syncOut(true); // 不等待，进度看设置页「我回别人」那一行
+    // 点了一定要有回应：读不了的原因当场说，能读的在设置页「我回别人」那一行显示进度
+    if (!(await kvGet(keys.tpl))) {
+      await saveOut(account, { status: 'need_tpl', message: NEED_TPL });
+      return { error: `现在还读不了：插件还没看到 X 是怎么读「回复」列表的。\n${NEED_TPL}（在 x.com 点自己的头像进主页，再点「回复」），然后回来再点「初始化」。` };
+    }
+    if (busy) {
+      await saveOut(account, { fullFor: 0, resume: null });
+      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+      return { error: '正在读另一份数据，一两分钟后会自动开始读「我回别人」，不用再点。' };
+    }
+    syncOut(true).catch((e) => saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` })); // 不等待
     return { ok: true };
   },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),

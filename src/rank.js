@@ -23,8 +23,8 @@ export const DEFAULT_RULES = {
   baseColor: 'gray',
   // 时间线上三种标签各自显不显示
   showRank: true, // 名次 + 回复次数
-  showRel: true, // 关系：互 / 粉 / 关
-  showPlace: true, // 通知列表里这条回复在谁的帖子下：M / H / O
+  showRel: true, // 关系：互 / 粉
+  showPlace: true, // 通知列表里回复在我的帖子下的标 M
 };
 
 const clampInt = (v, [lo, hi], fallback) => {

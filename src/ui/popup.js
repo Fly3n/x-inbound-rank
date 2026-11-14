@@ -187,7 +187,10 @@ async function render() {
   const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
   // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
   const span = (d) => (d.count ? `本机 ${d.count} 条，${fmtDay(d.from)} – ${fmtDay(d.to)}。` : '本机还没有数据。');
+  const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
   $('outStatus').textContent =
+    (running ? `正在读取：已读 ${running.pages} 页…` : '') +
+    (s.tplAt ? '' : '还没看到 X 的「回复」列表请求：先在 X 上打开自己主页的「回复」栏一次。') +
     span(s.db.out) +
     (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
     (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +
@@ -197,7 +200,8 @@ async function render() {
     (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
   $('outLine').hidden = !(outBad && s.eventCount);
   $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
-  $('outSync').disabled = !isSession || !rules.fetchEnabled;
+  $('outSync').disabled = !isSession || !rules.fetchEnabled || !!running;
+  $('outSync').textContent = running ? '读取中…' : '初始化';
   $('window').value = $('range').value = String(rules.windowDays);
   $('exportBoard').disabled = !rows.length;
   $('exportAll').disabled = !s.db.in.count && !s.db.out.count;

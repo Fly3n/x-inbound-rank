@@ -1,6 +1,6 @@
 {
   "name": "x-inbound-rank",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Chrome 插件「X 回复榜」：统计谁最常在我的 X 帖子下回复我",
   "license": "MIT",
   "private": true,

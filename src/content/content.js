@@ -95,6 +95,10 @@
     lastTpl = url;
     send({ type: 'xir:tpl', url });
   }
+  // tap.js 也会把它看到的这个请求地址报过来
+  window.addEventListener('message', (e) => {
+    if (e.source === window && e.origin === location.origin && typeof e.data?.xirTpl === 'string') noteTpl(e.data.xirTpl);
+  });
   try {
     new PerformanceObserver((list) => list.getEntries().forEach((e) => noteTpl(e.name))).observe({ type: 'resource', buffered: true });
   } catch {
@@ -153,11 +157,12 @@
   }
 
   // ---------- 关系标签和帖子归属标签 ----------
-  // 用户名旁的单字小标：关系一个（互 / 粉 / 关），通知列表里回复我的那条另有一个（M / H / O）标它在谁的帖子下。两个各自独立。
-  const REL = { mutual: '互', fan: '粉', following: '关' };
-  const REL_TIP = { mutual: '互关：你们互相关注', fan: '粉丝：他关注了你，你没有关注他', following: '已关注：你关注了他，他没有关注你' };
-  const PLACE = { me: 'M', him: 'H', other: 'O' };
-  const PLACE_TIP = { me: 'M（Me）：这条回复在我的帖子下', him: 'H（Him）：这条回复在他自己的帖子下', other: 'O（Other）：这条回复在别人的帖子下' };
+  // 用户名旁的单字小标，两个各自独立（负责人定：只要这三种，别的情况都不标）：
+  //   关系：互（互关）、粉（他关注我、我没关注他）；通知列表里回复我的那条：M（这条回复在我的帖子下）。
+  const REL = { mutual: '互', fan: '粉' };
+  const REL_TIP = { mutual: '互关：你们互相关注', fan: '粉丝：他关注了你，你没有关注他' };
+  const PLACE = { me: 'M' };
+  const PLACE_TIP = { me: 'M：这条回复在我的帖子下' };
   const places = new Map(); // 帖子 ID -> 'me' | 'him' | 'other' | null（问过后台、本机数据也看不出来）
   let asking = new Set();
   let askTimer = null;

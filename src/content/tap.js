@@ -3,6 +3,14 @@
 // 不发任何请求，不改请求，也不改返回给页面的内容。出任何错都吞掉，不能影响 X 页面本身。
 (() => {
   const API = /\/i\/api\/(graphql|2)\//;
+  const REPLIES = /\/i\/api\/graphql\/[\w-]+\/UserTweetsAndReplies\?/; // 我自己主页「回复」栏的列表
+  const note = (url) => {
+    try {
+      if (REPLIES.test(url)) window.postMessage({ xirTpl: new URL(url, location.href).href }, location.origin);
+    } catch {
+      // 忽略
+    }
+  };
   const MAX = 8_000_000; // 太大的返回不转
 
   const post = (text) => {
@@ -16,6 +24,7 @@
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     try {
+      note(String(url));
       if (API.test(String(url))) {
         this.addEventListener('load', () => {
           try {
@@ -37,6 +46,7 @@
     const p = origFetch.apply(this, arguments);
     try {
       const url = typeof input === 'string' ? input : input?.url;
+      note(String(url));
       if (API.test(String(url))) {
         p.then((res) => res.clone().text().then(post)).catch(() => {});
       }
