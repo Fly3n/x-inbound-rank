@@ -16,6 +16,7 @@
   let account = null; // 当前账号（小写 handle）
   let users = {}; // 快照：handle -> { rank, count, color, last }
   let windowDays = 7; // 快照按几天的窗口算的
+  let show = { rank: true, rel: true, place: true }; // 三种标签各自显不显示（设置页的开关，随快照下发）
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
   const send = (msg) =>
@@ -54,6 +55,7 @@
     users = snap?.users || {};
     places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
     windowDays = snap?.windowDays || 7;
+    show = { rank: true, rel: true, place: true, ...snap?.show };
     rescan();
   }
 
@@ -120,7 +122,7 @@
 
   function mark(nameEl) {
     const handle = handleOf(nameEl);
-    const u = handle && users[handle];
+    const u = show.rank && handle && users[handle];
     let badge = nameEl.querySelector('.xir-badge');
     markRel(nameEl, handle);
     if (!u) {
@@ -139,8 +141,8 @@
     // 我们要是成了最后一个子节点，它的标记就会塞进我们的标签里，把标签撑长。
     const host = nameEl.lastElementChild || nameEl;
     // 名次标签排在关系标签前面
-    const relEl = host.querySelector(':scope > .xir-rel');
-    if (badge.parentElement !== host || (relEl && badge.nextElementSibling !== relEl)) host.insertBefore(badge, relEl);
+    const next = host.querySelector(':scope > .xir-chip');
+    if (badge.parentElement !== host || (next && badge.nextElementSibling !== next)) host.insertBefore(badge, next);
     // X 的列表会复用节点，同一个节点可能换成另一个人，每次都按当前 handle 重写
     const [rank, count] = [badge.children[1], badge.children[3]];
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
@@ -150,12 +152,12 @@
     badge.dataset.xirC = u.color || 'gray';
   }
 
-  // ---------- 关系标签 ----------
-  // 用户名旁的小字：通知列表里是「我帖 · 互关」这样两段，其他地方只有关系一段。
-  const REL = { mutual: '互关', fan: '粉丝', following: '已关注' };
-  const REL_TIP = { mutual: '你们互相关注', fan: '他关注了你，你没有关注他', following: '你关注了他，他没有关注你' };
-  const PLACE = { me: '我帖', him: '他帖', other: '别人帖' };
-  const PLACE_TIP = { me: '这条回复在我的帖子下', him: '这条回复在他自己的帖子下', other: '这条回复在别人的帖子下' };
+  // ---------- 关系标签和帖子归属标签 ----------
+  // 用户名旁的单字小标：关系一个（互 / 粉 / 关），通知列表里回复我的那条另有一个（M / H / O）标它在谁的帖子下。两个各自独立。
+  const REL = { mutual: '互', fan: '粉', following: '关' };
+  const REL_TIP = { mutual: '互关：你们互相关注', fan: '粉丝：他关注了你，你没有关注他', following: '已关注：你关注了他，他没有关注你' };
+  const PLACE = { me: 'M', him: 'H', other: 'O' };
+  const PLACE_TIP = { me: 'M（Me）：这条回复在我的帖子下', him: 'H（Him）：这条回复在他自己的帖子下', other: 'O（Other）：这条回复在别人的帖子下' };
   const places = new Map(); // 帖子 ID -> 'me' | 'him' | 'other' | null（问过后台、本机数据也看不出来）
   let asking = new Set();
   let askTimer = null;
@@ -188,25 +190,32 @@
     return null;
   }
 
-  function markRel(nameEl, handle) {
-    const rel = handle && handle !== account ? XIRRel.rel.get(handle) : null;
-    const place = handle && handle !== account ? placeFor(nameEl) : null;
-    const parts = [PLACE[place], REL[rel]].filter(Boolean);
-    let el = nameEl.querySelector('.xir-rel');
-    if (!parts.length) {
+  /** 在用户名那一行放一个单字小标（cls 区分是哪种）；text 为空就去掉。before：要排在它前面的那个节点。 */
+  function chip(nameEl, cls, text, kind, title, before) {
+    let el = nameEl.querySelector(`.${cls}`);
+    if (!text) {
       el?.remove();
-      return;
+      return null;
     }
     if (!el) {
       el = document.createElement('span');
-      el.className = 'xir-rel';
+      el.className = `xir-chip ${cls}`;
     }
     const host = nameEl.lastElementChild || nameEl;
-    if (el.parentElement !== host) host.appendChild(el);
-    const text = parts.join(' · ');
+    if (el.parentElement !== host || (before && el.nextElementSibling !== before)) host.insertBefore(el, before?.parentElement === host ? before : null);
     if (el.textContent !== text) el.textContent = text;
-    el.dataset.xirRel = REL[rel] ? rel : 'place';
-    el.title = [PLACE_TIP[place], REL_TIP[rel]].filter(Boolean).join('；');
+    el.dataset.xirK = kind;
+    el.title = title;
+    return el;
+  }
+
+  // 一行里的顺序：名次标签、关系、帖子归属
+  function markRel(nameEl, handle) {
+    const other = handle && handle !== account;
+    const place = other && show.place ? placeFor(nameEl) : null;
+    const rel = other && show.rel ? XIRRel.rel.get(handle) : null;
+    const placeEl = chip(nameEl, 'xir-place', PLACE[place], place, PLACE_TIP[place], null);
+    chip(nameEl, 'xir-rel', REL[rel], rel, REL_TIP[rel], placeEl);
   }
 
   let tip;

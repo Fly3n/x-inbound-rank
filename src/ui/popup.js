@@ -228,6 +228,7 @@ async function render() {
     (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
     (s.cursor.earliestTs && short ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
   $('fetchEnabled').checked = rules.fetchEnabled;
+  for (const k of SHOW) $(k).checked = rules[k];
 
   // 设置页：口径与颜色
   setValue($('topN'), rules.topN);
@@ -352,6 +353,8 @@ $('start').addEventListener('click', () => {
 $('outSync').addEventListener('click', () => act('syncOutNow'));
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
+const SHOW = ['showRank', 'showRel', 'showPlace']; // 时间线上三种标签的开关
+for (const k of SHOW) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
 $('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空 @${view.account} 在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');

@@ -21,6 +21,10 @@ export const DEFAULT_RULES = {
     { min: 5, color: 'blue' },
   ],
   baseColor: 'gray',
+  // 时间线上三种标签各自显不显示
+  showRank: true, // 名次 + 回复次数
+  showRel: true, // 关系：互 / 粉 / 关
+  showPlace: true, // 通知列表里这条回复在谁的帖子下：M / H / O
 };
 
 const clampInt = (v, [lo, hi], fallback) => {
@@ -44,6 +48,9 @@ export function cleanRules(raw = {}) {
     minCount: clampInt(raw.minCount, LIMITS.minCount, d.minCount),
     tiers,
     baseColor: color(raw.baseColor, d.baseColor),
+    showRank: raw.showRank !== false,
+    showRel: raw.showRel !== false,
+    showPlace: raw.showPlace !== false,
   };
 }
 

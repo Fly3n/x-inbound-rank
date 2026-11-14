@@ -128,6 +128,21 @@
       </section>
 
       <section class="card">
+        <h2>时间线上显示什么 <button class="q" data-tip="tip-show" title="这些标签是什么">?</button></h2>
+        <div class="tip" id="tip-show" hidden>
+          <ul>
+            <li>名次标签：榜上的人，名字旁显示名次和回复次数。</li>
+            <li>关系：<b>互</b> 互关；<b>粉</b> 他关注我、我没关注他；<b>关</b> 我关注他、他没关注我。互不关注的不标。</li>
+            <li>帖子归属（只在通知列表）：这条回复在谁的帖子下。<b>M</b> 我的；<b>H</b> 他自己的；<b>O</b> 别人的。</li>
+            <li>关掉哪个，时间线上就不再显示哪个；数据照常读。</li>
+          </ul>
+        </div>
+        <label class="line"><input type="checkbox" id="showRank"> 名次标签（名次 + 回复次数）</label>
+        <label class="line"><input type="checkbox" id="showRel"> 关系（互 / 粉 / 关）</label>
+        <label class="line"><input type="checkbox" id="showPlace"> 通知列表里的帖子归属（M / H / O）</label>
+      </section>
+
+      <section class="card">
         <h2>榜单口径 <button class="q" data-tip="tip-rules" title="口径说明">?</button></h2>
         <div class="tip" id="tip-rules" hidden>
           <ul>

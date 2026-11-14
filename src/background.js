@@ -120,7 +120,7 @@ const board = async (account) => ranking(await getEvents(account), await getSett
 
 async function refreshSnapshot(account) {
   const rules = await getSettings(account);
-  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, users: badgeSnapshot(await getEvents(account), rules) });
+  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, show: { rank: rules.showRank, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules) });
 }
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });

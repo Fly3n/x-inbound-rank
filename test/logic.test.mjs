@@ -36,8 +36,9 @@ test('回复榜：名次上限可调，默认 100', () => {
 
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  const r = cleanRules({ windowDays: 60, topN: 9999, minCount: 0, baseColor: 'pink', tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
-  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  const r = cleanRules({ windowDays: 60, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  // 三个显示开关：只有明确写 false 才是关
+  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);

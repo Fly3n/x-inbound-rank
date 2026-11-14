@@ -29,24 +29,27 @@
   margin-right: 6px;
 }
 
-/* 关系标签：描边小字，跟在名次标签后面。颜色固定，X 的三种主题下都看得清 */
-.xir-rel {
+/* 单字小标：关系（互 / 粉 / 关）和帖子归属（M / H / O），各自一个，跟在名次标签后面。颜色固定，X 的三种主题下都看得清 */
+.xir-chip {
   flex: 0 0 auto;
   align-self: flex-start;
-  width: fit-content;
-  margin-left: 6px;
-  padding: 0 6px;
-  height: 18px;
   box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0 3px;
   border: 1px solid currentColor;
   border-radius: 9px;
-  font: 600 11px/16px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font: 700 11px/16px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  text-align: center;
   white-space: nowrap;
   cursor: default;
   color: #8b98a5;
 }
-.xir-rel[data-xir-rel="mutual"] { color: #1d9bf0; }
-.xir-rel[data-xir-rel="fan"] { color: #16a34a; }
+.xir-chip[data-xir-k="mutual"] { color: #1d9bf0; }
+.xir-chip[data-xir-k="fan"] { color: #16a34a; }
+.xir-chip[data-xir-k="me"] { color: #ea580c; }
+.xir-badge + .xir-chip { margin-left: 6px; }
 
 /*
  * 调色板：8 种颜色，名字与 rank.js 的 COLORS 一一对应；弹窗里的色块和次数小块也用这一份。
