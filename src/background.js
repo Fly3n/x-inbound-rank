@@ -19,11 +19,12 @@ const PACE = {
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
-  outMaxPages: 40, // 我的回复：单次最多页数
+  outMaxPages: 40, // 我的回复：单次（一个闹钟事件里）最多页数
+  outMaxRounds: 10, // 我的回复：一次完整读最多接着读几轮（共约 8000 条帖子），再多就到此为止
 };
 
-// 本地只留最近这么多天的回复：最长的统计窗口是 15 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
-const KEEP_DAYS = 30;
+// 本地只留最近这么多天的回复：最长的统计范围是 30 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
+const KEEP_DAYS = 45;
 
 const TICK_ALARM = 'tick';
 const JOB_ALARM = 'job';
@@ -341,7 +342,8 @@ async function maybeIncremental() {
 // ---------- 我在别人帖子下的回复 ----------
 // 数据来自我自己主页「回复」栏的列表（里面混着原创帖和转发，解析时只留回复）。
 // 状态放在 cursor.out：{ status: 'ok'|'need_tpl'|'error', message, syncedId, coverTs, lastAt, pages }
-//   syncedId：上次读到的最新一条；coverTs：从 syncedId 往回连续读到了哪个时间点。
+//   syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的统计范围（天），比当前范围小就要重新完整读；
+//   resume：完整读被页数上限截断时的续读位置；lastAt：最近一次读完的时间；lastFullAt / lastFullDays：最近一次完整读（初始化）完成的时间和范围。
 
 const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
 
@@ -351,12 +353,14 @@ async function saveOut(account, patch) {
   await kvSet(keys.cursor(account), cur);
 }
 
-async function syncOut() {
+/** force：手动点「初始化」，不管上次读到哪，按统计范围重新读一遍。 */
+async function syncOut(force = false) {
   const account = await kvGet(keys.current);
   if (!account) return;
   if (busy) return void chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return;
+  if (force) await saveOut(account, { fullFor: 0, resume: null });
   const cur = await kvGet(keys.cursor(account), {});
   const me = (await kvGet(keys.accounts, {}))[account];
   const tpl = await kvGet(keys.tpl);
@@ -364,13 +368,15 @@ async function syncOut() {
 
   const targetTs = now() - settings.windowDays * DAY_MS;
   const prev = cur.out || {};
-  // 上次连续读到的范围够覆盖统计窗口，这次只要读到上次的位置；不够（第一次、或窗口从 7 天改成半个月）就读到窗口起点
-  const stopAt = prev.syncedId && prev.coverTs && prev.coverTs <= targetTs ? prev.syncedId : null;
+  // 完整读：第一次、统计范围调大了、或手动初始化——读到范围起点。否则只读到上次的位置。
+  const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays;
+  const resume = full ? prev.resume : null; // 上一轮完整读被页数上限截断，这一轮接着读
+  const stopAt = full ? null : prev.syncedId;
 
   busy = true;
   try {
-    let cursor = null;
-    let topId = null;
+    let cursor = resume?.cursor || null;
+    let topId = resume?.topId || null;
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
     let pages = 0;
@@ -393,26 +399,27 @@ async function syncOut() {
         return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
       }
       await putEvents(account, p.events, OUT);
-      if (pages === 0) topId = p.newestId;
+      if (pages === 0 && !resume) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
       if (ended || p.oldestTs <= targetTs || (stopAt && !idGt(p.oldestId, stopAt))) {
         complete = true;
-        if (ended) reachedTs = targetTs; // 更早的没有了，等于覆盖到了窗口起点
         pages++;
         break;
       }
       cursor = p.bottomCursor;
     }
-    const joined = complete && stopAt && reachedTs > targetTs; // 接上了上次的位置：覆盖范围沿用上次的
-    await saveOut(account, {
-      status: 'ok',
-      message: null,
-      syncedId: topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId,
-      coverTs: joined ? prev.coverTs : reachedTs,
-      lastAt: now(),
-      pages,
-    });
+    const done = { status: 'ok', message: null, pages, syncedId: topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId };
+    if (!full) return saveOut(account, { ...done, lastAt: now() });
+    const rounds = (resume?.rounds || 0) + 1;
+    if (!complete && rounds < PACE.outMaxRounds) {
+      // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读
+      await saveOut(account, { ...done, coverTs: reachedTs, resume: { cursor, topId, rounds } });
+      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+      return;
+    }
+    // 完整读结束（读到了范围起点、列表到底，或续读轮数用完）：记下完成时间
+    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.windowDays, resume: null, lastAt: now(), lastFullAt: now(), lastFullDays: settings.windowDays });
   } finally {
     busy = false;
   }
@@ -498,29 +505,34 @@ const handlers = {
     return state;
   },
   async getAccountState({ account }) {
+    // 本机两份数据各有多少条、从哪天到哪天
+    const span = (rows) => rows.reduce((d, e) => ({ count: d.count + 1, from: Math.min(d.from ?? e.created_at, e.created_at), to: Math.max(d.to ?? e.created_at, e.created_at) }), { count: 0, from: null, to: null });
+    const db = { in: span(await getEvents(account)), out: span(await getEvents(account, OUT)) };
     return {
       settings: await getSettings(account),
       cursor: await kvGet(keys.cursor(account), {}),
       job: await kvGet(keys.job(account)),
       alert: await kvGet(keys.alert(account)),
-      eventCount: (await getEvents(account)).length,
+      eventCount: db.in.count,
+      db,
     };
   },
   async getBoard({ account }) {
     return board(account); // { rows, people, replies }
   },
+  exportAll: async ({ account }) => ({ inbound: await getEvents(account), out: await getEvents(account, OUT) }),
   getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account)),
   startBackfill: ({ account }) => startBackfill(account),
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
     if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
-    syncOut(); // 不等待，进度看设置页「我回别人」那一行
+    syncOut(true); // 不等待，进度看设置页「我回别人」那一行
     return { ok: true };
   },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
-    if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '统计窗口只能是 7 天或 15 天' };
+    if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '统计范围只能是 7 天、15 天或 30 天' };
     const merged = { ...(await getSettings(account)), ...patch };
     const next = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) }; // 其余越界的值夹回范围
     await kvSet(keys.settings(account), next);

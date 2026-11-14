@@ -1,7 +1,7 @@
 // 统计层：纯函数，不依赖 X 的接口或页面结构。只统计回复。
 
 export const DAY_MS = 86400000;
-export const WINDOWS = [7, 15]; // 可选的统计窗口（天）
+export const WINDOWS = [7, 15, 30]; // 可选的统计范围（天）
 export const COLORS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray']; // 色值在 content/badge.css
 export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // maxTiers：阈值档最多 4 个，加上兜底色共 5 种颜色
 

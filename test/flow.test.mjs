@@ -151,7 +151,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(server.outCalls, 3);
 
   // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
-  assert.ok((await setWindow(30)).error, '只接受 7 或 15');
+  assert.ok((await setWindow(60)).error, '只接受 7、15、30');
   await setWindow(15);
   assert.equal(server.calls, 3);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 5]]);
@@ -176,6 +176,15 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await listeners.alarm({ name: 'out' });
   assert.equal(server.outCalls - outBefore, 3);
   assert.equal((await boardRows())[0].replied, 4);
+  assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
+  // 手动点「初始化」：不管上次读到哪，按范围重新读一遍
+  outBefore = server.outCalls;
+  await send({ type: 'syncOutNow', account: 'me' });
+  // 这一步后台不等待，页与页之间是真实的几秒间隔，所以多等一会儿
+  const redone = () => server.outCalls - outBefore === 3 && store['cursor:me'].out.fullFor === 15;
+  for (let i = 0; i < 10 && !redone(); i++) await until(redone, '手动初始化我回别人').catch(() => {});
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual([server.outCalls - outBefore, store['cursor:me'].out.fullFor], [3, 15], '手动初始化我回别人');
   // X 换了接口参数（404）：丢掉旧地址，提示再打开一次回复栏
   const realSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async () => ({ ok: false, status: 404, userId: '1' });
@@ -239,6 +248,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(detail.total, 14);
   assert.equal(await send({ type: 'getReplies', account: 'me', actorId: '3' }).then((d) => d.total), 0, '别人帖子下的不算');
 
+  // 数据现状和全量导出：两份数据各自的条数和起止时间
+  const st = await send({ type: 'getAccountState', account: 'me' });
+  assert.deepEqual([st.db.in.count, st.db.out.count], [15, 6]);
+  assert.ok(st.db.out.from < st.db.out.to && st.cursor.out.lastFullAt);
+  const all = await send({ type: 'exportAll', account: 'me' });
+  assert.deepEqual([all.inbound.length, all.out.length], [15, 6]);
+
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });
   assert.equal(await count(), 0);
@@ -247,13 +263,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store['cursor:me'], undefined);
   assert.equal(store['settings:me'].fetchEnabled, false);
 
-  // 过期清理：只留最近 30 天，一天最多清一次
+  // 过期清理：只留最近 45 天，一天最多清一次
   const { putEvents } = await import('../src/db.js');
   const old = (id, daysAgo) => ({ id, actor_id: '2', actor_handle: 'Fan', actor_name: 'Fan', actor_avatar: '', created_at: Date.now() - daysAgo * DAY, conversation_id: '1', root_mine: true });
-  await putEvents('me', [old('1', 1), old('2', 29), old('3', 31), old('4', 90)]);
+  await putEvents('me', [old('1', 1), old('2', 44), old('3', 46), old('4', 90)]);
   await listeners.alarm({ name: 'tick' });
   assert.equal(await count(), 2);
-  await putEvents('me', [old('5', 40)]);
+  await putEvents('me', [old('5', 50)]);
   await listeners.alarm({ name: 'tick' });
   assert.equal(await count(), 3, '24 小时内不重复清');
 });

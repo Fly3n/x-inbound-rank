@@ -35,7 +35,7 @@ test('回复榜：名次上限可调，默认 100', () => {
 
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  const r = cleanRules({ windowDays: 30, topN: 9999, minCount: 0, baseColor: 'pink', tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  const r = cleanRules({ windowDays: 60, topN: 9999, minCount: 0, baseColor: 'pink', tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
   assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
@@ -177,6 +177,7 @@ test('解析我的回复：只留别人帖子下的，置顶、原创、转发�
     ['901', '3', '4', 't901'],
     ['902', null, '5', 't902'],
   ]);
+  assert.deepEqual(r.events.map((e) => e.root_handle), ['u2', 'u3', null], '根帖主人的 @ID 只给导出用');
   assert.deepEqual([r.newestId, r.oldestId, r.bottomCursor], ['905', '900', 'NEXT'], '范围只看每个条目里我发的最后一条');
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10, '置顶帖和被回复的旧帖不拉低时间范围');
 });

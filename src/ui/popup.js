@@ -10,7 +10,7 @@ const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cy
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const windowLabel = (days) => (days === 15 ? '半个月' : ` ${days} 天`);
+const windowLabel = (days) => ({ 15: '半个月', 30: '一个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
   const { dataset, ...rest } = props;
@@ -56,7 +56,7 @@ function detailRow() {
   if (!d) return el('li', { className: 'detail hint', textContent: '读取中…' });
   const more = d.total > d.items.length ? `，这里显示最近 ${d.items.length} 条` : '';
   return el('li', { className: 'detail' }, [
-    el('div', { className: 'hint', textContent: `窗口内在我的帖子下回复了 ${d.total} 次${more}：` }),
+    el('div', { className: 'hint', textContent: `统计范围内在我的帖子下回复了 ${d.total} 次${more}：` }),
     ...d.items.map((it) =>
       el('a', { className: 'reply', href: `https://x.com/i/status/${it.id}`, target: '_blank', rel: 'noreferrer' }, [
         el('span', { className: 'time', textContent: fmtTime(it.created_at) }),
@@ -71,24 +71,27 @@ function renderList() {
   const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
   const rows = q ? view.rows.filter((r) => r.handle.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) : view.rows;
   const empty = !eventCount
-    ? '还没有数据，到「设置」页点「启动 / 初始化」'
+    ? '还没有数据，到「设置」页点「初始化」'
     : q
       ? '榜上没有匹配的人'
-      : `这个窗口内还没有人回复我 ${view.rules.minCount} 次及以上`;
+      : `这个范围内还没有人回复我 ${view.rules.minCount} 次及以上`;
   $('list').replaceChildren(
     ...(rows.length
       ? rows.flatMap((r) => [
           el('li', { className: 'person', title: '点开看他回复了哪几条', dataset: { actor: r.actor_id } }, [
             el('span', { className: 'rank', textContent: r.rank }),
-            el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
+            // 只有头像是去他主页的链接，这一行其他地方点了都是展开回复列表
+            el('a', { className: 'avatar', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', title: `打开 @${r.handle} 的主页` }, [
+              el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
+            ]),
             el('div', { className: 'who' }, [
-              el('a', { className: 'name', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', textContent: r.name }),
+              el('span', { className: 'name', textContent: r.name }),
               el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
             ]),
             ...(view.outReady
-              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一窗口内，我在他的帖子下回复了几次', textContent: `我回 ${r.replied}` })]
+              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，我在他的帖子下回复了几次', textContent: `我回 ${r.replied}` })]
               : []),
-            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '窗口内他在我帖子下的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
+            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '统计范围内他在我帖子下的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
           ...(view.open === r.actor_id ? [detailRow()] : []),
         ])
@@ -178,20 +181,26 @@ async function render() {
   // 榜单页
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
-  Object.assign(view, { rows, rules, eventCount: s.eventCount, outReady: !!out?.coverTs });
+  const label = windowLabel(rules.windowDays);
+  Object.assign(view, { rows, rules, eventCount: s.eventCount, outReady: !!out?.lastAt });
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
   const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
-  $('outStatus').textContent = !out
-    ? '还没读过。「别人回我」初始化完成后一两分钟会自动开始，也可以点「立即读取」。'
-    : outBad
-      ? `${outBad}${out.coverTs ? '。榜单上显示的是之前读到的数' : ''}`
-      : `已读到 ${fmtDay(out.coverTs)}，更新于 ${fmtTime(out.lastAt)}。`;
+  // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
+  const span = (d) => (d.count ? `本机 ${d.count} 条，${fmtDay(d.from)} – ${fmtDay(d.to)}。` : '本机还没有数据。');
+  $('outStatus').textContent =
+    span(s.db.out) +
+    (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
+    (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +
+    (out?.resume ? '还在继续往回读…' : '') +
+    (outBad ? `${outBad}。` : '') +
+    (!out ? '「别人回我」初始化完成后一两分钟会自动开始，也可以直接点「初始化」。' : '') +
+    (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
   $('outLine').hidden = !(outBad && s.eventCount);
   $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
   $('outSync').disabled = !isSession || !rules.fetchEnabled;
-  const label = windowLabel(rules.windowDays);
-  $('window').value = String(rules.windowDays);
-  $('export').disabled = !rows.length;
+  $('window').value = $('range').value = String(rules.windowDays);
+  $('exportBoard').disabled = !rows.length;
+  $('exportAll').disabled = !s.db.in.count && !s.db.out.count;
   $('boardHint').textContent =
     `最近${label}共 ${people} 人在我的帖子下回复了 ${replies} 次；上榜 ${rows.length} 人` +
     `（回复 ${rules.minCount} 次及以上，最多前 ${rules.topN} 名）。`;
@@ -208,16 +217,17 @@ async function render() {
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
-  $('start').textContent = active ? '重新初始化' : '启动 / 初始化';
+  $('start').textContent = active ? '重新初始化' : '初始化';
   $('start').disabled = !isSession || !rules.fetchEnabled;
   $('resume').disabled = !isSession || !rules.fetchEnabled;
+  const lb = s.cursor.lastBackfill;
   const short = s.cursor.earliestTs > Date.now() - rules.windowDays * 86400000;
-  $('coverage').textContent = s.cursor.earliestTs
-    ? `已读到 ${fmtDay(s.cursor.earliestTs)}，本机共 ${s.eventCount} 条。` +
-      (short ? `还没覆盖满${label}，要补齐就点「启动 / 初始化」。` : '')
-    : '';
+  $('coverage').textContent =
+    span(s.db.in) +
+    (lb ? `上次初始化完成：${fmtTime(lb.finishedAt)}（最近${windowLabel(lb.rangeDays)}）。` : '') +
+    (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
+    (s.cursor.earliestTs && short ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
   $('fetchEnabled').checked = rules.fetchEnabled;
-  $('lastInc').textContent = s.cursor.lastIncrementalAt ? `上次自动更新：${fmtTime(s.cursor.lastIncrementalAt)}` : '';
 
   // 设置页：口径与颜色
   setValue($('topN'), rules.topN);
@@ -239,7 +249,16 @@ $('tabs').addEventListener('click', (e) => {
   view.tab = tab;
   render();
 });
-$('window').addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
+for (const id of ['window', 'range']) $(id).addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
+
+// 小问号：点了展开或收起它对应的说明
+document.addEventListener('click', (e) => {
+  const q = e.target.closest('.q');
+  if (!q) return;
+  const tip = $(q.dataset.tip);
+  tip.hidden = !tip.hidden;
+  q.classList.toggle('on', !tip.hidden);
+});
 $('search').addEventListener('input', renderList);
 $('list').addEventListener('click', async (e) => {
   if (e.target.closest('a')) return; // 名字和回复条目是链接，照常跳转
@@ -283,27 +302,52 @@ $('reset').addEventListener('click', () => {
   if (confirm('把名次上限、最少次数和标签颜色恢复成默认？数据不受影响。')) saveRules({ topN, minCount, tiers, baseColor });
 });
 
-// 导出当前榜单为 CSV（带 BOM，Excel 直接打开不乱码）。纯本地生成文件，不发请求。
-$('export').addEventListener('click', () => {
-  const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
-  const lines = [
-    ['名次', '名字', 'ID', '回复次数', '我在他帖子下回复次数', '最近一次回复', '主页'],
-    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outReady ? r.replied : '', new Date(r.last).toLocaleString('zh-CN', { hour12: false }), `https://x.com/${r.handle}`]),
-  ];
-  const csv = '﻿' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
+// 导出为 CSV（带 BOM，Excel 直接打开不乱码）。纯本地生成文件，不发请求。
+function download(name, lines) {
+  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = '\uFEFF' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
   const d = new Date();
   const a = el('a', {
     href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
-    download: `回复榜_${view.account}_${view.rules.windowDays}天_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
+    download: `${name}_${view.account}_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
   });
   a.click();
   URL.revokeObjectURL(a.href);
+  $('exportMenu').open = false;
+}
+const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
+
+// 导出榜单：当前榜上的人，一人一行
+$('exportBoard').addEventListener('click', () =>
+  download(`回复榜_${view.rules.windowDays}天`, [
+    ['名次', '名字', 'ID', '回复次数', '我在他帖子下回复次数', '最近一次回复', '主页'],
+    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outReady ? r.replied : '', fullTime(r.last), `https://x.com/${r.handle}`]),
+  ]),
+);
+
+// 导出全量数据：本机存的每一条回复，一条一行，两份数据放在同一张表里用「类型」区分
+$('exportAll').addEventListener('click', async () => {
+  const { inbound, out } = await call('exportAll', { account: view.account });
+  const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
+  const mine = new Set(inbound.filter((e) => e.root_mine === true).map((e) => e.conversation_id));
+  const link = (id) => `https://x.com/i/status/${id}`;
+  const rows = [
+    ...inbound.map((e) => ({
+      ts: e.created_at,
+      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, e.root_mine === true || (e.root_mine === null && mine.has(e.conversation_id)) ? '是' : '否', e.text || '', link(e.id)],
+    })),
+    ...out.map((e) => {
+      const h = e.root_handle || handleOf.get(e.root_user_id);
+      return { ts: e.created_at, line: ['我回别人', fullTime(e.created_at), '', h ? `@${h}` : e.root_user_id ? `用户编号 ${e.root_user_id}` : '未知', '', e.text || '', link(e.id)] };
+    }),
+  ].sort((x, y) => y.ts - x.ts);
+  download('全量数据', [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入榜单', '内容摘要', '链接'], ...rows.map((r) => r.line)]);
 });
 
 $('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
 $('start').addEventListener('click', () => {
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速回填最近 ${view.rules.windowDays} 天别人对你的回复。${again}确定开始？`)) act('startBackfill');
+  if (confirm(`将用你的 X 登录会话，限速读取最近${windowLabel(view.rules.windowDays)}别人对你的回复。${again}确定开始？`)) act('startBackfill');
 });
 $('outSync').addEventListener('click', () => act('syncOutNow'));
 $('pause').addEventListener('click', () => act('pauseJob'));

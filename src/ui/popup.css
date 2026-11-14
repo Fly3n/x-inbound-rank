@@ -63,7 +63,7 @@ button.danger { color: var(--err-fg); }
 
 /* 数据读取卡片里的两份数据，各占一块 */
 .src { padding: 8px 0; border-bottom: 1px solid var(--line); }
-.src:first-of-type { padding-top: 0; }
+.src { border-top: 1px solid var(--line); border-bottom: 0; margin-top: 8px; }
 .src p { margin: 4px 0 0; }
 
 /* 默认折叠的块：帮助、清空数据 */
@@ -76,6 +76,21 @@ button.danger { color: var(--err-fg); }
 .banner { border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
 .banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
 .banner.err { background: var(--err-bg); color: var(--err-fg); }
+
+/* 小问号和它展开的说明 */
+.q { flex-shrink: 0; width: 18px; height: 18px; padding: 0; border-radius: 50%; color: var(--dim); font-size: 11px; font-weight: 700; line-height: 1; vertical-align: 1px; }
+.q:hover, .q.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+.tip { margin: 6px 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--dim); font-size: 12px; font-weight: 400; }
+.tip ul { margin: 0; padding-left: 16px; }
+.tip li { margin: 2px 0; }
+.tip b { color: var(--fg); }
+
+/* 导出的下拉菜单 */
+.menu { position: relative; flex-shrink: 0; }
+.menu summary { list-style: none; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu .pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25); }
+.menu .pop button { white-space: nowrap; text-align: left; }
 
 /* 榜单 / 设置 两个页签 */
 .tabs { display: flex; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
@@ -100,9 +115,11 @@ button.danger { color: var(--err-fg); }
 #list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 380px; overflow-y: auto; }
 #list li { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--line); }
 #list .rank { width: 26px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+#list .avatar { flex-shrink: 0; display: flex; border-radius: 50%; }
+#list .avatar:hover { box-shadow: 0 0 0 2px var(--accent); }
 #list img { width: 32px; height: 32px; border-radius: 50%; background: var(--line); flex-shrink: 0; }
 #list .who { flex: 1; min-width: 0; }
-#list .who a { color: inherit; text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .who span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #list .who .name { font-weight: 600; }
 #list .who .sub { color: var(--dim); font-size: 12px; }
 #list .mine { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
