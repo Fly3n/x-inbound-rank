@@ -21,8 +21,9 @@ export const DEFAULT_RULES = {
     { min: 5, color: 'blue' },
   ],
   baseColor: 'gray',
-  // 时间线上三种标签各自显不显示
+  // 时间线上几种标签各自显不显示
   showRank: true, // 名次 + 回复次数
+  showOut: true, // 名次标签里再带上「我回他几次」
   showRel: true, // 关系：互 / 粉
   showPlace: true, // 通知列表里回复在我的帖子下的标 M
 };
@@ -49,6 +50,7 @@ export function cleanRules(raw = {}) {
     tiers,
     baseColor: color(raw.baseColor, d.baseColor),
     showRank: raw.showRank !== false,
+    showOut: raw.showOut !== false,
     showRel: raw.showRel !== false,
     showPlace: raw.showPlace !== false,
   };
@@ -153,9 +155,12 @@ export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50) 
   return { total: mine.length, items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })) };
 }
 
-/** 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, color, last } }。 */
-export function badgeSnapshot(events, rules, now = Date.now()) {
+/**
+ * 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, color, last, replied? } }。
+ * replied：同一窗口内我在他帖子下回复了几次。只有传了 out（「我回别人」已经读过）才带，没读过时不写 0，免得看成「一次没回」。
+ */
+export function badgeSnapshot(events, rules, now = Date.now(), out = null) {
   const users = {};
-  for (const r of board(events, rules, now)) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, color: r.color, last: r.last };
+  for (const r of ranking(events, rules, now, out || []).rows) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, color: r.color, last: r.last, ...(out ? { replied: r.replied } : {}) };
   return users;
 }

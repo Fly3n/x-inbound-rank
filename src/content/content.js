@@ -55,7 +55,7 @@
     users = snap?.users || {};
     places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
     windowDays = snap?.windowDays || 7;
-    show = { rank: true, rel: true, place: true, ...snap?.show };
+    show = { rank: true, out: true, rel: true, place: true, ...snap?.show };
     rescan();
   }
 
@@ -124,9 +124,11 @@
     return null;
   }
 
-  // 标签格式：[名次图标]名次 [回复图标]次数
+  // 标签格式：[名次图标]名次 [回复图标]他回我的次数 [发出图标]我回他的次数（最后一段在「我回别人」读过之后才有）
   const ICON_RANK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 14h3.5V8H1.5zM6.25 14h3.5V2.5h-3.5zM11 14h3.5V10H11z"/></svg>';
   const ICON_REPLY = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H8.5L5 15v-3H3a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/></svg>';
+
+  const ICON_OUT = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 2 15 8 1.5 14l2.2-6z"/></svg>';
 
   function mark(nameEl) {
     const handle = handleOf(nameEl);
@@ -140,7 +142,7 @@
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'xir-badge';
-      badge.innerHTML = `${ICON_RANK}<span class="xir-rank"></span>${ICON_REPLY}<span class="xir-count"></span>`;
+      badge.innerHTML = `${ICON_RANK}<span class="xir-rank"></span>${ICON_REPLY}<span class="xir-count"></span><span class="xir-out" hidden>${ICON_OUT}<span></span></span>`;
       badge.addEventListener('mouseenter', showTip);
       badge.addEventListener('mouseleave', hideTip);
     }
@@ -155,6 +157,10 @@
     const [rank, count] = [badge.children[1], badge.children[3]];
     if (rank.textContent !== String(u.rank)) rank.textContent = u.rank;
     if (count.textContent !== String(u.count)) count.textContent = u.count;
+    const out = badge.children[4];
+    const replied = show.out && u.replied != null ? String(u.replied) : null;
+    if (out.hidden !== (replied == null)) out.hidden = replied == null;
+    if (replied != null && out.lastChild.textContent !== replied) out.lastChild.textContent = replied;
     badge.dataset.handle = handle;
     // 颜色由统计层按回复次数和用户设置算好，放在快照里；色值在 badge.css 的 [data-xir-c]
     badge.dataset.xirC = u.color || 'gray';
@@ -234,6 +240,7 @@
     tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
     tip.textContent =
       `最近 ${windowDays} 天回复我第 ${u.rank} 名，共 ${u.count} 次\n` +
+      (u.replied != null ? `我在他的帖子下回复了 ${u.replied} 次\n` : '') +
       `最近一次：${fmtDate(u.last)}`;
     const r = e.currentTarget.getBoundingClientRect();
     tip.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;

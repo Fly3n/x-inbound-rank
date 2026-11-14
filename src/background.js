@@ -138,7 +138,9 @@ const board = async (account) => ranking(await getEvents(account), await getSett
 
 async function refreshSnapshot(account) {
   const rules = await getSettings(account);
-  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, show: { rank: rules.showRank, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules) });
+  // 「我回别人」读完过一次之后，标签里才带「我回他几次」
+  const out = (await kvGet(keys.cursor(account), {})).out?.lastAt ? await getEvents(account, OUT) : null;
+  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), out) });
 }
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
@@ -479,6 +481,7 @@ async function syncOut(force = false) {
     await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
   } finally {
     await saveOut(account, { running: null });
+    await refreshSnapshot(account).catch(() => {}); // 标签里的「我回他几次」跟着更新
     busy = false;
   }
 }

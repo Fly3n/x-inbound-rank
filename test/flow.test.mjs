@@ -158,6 +158,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await listeners.alarm({ name: 'out' });
   assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 2]);
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
+  assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
   // 没有新回复时只读 1 页
   await listeners.alarm({ name: 'out' });
   assert.equal(server.outCalls, 3);

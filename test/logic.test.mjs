@@ -38,7 +38,7 @@ test('规则整理：越界夹回范围，档位排序去重，非法颜色兜�
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
   const r = cleanRules({ windowDays: 60, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
   // 三个显示开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
@@ -59,6 +59,11 @@ test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
 test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW);
   assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
+  // 「我回别人」读过之后带上我回他几次；一次没回是 0
+  const mine = [{ id: 'o1', created_at: NOW - DAY_MS, conversation_id: 'x1', root_user_id: 'a' }, { id: 'o2', created_at: NOW - 20 * DAY_MS, conversation_id: 'x2', root_user_id: 'a' }];
+  const evs = [ev(1, 'a', 1), ev(2, 'a', 10)];
+  assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, mine).a.replied, 1);
+  assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, []).a.replied, 0);
 });
 
 test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {

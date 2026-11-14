@@ -29,6 +29,16 @@
   margin-right: 6px;
 }
 
+/* 第三段：我回他的次数。没有这份数据或关掉显示时整段藏起来 */
+.xir-badge .xir-out {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+.xir-badge .xir-out[hidden] {
+  display: none;
+}
+
 /* 单字小标：关系（互 / 粉）和「在我的帖子下」（M），各自一个，跟在名次标签后面。颜色固定，X 的三种主题下都看得清 */
 .xir-chip {
   flex: 0 0 auto;
