@@ -318,6 +318,8 @@ $('bindBtn').addEventListener('click', async () => {
   render();
 });
 
+$('version').textContent = `v${chrome.runtime.getManifest().version}`;
+
 // 任务状态、快照变化时自动刷新
 chrome.storage.onChanged.addListener(() => render());
 render();

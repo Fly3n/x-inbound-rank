@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "X 入站互动排行",
-  "description": "统计谁最常回复我，并在时间线用户名旁标注排名。数据只存本地。",
-  "version": "0.1.0",
+  "name": "X 回复榜",
+  "description": "谁最常在我的 X 帖子下回复我：给回复者排名，并在时间线用户名旁标出名次和次数。数据只存本机。",
+  "version": "0.5.0",
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms"],
   "host_permissions": ["https://x.com/*", "https://twitter.com/*"],
@@ -11,7 +12,8 @@
     "type": "module"
   },
   "action": {
-    "default_title": "X 入站互动排行",
+    "default_title": "X 回复榜",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" },
     "default_popup": "src/ui/popup.html"
   },
   "content_scripts": [
