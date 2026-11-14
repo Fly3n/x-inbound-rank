@@ -1,4 +1,5 @@
-// 解析层：把提及接口的原始 JSON 变成与 X 无关的结构。X 改返回结构时只改这个文件和 fetcher.js。
+// 解析层：把接口的原始 JSON 变成与 X 无关的结构。X 改返回结构时只改这个文件和 fetcher.js。
+// parseMentions：别人对我的回复（提及列表）；parseMyReplies：我在别人帖子下的回复（文件后半）。
 //
 // 【待实测】按 X 网页版 v2 timeline 形态（globalObjects + timeline.instructions）写成，
 // 尚未用真实返回验证；字段对不上时抛 ParseError，由上层提示用户，不静默吞掉。
@@ -114,4 +115,112 @@ export function parseMentions(body, me) {
   }
 
   return { events, entryIds: [...new Set(entryIds)], newestId, oldestId, oldestTs, bottomCursor };
+}
+
+// ---------- 我自己的回复列表（GraphQL：个人主页「回复」栏） ----------
+// 【待实测】按 X 网页版 GraphQL 时间线的常见形态写：data 里某处有 instructions，条目里的帖子是
+// { legacy: { id_str, user_id_str, in_reply_to_*, conversation_id_str, ... }, core: { user_results } }。
+// 不依赖具体层级，按特征找；找不到就抛 ParseError。
+
+const NESTED = new Set(['retweeted_status_result', 'quoted_status_result', 'quotedRefResult']); // 被转发、被引用的原帖不算这个条目里的帖子
+
+function collectTweets(node, out) {
+  if (!node || typeof node !== 'object') return;
+  const l = node.legacy;
+  if (l && typeof l === 'object' && typeof l.id_str === 'string' && typeof l.user_id_str === 'string') {
+    const u = node.core?.user_results?.result;
+    out.push({ ...l, screen: u?.core?.screen_name ?? u?.legacy?.screen_name ?? null });
+  }
+  for (const [k, v] of Object.entries(node)) if (!NESTED.has(k)) collectTweets(v, out);
+}
+
+/**
+ * @returns {{
+ *   events: Array,   // 我在别人帖子下的回复：{ id, created_at, to_user_id, root_user_id, conversation_id, text }
+ *   newestId, oldestId, oldestTs,   // 本页里我自己发的帖子（每个条目取最后一条，不含置顶）的范围，用于判断翻到哪了
+ *   bottomCursor
+ * }}
+ */
+export function parseMyReplies(body, me) {
+  let instructions = null;
+  walk(body?.data, (n) => {
+    if (!instructions && Array.isArray(n.instructions)) instructions = n.instructions;
+  });
+  if (!instructions) {
+    const err = body?.errors?.[0]?.message;
+    throw new ParseError(err ? `X 返回错误：${String(err).slice(0, 200)}` : '返回里找不到时间线（instructions）');
+  }
+
+  const myHandle = me.handle.toLowerCase();
+  const isMe = (userId, screenName) =>
+    (me.userId && userId === me.userId) || (!me.userId && screenName && screenName.toLowerCase() === myHandle);
+
+  const byId = new Map(); // 本页出现过的所有帖子，用来查对话根帖是谁发的
+  const mine = new Map(); // 我发的
+  const mains = []; // 每个条目里我发的最后一条：条目按它的时间排，前面的是被回复的旧帖
+  let bottomCursor = null;
+  let parsedEntries = 0;
+  let blankEntries = 0;
+
+  for (const ins of instructions) {
+    if (ins?.type === 'TimelinePinEntry') continue; // 置顶帖可能很旧，不参与判断时间范围
+    for (const entry of ins?.entries || []) {
+      const found = [];
+      collectTweets(entry, found);
+      if (!found.length) {
+        if (/^(tweet|profile-conversation)/.test(entry?.entryId || '')) blankEntries++;
+        continue;
+      }
+      parsedEntries++;
+      let last = null;
+      for (const t of found) {
+        byId.set(t.id_str, t);
+        if (isMe(t.user_id_str, t.screen)) {
+          mine.set(t.id_str, t);
+          last = t;
+        }
+      }
+      if (last) mains.push(last);
+    }
+  }
+  walk(instructions, (n) => {
+    if (n.cursorType === 'Bottom' && typeof n.value === 'string') bottomCursor = n.value;
+  });
+  if (blankEntries && !parsedEntries) throw new ParseError('时间线里有帖子条目，但解析不出帖子内容');
+
+  let newestId = null;
+  let oldestId = null;
+  let oldestTs = null;
+  for (const t of mains) {
+    if (!newestId || idGt(t.id_str, newestId)) newestId = t.id_str;
+    if (!oldestId || idGt(oldestId, t.id_str)) {
+      oldestId = t.id_str;
+      oldestTs = tweetTime(t);
+    }
+  }
+
+  const events = [];
+  for (const t of mine.values()) {
+    if (!t.in_reply_to_status_id_str) continue; // 原创帖、转发
+    const conv = t.conversation_id_str;
+    if (!conv) throw new ParseError('我的回复里没有 conversation_id_str，无法判断是在谁的帖子下');
+    // 对话根帖是谁发的：直接回的就是根帖时看被回复的人；否则看这一页里有没有带出根帖
+    const root = byId.get(conv);
+    let rootUser = null;
+    let rootScreen = null;
+    if (conv === t.in_reply_to_status_id_str) [rootUser, rootScreen] = [t.in_reply_to_user_id_str || null, t.in_reply_to_screen_name];
+    else if (root) [rootUser, rootScreen] = [root.user_id_str, root.screen];
+    if (rootUser && isMe(rootUser, rootScreen)) continue; // 我自己帖子下的回复不要
+    if (!rootUser && !me.userId && rootScreen && rootScreen.toLowerCase() === myHandle) continue;
+    events.push({
+      id: t.id_str,
+      created_at: tweetTime(t),
+      to_user_id: t.in_reply_to_user_id_str || null,
+      root_user_id: rootUser, // null = 这一页里看不出根帖是谁的
+      conversation_id: conv,
+      text: snippet(t.full_text ?? t.text),
+    });
+  }
+
+  return { events, newestId, oldestId, oldestTs, bottomCursor };
 }

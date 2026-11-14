@@ -29,7 +29,27 @@ const feed = [
   mention(12, '2', '52', '52'), mention(14, '2', '53', '53'),
 ];
 const otherRoot = { id_str: '60', user_id_str: '3', created_at: new Date(Date.now() - 3 * DAY).toUTCString() };
-const server = { calls: 0, fail429Once: false };
+const server = { calls: 0, fail429Once: false, outCalls: 0, outUrls: [] };
+
+// ---- 假的「我的回复」列表（GraphQL 形态），每页 2 条，按时间倒序 ----
+const mine = (id, daysAgo, rootUid) => ({
+  entryId: `profile-conversation-${id}`,
+  content: { items: [{ item: { itemContent: { tweet_results: { result: {
+    rest_id: id,
+    core: { user_results: { result: { rest_id: '1', core: { screen_name: 'Me' } } } },
+    legacy: { id_str: id, user_id_str: '1', created_at: new Date(Date.now() - daysAgo * DAY).toUTCString(), full_text: 'hi',
+      in_reply_to_status_id_str: `r${id}`, in_reply_to_user_id_str: rootUid, conversation_id_str: `r${id}` },
+  } } } } }] },
+});
+const outFeed = [mine('9005', 0.2, '2'), mine('9004', 1, '2'), mine('9003', 3, '3'), mine('9002', 9, '2'), mine('9001', 13, '2'), mine('9000', 20, '2')];
+function respondOut(msg) {
+  server.outCalls++;
+  server.outUrls.push(msg.tpl);
+  const start = Number(msg.cursor || 0);
+  const entries = outFeed.slice(start, start + 2);
+  if (start + 2 < outFeed.length) entries.push({ entryId: 'cursor-bottom', content: { value: String(start + 2), cursorType: 'Bottom' } });
+  return { ok: true, status: 200, userId: '1', rateResetAt: null, body: { data: { user: { result: { timeline: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries }] } } } } } } };
+}
 function respond(cursor) {
   server.calls++;
   if (server.fail429Once) {
@@ -59,7 +79,7 @@ globalThis.chrome = {
     onAlarm: hook('alarm'),
   },
   runtime: { onInstalled: hook('installed'), onStartup: hook('startup'), onMessage: hook('message') },
-  tabs: { query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => respond(msg.cursor) },
+  tabs: { query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : respond(msg.cursor)) },
 };
 
 await import('../src/background.js');
@@ -113,6 +133,23 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
   assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, color: 'gray', last: store['snap:me'].users.fan.last });
 
+  // 我回他多少次：回填完成后约一两分钟读我的回复列表。还没见过 X 自己的那条请求时读不了，只提示
+  assert.ok(alarms.out.when - Date.now() >= 59_000, '回填完成后约好读我的回复');
+  await listeners.alarm({ name: 'out' });
+  assert.equal(store['cursor:me'].out.status, 'need_tpl');
+  assert.equal(server.outCalls, 0);
+  assert.equal((await boardRows())[0].replied, 0);
+  // 页面上出现了那条请求：记下地址，马上补读。7 天窗口读到 9 天前那条为止（2 页）
+  delete alarms.out;
+  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  assert.ok(alarms.out, '拿到地址后约好补读');
+  await listeners.alarm({ name: 'out' });
+  assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 2]);
+  assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
+  // 没有新回复时只读 1 页
+  await listeners.alarm({ name: 'out' });
+  assert.equal(server.outCalls, 3);
+
   // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
   assert.ok((await setWindow(30)).error, '只接受 7 或 15');
   await setWindow(15);
@@ -133,6 +170,21 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual([full.people, full.replies], [1, 5]);
   await set({ topN: 100, tiers: [{ min: 20, color: 'red' }, { min: 10, color: 'orange' }, { min: 5, color: 'blue' }], baseColor: 'gray' });
   assert.equal(server.calls, 3, '改设置不发请求');
+
+  // 窗口变大后，我的回复要重新读到半个月前（3 页，读到 20 天前那条为止）
+  let outBefore = server.outCalls;
+  await listeners.alarm({ name: 'out' });
+  assert.equal(server.outCalls - outBefore, 3);
+  assert.equal((await boardRows())[0].replied, 4);
+  // X 换了接口参数（404）：丢掉旧地址，提示再打开一次回复栏
+  const realSend = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async () => ({ ok: false, status: 404, userId: '1' });
+  await listeners.alarm({ name: 'out' });
+  chrome.tabs.sendMessage = realSend;
+  assert.equal(store['cursor:me'].out.status, 'need_tpl');
+  assert.equal(store['tpl:replies'], undefined);
+  assert.equal((await boardRows())[0].replied, 4, '已有的数还在');
+  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
 
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
   await send({ type: 'startBackfill', account: 'me' });

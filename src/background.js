@@ -1,9 +1,9 @@
 // 后台调度：账号绑定、回填任务、增量更新、给界面供数。
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
-import { parseMentions, ParseError, idGt } from './x/parser.js';
+import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
 import { ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
-import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings } from './db.js';
+import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
 // 每小时约 220 页 ≈ 4400 条提及。X 的行为风控不公开，要再调快先小步试。
@@ -18,6 +18,8 @@ const PACE = {
   incIntervalMs: [50 * 60_000, 70 * 60_000], // 增量：大约每小时一次，每轮结束后在这个范围里随机定下一次，不卡整点
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
+  outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
+  outMaxPages: 40, // 我的回复：单次最多页数
 };
 
 // 本地只留最近这么多天的回复：最长的统计窗口是 15 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
@@ -26,6 +28,7 @@ const KEEP_DAYS = 30;
 const TICK_ALARM = 'tick';
 const JOB_ALARM = 'job';
 const INC_ALARM = 'inc';
+const OUT_ALARM = 'out';
 const ACTIVE_JOB = 'activeJobAccount';
 
 const rand = ([a, b]) => a + Math.floor(Math.random() * (b - a));
@@ -63,11 +66,11 @@ async function bindManualHandle(raw) {
 
 // ---------- 抓取一页（经 x.com 标签页） ----------
 
-async function fetchViaTab(cursor) {
+async function fetchViaTab(req) {
   const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
   for (const tab of tabs) {
     try {
-      const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', cursor });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', ...req });
       if (r) return r;
     } catch {
       // 该标签页没有内容脚本（装插件前打开的、或已被休眠），换下一个
@@ -82,7 +85,7 @@ async function pull(account, cursor) {
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return { kind: 'error', message: '账号未绑定' };
 
-  const r = await fetchViaTab(cursor);
+  const r = await fetchViaTab({ cursor });
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (r.userId && me.userId && r.userId !== me.userId) {
     return { kind: 'error', message: `当前登录的 X 账号不是 @${me.handle}，已停止，避免数据串号` };
@@ -112,6 +115,8 @@ async function pull(account, cursor) {
   return { kind: 'ok', parsed, added };
 }
 
+const board = async (account) => ranking(await getEvents(account), await getSettings(account), now(), await getEvents(account, OUT));
+
 async function refreshSnapshot(account) {
   const rules = await getSettings(account);
   await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, users: badgeSnapshot(await getEvents(account), rules) });
@@ -124,6 +129,7 @@ async function planNextInc(cur, from) {
   cur.lastIncrementalAt = from;
   cur.nextIncAt = from + rand(PACE.incIntervalMs);
   await chrome.alarms.create(INC_ALARM, { when: Math.max(cur.nextIncAt, now() + 1000) });
+  await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) }); // 别人的回复读完，接着读我自己的
 }
 
 // ---------- 回填 ----------
@@ -332,12 +338,94 @@ async function maybeIncremental() {
   }
 }
 
+// ---------- 我在别人帖子下的回复 ----------
+// 数据来自我自己主页「回复」栏的列表（里面混着原创帖和转发，解析时只留回复）。
+// 状态放在 cursor.out：{ status: 'ok'|'need_tpl'|'error', message, syncedId, coverTs, lastAt, pages }
+//   syncedId：上次读到的最新一条；coverTs：从 syncedId 往回连续读到了哪个时间点。
+
+const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
+
+async function saveOut(account, patch) {
+  const cur = await kvGet(keys.cursor(account), {});
+  cur.out = { ...cur.out, ...patch };
+  await kvSet(keys.cursor(account), cur);
+}
+
+async function syncOut() {
+  const account = await kvGet(keys.current);
+  if (!account) return;
+  if (busy) return void chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+  const settings = await getSettings(account);
+  if (!settings.fetchEnabled) return;
+  const cur = await kvGet(keys.cursor(account), {});
+  if (!cur.syncedId) return; // 还没初始化过
+  const me = (await kvGet(keys.accounts, {}))[account];
+  const tpl = await kvGet(keys.tpl);
+  if (!tpl) return saveOut(account, { status: 'need_tpl', message: NEED_TPL });
+
+  const targetTs = now() - settings.windowDays * DAY_MS;
+  const prev = cur.out || {};
+  // 上次连续读到的范围够覆盖统计窗口，这次只要读到上次的位置；不够（第一次、或窗口从 7 天改成半个月）就读到窗口起点
+  const stopAt = prev.syncedId && prev.coverTs && prev.coverTs <= targetTs ? prev.syncedId : null;
+
+  busy = true;
+  try {
+    let cursor = null;
+    let topId = null;
+    let reachedTs = null;
+    let complete = false; // 读到了该停的位置（不是被页数上限截断）
+    let pages = 0;
+    for (; pages < PACE.outMaxPages; pages++) {
+      if (pages) await sleep(rand(PACE.incPageGapMs));
+      const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor });
+      if (r.error === 'no_tab') return; // 没有 X 标签页，下一轮再读
+      if (r.userId && me.userId && r.userId !== me.userId) return;
+      if (r.status === 429) return saveOut(account, { status: 'error', message: '被 X 限流（429），下一轮再读' });
+      if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
+        await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数），等页面再发一次新的
+        return saveOut(account, { status: 'need_tpl', message: `X 的回复列表接口参数变了（${r.status || '模板无效'}），${NEED_TPL}` });
+      }
+      if (!r.ok) return saveOut(account, { status: 'error', message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
+
+      let p;
+      try {
+        p = parseMyReplies(r.body, me);
+      } catch (e) {
+        return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
+      }
+      await putEvents(account, p.events, OUT);
+      if (pages === 0) topId = p.newestId;
+      if (p.oldestTs) reachedTs = p.oldestTs;
+      const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
+      if (ended || p.oldestTs <= targetTs || (stopAt && !idGt(p.oldestId, stopAt))) {
+        complete = true;
+        if (ended) reachedTs = targetTs; // 更早的没有了，等于覆盖到了窗口起点
+        pages++;
+        break;
+      }
+      cursor = p.bottomCursor;
+    }
+    const joined = complete && stopAt && reachedTs > targetTs; // 接上了上次的位置：覆盖范围沿用上次的
+    await saveOut(account, {
+      status: 'ok',
+      message: null,
+      syncedId: topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId,
+      coverTs: joined ? prev.coverTs : reachedTs,
+      lastAt: now(),
+      pages,
+    });
+  } finally {
+    busy = false;
+  }
+}
+
 // ---------- 清理过期数据 ----------
 
 async function maybePrune(account) {
   const cur = await kvGet(keys.cursor(account), {});
   if (now() - (cur.lastPruneAt || 0) < DAY_MS) return; // 一天最多清一次
   await pruneEvents(account, now() - KEEP_DAYS * DAY_MS);
+  await pruneEvents(account, now() - KEEP_DAYS * DAY_MS, OUT);
   const c = await kvGet(keys.cursor(account), {});
   c.lastPruneAt = now();
   await kvSet(keys.cursor(account), c);
@@ -365,6 +453,7 @@ chrome.runtime.onStartup.addListener(ensureTick);
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === JOB_ALARM) return wakeJob(false);
   if (alarm.name === INC_ALARM) return maybeIncremental();
+  if (alarm.name === OUT_ALARM) return syncOut();
   if (alarm.name === TICK_ALARM) {
     const account = await kvGet(keys.current);
     if (account) {
@@ -386,6 +475,15 @@ const handlers = {
       wakeJob(true).then(maybeIncremental);
     }
     return { account };
+  },
+  async 'xir:tpl'({ url }) {
+    if (typeof url !== 'string' || url.length > 8000) return {};
+    await kvSet(keys.tpl, { url, at: now() });
+    // 之前因为没有模板没读成的，现在马上补读
+    const account = await kvGet(keys.current);
+    const out = account && (await kvGet(keys.cursor(account), {})).out;
+    if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 });
+    return {};
   },
   async 'xir:dom'(msg) {
     if (msg.broken) await kvSet(keys.domWarning, { at: now() });
@@ -410,7 +508,7 @@ const handlers = {
     };
   },
   async getBoard({ account }) {
-    return ranking(await getEvents(account), await getSettings(account)); // { rows, people, replies }
+    return board(account); // { rows, people, replies }
   },
   getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account)),
   startBackfill: ({ account }) => startBackfill(account),

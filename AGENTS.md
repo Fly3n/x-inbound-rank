@@ -12,10 +12,12 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - 弹窗分「榜单」「设置」两页；榜单页有搜索、窗口内总量汇总、导出 CSV；点某一行展开这个人在窗口内的回复列表（只用本地已有数据，不发请求）。
 - 每次「启动 / 初始化」都从最新一条重新往回读，不做接续翻页（负责人知情后定）。
 - 只算**我的帖子下**别人直接回复我的；我去别人帖子下评论后对方回我的不算（同日定）。
+- 榜单每行另带「我回 N」：同一窗口内**我在他的帖子下**回复了几次（2026-11-14 负责人定）。按对话根帖的作者算——在他帖子下回复任何人都算他的，在我自己帖子下回他的不算。只在弹窗榜单和导出里显示，不影响排名、不进时间线标签。
+- 「我回」的数据来自我自己主页「回复」栏背后的接口（GraphQL `UserTweetsAndReplies`）。它的查询 ID 和 `features` 参数随 X 发版变化，所以不写死：内容脚本从浏览器的资源计时记录里记下 X 页面自己发过的那条请求地址，抓取时只换掉 `userId`、`count`、`cursor` 照着发。代价是用户要在 X 上打开过一次任意主页的「回复」栏，X 换参数后要再打开一次（弹窗会提示）。
 - 数据来源是 X 网页版「通知 → 提及」的内部接口，用已登录的网页会话读。不走官方 API，不逐帖抓评论（请求量大、接口更脆，已比较过）。
 - 零写操作：不点赞、不关注、不发帖。数据只存本机，无任何上报。
 - 权限只有 `storage`、`alarms` 和 x.com / twitter.com 的站点权限。不加 `cookies`、`tabs`、`scripting`。
-- 不做时间衰减、不做「我回了他」加分、不做收费。
+- 不做时间衰减、不做「我回了他」加分（「我回 N」只展示，不参与排名）、不做收费。
 
 ## 数据流
 
@@ -35,11 +37,11 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 
 | 文件 | 职责 | 何时改 |
 |---|---|---|
-| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头。返回 `{ ok, status, body, rateResetAt, userId, error }`，不抛异常 | X 改接口 |
-| `src/x/parser.js` | 解析层：原始 JSON → `{ events, entryIds, newestId, oldestId, oldestTs, bottomCursor }`。结构不符抛 `ParseError` | X 改返回结构 |
-| `src/content/content.js` | 账号识别、代发请求、画标签。页面选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头。`fetchMentions` 读提及，`fetchMyReplies(tpl, cursor)` 照模板读我的回复列表。返回 `{ ok, status, body, rateResetAt, userId, error }`，不抛异常 | X 改接口 |
+| `src/x/parser.js` | 解析层：`parseMentions` 原始 JSON → `{ events, entryIds, newestId, oldestId, oldestTs, bottomCursor }`；`parseMyReplies` → 我在别人帖子下的回复。结构不符抛 `ParseError` | X 改返回结构 |
+| `src/content/content.js` | 账号识别、代发请求、画标签、记下 X 读「回复」栏的请求地址（`xir:tpl`）。页面选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | 调度：回填、增量、限流退避、账号绑定、消息处理。节奏参数集中在顶部 `PACE` | 调节奏、改流程 |
-| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照；榜单规则的默认值、范围、合法化 | 改统计口径、规则默认值 |
+| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`outboundCounts`（我回他几次）；榜单规则的默认值、范围、合法化 | 改统计口径、规则默认值 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 | 改数据模型 |
 | `src/ui/` | 弹窗 | 改界面 |
 
@@ -61,7 +63,11 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 
 表里存的是**所有直接回复我的**，包括 `root_mine` 为 `false` 的；是否上榜在 `rank.js` 的 `underMyPosts` 里过滤。这样以后改口径不用重新抓。`root_mine === null` 的，只有同一 `conversation_id` 下存在 `root_mine === true` 的记录时才计入。
 
-**保留期**：只留最近 30 天（`background.js` 的 `KEEP_DAYS`），兜底闹钟里每天最多清一次。最长的统计窗口是 15 天，更早的用不上；不清的话库会无限增长，而每次重算快照都要把该账号的事件全读一遍。量级参考：一条约 300–500 字节，一周 1 万条回复时 30 天约 4 万多条、十几 MB，全读一遍在百毫秒级。要做「和上一个窗口比名次变化」这类功能，30 天正好够 15 天窗口用。
+表 `out`（库版本 2 加的）：我在别人帖子下的回复，主键同样是 `[account, id]`。字段：`created_at`、`to_user_id`（直接回复的人）、`root_user_id`（对话根帖作者，`null` = 抓取时那页没带出根帖，统计时靠同一对话的其他回复补判，补不了不计）、`conversation_id`、`text`。我自己帖子下的回复在解析时就丢掉，不入库。
+
+「我回」的同步状态在 `cursor.out`：`{ status: 'ok' | 'need_tpl' | 'error', message, syncedId, coverTs, lastAt, pages }`。`syncedId` 是上次读到的最新一条，`coverTs` 是从它往回连续读到的时间点；`coverTs` 覆盖得了统计窗口时只读到 `syncedId` 为止，否则（第一次、窗口从 7 天改成 15 天）读到窗口起点。由 `out` 闹钟触发：每轮增量或回填结束后 1–2 分钟，单独一个事件；单次最多 40 页。接口返回 400 / 404 时认为模板过期，删掉 `tpl:replies` 并提示用户再打开一次「回复」栏；拿到新模板（`xir:tpl`）后 3 秒补读。
+
+**保留期**：两张表都只留最近 30 天（`background.js` 的 `KEEP_DAYS`），兜底闹钟里每天最多清一次。最长的统计窗口是 15 天，更早的用不上；不清的话库会无限增长，而每次重算快照都要把该账号的事件全读一遍。量级参考：一条约 300–500 字节，一周 1 万条回复时 30 天约 4 万多条、十几 MB，全读一遍在百毫秒级。要做「和上一个窗口比名次变化」这类功能，30 天正好够 15 天窗口用。
 
 `chrome.storage.local` 键（定义在 `db.js` 的 `keys`）：
 
@@ -116,6 +122,8 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 - 请求头只需公开 Bearer、`x-csrf-token`（取自 `ct0`）、`x-twitter-auth-type`、`x-twitter-active-user`、`x-twitter-client-language`，**不需要** `x-client-transaction-id`。
 - 列表为空时 `globalObjects` 是 `{}`，只返回一个 `Top` 游标。
 - `twid`、`ct0` 可从 `document.cookie` 读到；`a[data-testid="AppTabBar_Profile_Link"]` 能取到 handle。
+
+**「我回」这条线整个待实测（2026-11-14 写成，一次真实请求都没发过）**：① 登录后的网页版读「回复」栏是不是还发 `GET /i/api/graphql/<id>/UserTweetsAndReplies?variables=…&features=…`（未登录的 x.com 已换成另一套前端，看不到登录后的请求）；② 资源计时记录里能不能看到这条地址；③ 照模板重发要不要 `x-client-transaction-id`（提及接口不需要，GraphQL 未知）；④ 返回结构是否如 `parseMyReplies` 所假设（帖子是 `{ legacy: { id_str, user_id_str, in_reply_to_*, conversation_id_str }, core.user_results }`，对话条目会带出根帖）。任何一项不符，结果是弹窗里「我回」那行显示读不了或出错，榜单其余部分不受影响。
 
 **未确认**（没有真实回复数据，第一次在有回复的账号上运行时才见分晓）：
 

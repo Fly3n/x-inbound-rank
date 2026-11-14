@@ -4,7 +4,7 @@ import { COLORS, LIMITS, DEFAULT_RULES, colorOf } from '../rank.js';
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null }; // open：榜单里点开的那个人
+const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outReady: false }; // open：榜单里点开的那个人
 
 const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 const pad = (n) => String(n).padStart(2, '0');
@@ -85,7 +85,10 @@ function renderList() {
               el('a', { className: 'name', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', textContent: r.name }),
               el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
             ]),
-            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '窗口内的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
+            ...(view.outReady
+              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一窗口内，我在他的帖子下回复了几次', textContent: `我回 ${r.replied}` })]
+              : []),
+            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '窗口内他在我帖子下的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
           ...(view.open === r.actor_id ? [detailRow()] : []),
         ])
@@ -174,7 +177,18 @@ async function render() {
 
   // 榜单页
   const { rows, people, replies } = await call('getBoard', { account: view.account });
-  Object.assign(view, { rows, rules, eventCount: s.eventCount });
+  const out = s.cursor.out;
+  Object.assign(view, { rows, rules, eventCount: s.eventCount, outReady: !!out?.coverTs });
+  // 「我回」那一列的数据状态
+  const outText = !s.cursor.syncedId
+    ? ''
+    : !out
+      ? '「我回」（我在他帖子下回复了几次）还没读，初始化完成后一两分钟开始。'
+      : out.status !== 'ok'
+        ? `「我回」${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}${out.coverTs ? '。现在显示的是之前读到的数' : ''}`
+        : `「我回」= 同一窗口内我在他帖子下回复了几次，已读到 ${fmtDay(out.coverTs)}，更新于 ${fmtTime(out.lastAt)}。`;
+  $('outLine').hidden = !outText;
+  $('outLine').textContent = outText;
   const label = windowLabel(rules.windowDays);
   $('window').value = String(rules.windowDays);
   $('export').disabled = !rows.length;
@@ -273,8 +287,8 @@ $('reset').addEventListener('click', () => {
 $('export').addEventListener('click', () => {
   const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
   const lines = [
-    ['名次', '名字', 'ID', '回复次数', '最近一次回复', '主页'],
-    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, new Date(r.last).toLocaleString('zh-CN', { hour12: false }), `https://x.com/${r.handle}`]),
+    ['名次', '名字', 'ID', '回复次数', '我在他帖子下回复次数', '最近一次回复', '主页'],
+    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outReady ? r.replied : '', new Date(r.last).toLocaleString('zh-CN', { hour12: false }), `https://x.com/${r.handle}`]),
   ];
   const csv = '﻿' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
   const d = new Date();

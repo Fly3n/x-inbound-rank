@@ -2,8 +2,8 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { board, ranking, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
-import { parseMentions, ParseError } from '../src/x/parser.js';
+import { board, ranking, outboundCounts, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import { parseMentions, parseMyReplies, ParseError } from '../src/x/parser.js';
 
 const NOW = Date.UTC(2026, 10, 13);
 const ev = (id, actor, daysAgo) => ({
@@ -127,4 +127,63 @@ test('解析：结构不对就报错，不返回空结果', () => {
   // 实测到的空账号返回：globalObjects 是 {}，时间线里只有一个 Top 游标
   const empty = { globalObjects: {}, timeline: { id: 'x', instructions: [{ clearCache: {} }, { addEntries: { entries: [{ entryId: 'cursor-top-1', content: { operation: { cursor: { value: 'T', cursorType: 'Top' } } } }] } }] } };
   assert.deepEqual(parseMentions(empty, me), { events: [], entryIds: [], newestId: null, oldestId: null, oldestTs: null, bottomCursor: null });
+});
+
+// ---- 我在别人帖子下的回复 ----
+
+test('我回：按帖子是谁的计数，根帖未知的靠同一对话补判', () => {
+  const o = (id, daysAgo, conv, root) => ({ id, created_at: NOW - daysAgo * DAY_MS, conversation_id: conv, root_user_id: root, to_user_id: 'x' });
+  const out = [o('1', 1, 'c1', 'a'), o('2', 2, 'c1', null), o('3', 3, 'c2', null), o('4', 10, 'c3', 'a'), o('5', 1, 'c4', 'b')];
+  assert.deepEqual([...outboundCounts(out, 7, NOW)], [['a', 2], ['b', 1]]);
+  const events = [ev(1, 'a', 1), ev(2, 'a', 2), ev(3, 'b', 1), ev(4, 'b', 2)];
+  assert.deepEqual(ranking(events, rules(), NOW, out).rows.map((r) => [r.actor_id, r.replied]), [['a', 2], ['b', 1]]);
+  assert.deepEqual(ranking(events, rules(), NOW).rows.map((r) => r.replied), [0, 0], '没有出站数据时是 0');
+});
+
+// GraphQL 时间线的假返回：形态与 parseMyReplies 的假设一致
+const gt = (id, uid, extra = {}) => ({
+  __typename: 'Tweet',
+  rest_id: id,
+  core: { user_results: { result: { rest_id: uid, core: { screen_name: uid === '1' ? 'Me' : `u${uid}` } } } },
+  legacy: { id_str: id, user_id_str: uid, conversation_id_str: id, created_at: 'Thu Nov 12 08:00:00 +0000 2026', full_text: `t${id}`, ...extra },
+});
+const item = (t) => ({ itemContent: { tweet_results: { result: t } } });
+const single = (t) => ({ entryId: `tweet-${t.rest_id}`, content: { entryType: 'TimelineTimelineItem', ...item(t) } });
+const thread = (...ts) => ({ entryId: `profile-conversation-${ts[0].rest_id}`, content: { entryType: 'TimelineTimelineModule', items: ts.map((t) => ({ item: item(t) })) } });
+const gql = (entries, pinned) => ({
+  data: { user: { result: { timeline: { timeline: { instructions: [
+    ...(pinned ? [{ type: 'TimelinePinEntry', entry: single(pinned) }] : []),
+    { type: 'TimelineAddEntries', entries: [...entries, { entryId: 'cursor-bottom-1', content: { entryType: 'TimelineTimelineCursor', value: 'NEXT', cursorType: 'Bottom' } }] },
+  ] } } } } },
+});
+const re = (to, uid, conv) => ({ in_reply_to_status_id_str: to, in_reply_to_user_id_str: uid, in_reply_to_screen_name: `u${uid}`, conversation_id_str: conv });
+
+test('解析我的回复：只留别人帖子下的，置顶、原创、转发、我自己帖子下的不算', () => {
+  const old = { created_at: 'Thu Oct 01 08:00:00 +0000 2026' };
+  const body = gql(
+    [
+      thread(gt('100', '2'), gt('900', '1', { ...re('100', '2', '100'), full_text: '@u2 好文' })), // 直接评论 2 的帖子
+      thread(gt('200', '3'), gt('201', '4', re('200', '3', '200')), gt('901', '1', re('201', '4', '200'))), // 在 3 的帖子下回 4：算 3 的
+      thread(gt('902', '1', re('301', '5', '300'))), // 根帖没带出来：root 未知
+      thread(gt('400', '1', old), gt('401', '2', re('400', '1', '400')), gt('903', '1', re('401', '2', '400'))), // 我自己帖子下回 2：不要
+      single(gt('904', '1')), // 原创
+      single(gt('905', '1', { retweeted_status_result: { result: gt('50', '1', { ...old, ...re('49', '2', '49') }) } })), // 转发自己的旧回复：原帖不看
+    ],
+    gt('10', '1', old),
+  );
+  const r = parseMyReplies(body, me);
+  assert.deepEqual(r.events.map((e) => [e.id, e.root_user_id, e.to_user_id, e.text]), [
+    ['900', '2', '2', '好文'],
+    ['901', '3', '4', 't901'],
+    ['902', null, '5', 't902'],
+  ]);
+  assert.deepEqual([r.newestId, r.oldestId, r.bottomCursor], ['905', '900', 'NEXT'], '范围只看每个条目里我发的最后一条');
+  assert.equal(new Date(r.oldestTs).getUTCMonth(), 10, '置顶帖和被回复的旧帖不拉低时间范围');
+});
+
+test('解析我的回复：结构不对或 X 报错就抛错', () => {
+  assert.throws(() => parseMyReplies({ data: {} }, me), ParseError);
+  assert.throws(() => parseMyReplies({ errors: [{ message: 'features cannot be null' }] }, me), /features cannot be null/);
+  assert.throws(() => parseMyReplies(gql([{ entryId: 'tweet-1', content: { something: 'new' } }]), me), ParseError);
+  assert.deepEqual(parseMyReplies({ data: { x: { instructions: [] } } }, me).events, [], '空列表不算错');
 });

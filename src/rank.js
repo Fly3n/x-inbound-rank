@@ -58,6 +58,23 @@ export function underMyPosts(events) {
   return events.filter((e) => e.root_mine === true || (e.root_mine === null && mine.has(e.conversation_id)));
 }
 
+/**
+ * 我在别人帖子下的回复，按「帖子是谁的」计数。返回 Map<user_id, 次数>。
+ * 算的是对话根帖的作者：在他的帖子下回复任何人都算他的；在我自己帖子下回他的不算（解析时已去掉）。
+ * root_user_id 为 null 的（抓取时那一页看不出根帖是谁的），同一对话里有别的回复知道根帖是谁的就跟着算，否则不算。
+ */
+export function outboundCounts(out, windowDays, now = Date.now()) {
+  const since = now - windowDays * DAY_MS;
+  const rootOf = new Map(out.filter((e) => e.root_user_id).map((e) => [e.conversation_id, e.root_user_id]));
+  const counts = new Map();
+  for (const e of out) {
+    if (e.created_at < since || e.created_at > now) continue;
+    const root = e.root_user_id || rootOf.get(e.conversation_id);
+    if (root) counts.set(root, (counts.get(root) || 0) + 1);
+  }
+  return counts;
+}
+
 /** 按回复者聚合时间窗内、我帖子下的回复。返回 Map<actor_id, row>。 */
 export function aggregate(events, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
@@ -83,15 +100,17 @@ export function aggregate(events, windowDays, now = Date.now()) {
 
 /**
  * 回复榜 + 窗口内的总量。
- * rows：窗口内回复至少 minCount 次的人，最多前 topN 名；次数相同按最近回复时间排，再按 handle。每行带名次和标签颜色。
+ * rows：窗口内回复至少 minCount 次的人，最多前 topN 名；次数相同按最近回复时间排，再按 handle。每行带名次、标签颜色，
+ *       以及 replied——同一窗口内我在他帖子下回复了几次（out 是我发出的回复，没有就都是 0）。
  * people / replies：窗口内在我帖子下回复过的总人数和总次数（不受 minCount、topN 影响）。
  */
-export function ranking(events, rules, now = Date.now()) {
+export function ranking(events, rules, now = Date.now(), out = []) {
+  const mine = outboundCounts(out, rules.windowDays, now);
   const all = [...aggregate(events, rules.windowDays, now).values()];
   const rows = all.filter((r) => r.count >= rules.minCount);
   rows.sort((a, b) => b.count - a.count || b.last - a.last || a.handle.localeCompare(b.handle));
   return {
-    rows: rows.slice(0, rules.topN).map((r, i) => ({ rank: i + 1, ...r, color: colorOf(r.count, rules) })),
+    rows: rows.slice(0, rules.topN).map((r, i) => ({ rank: i + 1, ...r, color: colorOf(r.count, rules), replied: mine.get(r.actor_id) || 0 })),
     people: all.length,
     replies: all.reduce((n, r) => n + r.count, 0),
   };

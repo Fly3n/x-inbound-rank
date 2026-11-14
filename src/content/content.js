@@ -1,4 +1,4 @@
-// 内容脚本：① 识别当前登录账号 ② 代后台读一页提及（抓取层在 fetcher.js）③ 在用户名旁注入排名标签。
+// 内容脚本：① 识别当前登录账号 ② 代后台读一页列表（抓取层在 fetcher.js）③ 在用户名旁注入排名标签 ④ 记下 X 读「回复」栏的请求地址。
 // 标签只读 chrome.storage.local 里的本地快照，渲染过程不发任何网络请求。
 /* global XIRFetcher */
 
@@ -71,9 +71,30 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type !== 'xir:fetch') return false;
-    XIRFetcher.fetchMentions(msg.cursor).then(sendResponse);
+    (msg.kind === 'out' ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor) : XIRFetcher.fetchMentions(msg.cursor)).then(sendResponse);
     return true;
   });
+
+  // ---------- 记下 X 自己读「回复」栏的请求地址 ----------
+  // 「我回他多少次」要读我自己的回复列表，那个接口的参数随 X 发版变化。这里不拦截也不改页面的请求，
+  // 只从浏览器的资源计时记录里看到地址（不含请求头和返回内容），交给后台存成模板。
+  let lastTpl = null;
+  function noteTpl(url) {
+    if (!alive || url === lastTpl || XIRFetcher.isOwn(url)) return;
+    try {
+      const u = new URL(url);
+      if (u.origin !== location.origin || !XIRFetcher.REPLIES_RE.test(u.pathname + '?')) return;
+    } catch {
+      return;
+    }
+    lastTpl = url;
+    send({ type: 'xir:tpl', url });
+  }
+  try {
+    new PerformanceObserver((list) => list.getEntries().forEach((e) => noteTpl(e.name))).observe({ type: 'resource', buffered: true });
+  } catch {
+    // 浏览器不支持就拿不到模板，弹窗里会提示「我回他」暂时没数据
+  }
 
   // ---------- 内联标签 ----------
 
