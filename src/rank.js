@@ -68,11 +68,6 @@ export function underMyPosts(events) {
 }
 
 /**
- * 我在别人帖子下的回复，按「帖子是谁的」计数。返回 Map<user_id, 次数>。
- * 算的是对话根帖的作者：在他的帖子下回复任何人都算他的；在我自己帖子下回他的不算（解析时已去掉）。
- * root_user_id 为 null 的（抓取时那一页看不出根帖是谁的），同一对话里有别的回复知道根帖是谁的就跟着算，否则不算。
- */
-/**
  * 别人回复我的那几条（ids），各自是在谁的帖子下：'me' 我的 / 'him' 回复者自己的 / 'other' 别人的 / null 本机数据看不出来。
  * 我的帖子靠入站事件的 root_mine；不是我的，就看「我回别人」那张表里同一个对话的根帖主人是谁。
  */
@@ -91,6 +86,11 @@ export function replyPlaces(events, out, ids) {
   );
 }
 
+/**
+ * 我在别人帖子下的回复，按「帖子是谁的」计数。返回 Map<user_id, 次数>。
+ * 算的是对话根帖的作者：在他的帖子下回复任何人都算他的；在我自己帖子下回他的不算（解析时已去掉）。
+ * root_user_id 为 null 的（抓取时那一页看不出根帖是谁的），同一对话里有别的回复知道根帖是谁的就跟着算，否则不算。
+ */
 export function outboundCounts(out, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
   const rootOf = new Map(out.filter((e) => e.root_user_id).map((e) => [e.conversation_id, e.root_user_id]));
@@ -143,8 +143,6 @@ export function ranking(events, rules, now = Date.now(), out = []) {
     replies: all.reduce((n, r) => n + r.count, 0),
   };
 }
-
-export const board = (events, rules, now = Date.now()) => ranking(events, rules, now).rows;
 
 /** 某个人在窗口内、我帖子下的回复，新的在前。total 是总数，items 最多 limit 条。 */
 export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50) {

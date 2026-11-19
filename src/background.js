@@ -38,7 +38,27 @@ const rand = ([a, b]) => a + Math.floor(Math.random() * (b - a));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Date.now();
 
-let busy = false; // 同一时刻只允许一个抓取动作
+// 同一时刻只允许一个抓取动作。写法固定为：先不占锁查一遍该不该跑 → `if (busy) return; busy = true;`
+// （这两句之间不能有 await）→ 占住之后再确认一遍。查和占中间隔着 await 的话，两个几乎同时到的触发
+// （比如浏览器重启时两个 x.com 标签页同时上线）会都查到「空闲」，一起跑；反过来先占锁再慢慢查，
+// 又会让只是来看一眼、根本不用跑的调用把别的动作（比如用户刚点的初始化）挡掉。
+let busy = false;
+
+// cursor:<账号> 由好几处「读出、改、写回」，必须排队一个一个来：两次交叠的话，后写的会把先写的那几项盖掉。
+let cursorChain = Promise.resolve();
+function serial(fn) {
+  const run = cursorChain.then(fn);
+  cursorChain = run.catch(() => {}); // 一次出错不卡住后面的
+  return run;
+}
+/** 改 cursor 的唯一入口：fn 就地改 cur，它的返回值原样返回。 */
+const updateCursor = (account, fn) =>
+  serial(async () => {
+    const cur = await kvGet(keys.cursor(account), {});
+    const r = fn(cur);
+    await kvSet(keys.cursor(account), cur);
+    return r;
+  });
 
 // ---------- 账号 ----------
 
@@ -125,32 +145,59 @@ async function pull(account, cursor) {
   }
 
   const added = await putEvents(account, parsed.events);
-  const cur = await kvGet(keys.cursor(account), {});
-  if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
-  if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
-  await kvSet(keys.cursor(account), cur);
+  await updateCursor(account, (cur) => {
+    if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
+    if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
+  });
   await kvRemove(keys.alert(account));
-  if (added) await refreshSnapshot(account);
+  if (added) {
+    snapDirty.add(account);
+    await flushSnapshot(account, false);
+  }
   return { kind: 'ok', parsed, added };
 }
 
 const board = async (account) => ranking(await getEvents(account), await getSettings(account), now(), await getEvents(account, OUT));
 
+// 快照每写一次，每个 x.com 标签页都要把标签重画一遍、弹窗也要重画，所以抓取过程中最多每 30 秒重算一次，
+// 一轮结束时再补一次（flushSnapshot(account, true)）。改设置、页面上线、兜底闹钟仍然立刻重算。
+const SNAP_THROTTLE_MS = 30_000;
+const snapDirty = new Set(); // 入库了新数据、快照还没跟上的账号
+const snapAt = new Map(); // 账号 -> 上次重算的时间
+
 async function refreshSnapshot(account) {
+  snapDirty.delete(account);
+  snapAt.set(account, now());
   const rules = await getSettings(account);
   // 「我回别人」读完过一次之后，标签里才带「我回他几次」
   const out = (await kvGet(keys.cursor(account), {})).out?.lastAt ? await getEvents(account, OUT) : null;
-  await kvSet(keys.snap(account), { at: now(), windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), out) });
+  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), out) };
+  // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
+  const prev = await kvGet(keys.snap(account));
+  if (prev && JSON.stringify({ windowDays: prev.windowDays, show: prev.show, users: prev.users }) === JSON.stringify(snap)) return;
+  await kvSet(keys.snap(account), { at: now(), ...snap });
+}
+
+/** 有没跟上的新数据才重算；force 为假时离上次重算不到 30 秒就先不算。 */
+async function flushSnapshot(account, force) {
+  if (!snapDirty.has(account)) return;
+  if (!force && now() - (snapAt.get(account) || 0) < SNAP_THROTTLE_MS) return;
+  await refreshSnapshot(account);
 }
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
 
-/** 记下这一轮增量的时间，并随机定好下一次（专门约一个闹钟，不等 30 分钟一次的兜底闹钟）。 */
-async function planNextInc(cur, from) {
+/** 记下这一轮增量的时间，并随机定好下一次。只改 cur，在 updateCursor 里调用；返回下一次的时间，交给 armInc 约闹钟。 */
+function planNextInc(cur, from) {
   cur.lastIncrementalAt = from;
   cur.nextIncAt = from + rand(PACE.incIntervalMs);
-  await chrome.alarms.create(INC_ALARM, { when: Math.max(cur.nextIncAt, now() + 1000) });
-  await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) }); // 别人的回复读完，接着读我自己的
+  return cur.nextIncAt;
+}
+
+/** 约好下一次增量（专门一个闹钟，不等 30 分钟一次的兜底闹钟），以及别人的回复读完后接着读我自己的。 */
+async function armInc(nextIncAt) {
+  await chrome.alarms.create(INC_ALARM, { when: Math.max(nextIncAt, now() + 1000) });
+  await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
 }
 
 // ---------- 回填 ----------
@@ -192,25 +239,46 @@ async function finishJob(account, job, { reachedEnd }) {
   job.finishedAt = now();
   job.nextAt = null;
   await saveJob(account, job);
-  const cur = await kvGet(keys.cursor(account), {});
-  cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
-  // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读回到它为止
-  if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
-  await planNextInc(cur, job.startedAt); // 回填期间新来的回复留给下一次增量
-  await kvSet(keys.cursor(account), cur);
+  const next = await updateCursor(account, (cur) => {
+    cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
+    // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读回到它为止
+    if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
+    return planNextInc(cur, job.startedAt); // 回填期间新来的回复留给下一次增量
+  });
+  await armInc(next);
   await refreshSnapshot(account);
 }
 
-async function stepBackfill() {
-  if (busy) return;
-  const account = await kvGet(ACTIVE_JOB);
-  if (!account) return;
-  const job = await kvGet(keys.job(account));
-  if (!job || job.status !== 'running') return;
+/** 抓取被别的动作占着：约一个闹钟一分钟后再来（已经约了更早的就不动）。 */
+async function retryJobLater() {
+  const when = now() + 60_000;
+  const a = await chrome.alarms.get(JOB_ALARM);
+  if (!a || !(a.scheduledTime <= when)) await chrome.alarms.create(JOB_ALARM, { when });
+}
 
+/** 当前有没有该往下走的回填任务：有就返回 { account, job }。 */
+async function runningJob() {
+  const account = await kvGet(ACTIVE_JOB);
+  const job = account && (await kvGet(keys.job(account)));
+  return job && job.status === 'running' ? { account, job } : null;
+}
+
+async function stepBackfill() {
+  if (busy) return retryJobLater();
+  if (!(await runningJob())) return;
+  if (busy) return retryJobLater();
   busy = true;
+  let account = null;
   try {
+    const cur = await runningJob(); // 占住之后重读：上面等待的工夫里，上一步可能刚存了新进度
+    if (!cur) return;
+    account = cur.account;
+    const job = cur.job;
+
     const res = await pull(account, job.cursor);
+    // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
+    const latest = await kvGet(keys.job(account));
+    if (!latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
 
     if (res.kind === 'no_tab') {
       job.status = 'waiting_tab';
@@ -258,6 +326,8 @@ async function stepBackfill() {
     }
     await saveJob(account, job);
   } finally {
+    // 任务停下来（暂停、出错、等标签页）时，把节流期间没跟上的数据补进快照
+    if (account) await flushSnapshot(account, (await kvGet(keys.job(account)))?.status !== 'running').catch(() => {});
     busy = false;
   }
 }
@@ -293,33 +363,49 @@ async function wakeJob(tabOnline) {
   const job = await kvGet(keys.job(account));
   if (!job) return;
   const due = !job.nextAt || job.nextAt <= now();
-  if (job.status === 'paused' && job.auto && due) job.status = 'running';
-  else if (job.status === 'waiting_tab' && tabOnline && account === (await kvGet(keys.current))) job.status = 'running';
-  else if (!(job.status === 'running' && due)) return;
-  job.auto = false;
-  await saveJob(account, job);
+  if (job.status === 'running') {
+    // 已经在跑的不写回：这一步可能正在请求中，写回会把它刚存的进度盖掉
+    if (!due) return;
+  } else {
+    if (job.status === 'paused' && job.auto && due) job.status = 'running';
+    else if (job.status === 'waiting_tab' && tabOnline && account === (await kvGet(keys.current))) job.status = 'running';
+    else return;
+    job.auto = false;
+    await saveJob(account, job);
+  }
   await stepBackfill();
 }
 
 // ---------- 增量 ----------
 
-async function maybeIncremental() {
-  if (busy) return;
+/** 增量现在该不该跑：该跑返回 { account, cur }，不该返回 null。 */
+async function incDue() {
   const account = await kvGet(keys.current);
-  if (!account) return;
-  const settings = await getSettings(account);
-  if (!settings.fetchEnabled) return;
+  if (!account) return null;
+  if (!(await getSettings(account)).fetchEnabled) return null;
   const cur = await kvGet(keys.cursor(account), {});
-  if (!cur.syncedId) return; // 还没完成过初始化，不自动抓
+  if (!cur.syncedId) return null; // 还没完成过初始化，不自动抓
   const job = await kvGet(keys.job(account));
-  if (job && ['running', 'waiting_tab'].includes(job.status)) return;
-  if (job && job.status === 'paused' && job.auto) return; // 限流退避中
+  if (job && ['running', 'waiting_tab'].includes(job.status)) return null;
+  if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
   const t = now();
-  if (t < (cur.nextIncAt || 0)) return;
-  if (t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return;
+  if (t < (cur.nextIncAt || 0)) return null;
+  if (t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
+  return { account, cur };
+}
 
+async function maybeIncremental() {
+  // 正在跑的那个动作结束后会自己约下一次；到点没跑上的由兜底闹钟接上
+  if (busy || !(await incDue())) return;
+  if (busy) return;
   busy = true;
+  let account = null;
   try {
+    const due = await incDue(); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
+    if (!due) return;
+    account = due.account;
+    const cur = due.cur;
+
     // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少页。
     // 出错中断时接续点不动，下次重读这一段，靠主键去重。
     // 读满上限还没接上（一小时超过约 800 条）就到此为止：接续点照样前移，没读到的那段放弃，不提示（负责人定，不需要那么严格）。
@@ -330,12 +416,11 @@ async function maybeIncremental() {
       if (page) await sleep(rand(PACE.incPageGapMs));
       const res = await pull(account, cursor);
       if (res.kind === 'no_tab') return; // 没有 X 标签页，等下次有页面上线再试，不记失败
-      const c = await kvGet(keys.cursor(account), {});
-      c.lastAttemptAt = now();
-      await kvSet(keys.cursor(account), c);
+      await updateCursor(account, (c) => {
+        c.lastAttemptAt = now();
+      });
       if (res.kind === 'rate') {
-        await planNextInc(c, now()); // 这一轮放弃，等下个周期
-        await kvSet(keys.cursor(account), c);
+        await armInc(await updateCursor(account, (c) => planNextInc(c, now()))); // 这一轮放弃，等下个周期
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
         return;
       }
@@ -350,11 +435,14 @@ async function maybeIncremental() {
       }
       cursor = p.bottomCursor;
     }
-    const c = await kvGet(keys.cursor(account), {});
-    await planNextInc(c, now());
-    if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
-    await kvSet(keys.cursor(account), c);
+    const next = await updateCursor(account, (c) => {
+      // 读的过程中被清空了（没有 syncedId）就不补：清空后要重新初始化才自动抓
+      if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
+      return planNextInc(c, now());
+    });
+    await armInc(next);
   } finally {
+    if (account) await flushSnapshot(account, true).catch(() => {});
     busy = false;
   }
 }
@@ -392,39 +480,40 @@ async function grabTpl(me, force) {
   return null;
 }
 
-// 先读后写，所以排队一个一个来：两次保存交叠的话，后写的会把先写的那几项盖掉
-let outQueue = Promise.resolve();
-function saveOut(account, patch) {
-  outQueue = outQueue.then(async () => {
-    const cur = await kvGet(keys.cursor(account), {});
+const saveOut = (account, patch) =>
+  updateCursor(account, (cur) => {
     cur.out = { ...cur.out, ...patch };
-    await kvSet(keys.cursor(account), cur);
   });
-  return outQueue;
-}
 
 /** force：手动点「初始化」，不管上次读到哪，按统计范围重新读一遍。 */
 async function syncOut(force = false) {
   const account = await kvGet(keys.current);
   if (!account) return;
-  if (busy) return void chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return;
-  if (force) await saveOut(account, { fullFor: 0, resume: null });
-  const cur = await kvGet(keys.cursor(account), {});
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return;
-
-  const targetTs = now() - settings.windowDays * DAY_MS;
-  const prev = cur.out || {};
-  // 完整读：第一次、统计范围调大了、或手动初始化——读到范围起点。否则只读到上次的位置。
-  const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays;
-  const resume = full ? prev.resume : null; // 上一轮完整读被页数上限截断，这一轮接着读
-  const stopAt = full ? null : prev.syncedId;
-
+  if (busy) {
+    // 正在读另一份数据：过一两分钟再来。手动点的先把「要重新完整读」记下，到时候照办
+    if (force) await saveOut(account, { fullFor: 0, resume: null });
+    await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+    return;
+  }
   busy = true;
+  let started = false;
   try {
+    if (force) await saveOut(account, { fullFor: 0, resume: null });
+    const cur = await kvGet(keys.cursor(account), {});
+
+    const targetTs = now() - settings.windowDays * DAY_MS;
+    const prev = cur.out || {};
+    // 完整读：第一次、统计范围调大了、或手动初始化——读到范围起点。否则只读到上次的位置。
+    const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays;
+    const resume = full ? prev.resume : null; // 上一轮完整读被页数上限截断，这一轮接着读
+    const stopAt = full ? null : prev.syncedId;
+
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
+    started = true;
     await saveOut(account, { running: { at: now(), pages: 0 } });
     const tpl = (await kvGet(keys.tpl)) || (await grabTpl(me, force));
     if (!tpl) return saveOut(account, { status: 'need_tpl', message: `没能自动取到 X 读「回复」列表的方式。${NEED_TPL}（x.com/${me.handle}/with_replies），插件看到后会自己开始读` });
@@ -480,8 +569,10 @@ async function syncOut(force = false) {
     // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
     await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
   } finally {
-    await saveOut(account, { running: null });
-    await refreshSnapshot(account).catch(() => {}); // 标签里的「我回他几次」跟着更新
+    if (started) {
+      await saveOut(account, { running: null }).catch(() => {});
+      await refreshSnapshot(account).catch(() => {}); // 标签里的「我回他几次」跟着更新
+    }
     busy = false;
   }
 }
@@ -493,9 +584,9 @@ async function maybePrune(account) {
   if (now() - (cur.lastPruneAt || 0) < DAY_MS) return; // 一天最多清一次
   await pruneEvents(account, now() - KEEP_DAYS * DAY_MS);
   await pruneEvents(account, now() - KEEP_DAYS * DAY_MS, OUT);
-  const c = await kvGet(keys.cursor(account), {});
-  c.lastPruneAt = now();
-  await kvSet(keys.cursor(account), c);
+  await updateCursor(account, (c) => {
+    c.lastPruneAt = now();
+  });
 }
 
 // ---------- 清空 ----------
@@ -506,7 +597,8 @@ async function clearData(account) {
     await kvRemove(ACTIVE_JOB);
   }
   await clearEvents(account);
-  await kvRemove([keys.cursor(account), keys.job(account), keys.snap(account), keys.alert(account)]);
+  snapDirty.delete(account);
+  await serial(() => kvRemove([keys.cursor(account), keys.job(account), keys.snap(account), keys.alert(account)])); // 和改 cursor 的排同一个队
 }
 
 // ---------- 事件入口 ----------
@@ -580,7 +672,6 @@ const handlers = {
       cursor: await kvGet(keys.cursor(account), {}),
       job: await kvGet(keys.job(account)),
       alert: await kvGet(keys.alert(account)),
-      eventCount: db.in.count,
       db,
       tplAt: (await kvGet(keys.tpl))?.at || null, // 什么时候看到过 X 读「回复」列表的请求；没看到过就读不了「我回别人」
     };
@@ -594,14 +685,11 @@ const handlers = {
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
     if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
-    // 点了一定要有回应：进度和读不了的原因都显示在设置页「我回别人」那一行
-    if (busy) {
-      await saveOut(account, { fullFor: 0, resume: null });
-      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
-      return { error: '正在读另一份数据，一两分钟后会自动开始读「我回别人」，不用再点。' };
-    }
+    // 点了一定要有回应：进度和读不了的原因都显示在设置页「我回别人」那一行。
+    // 正在读另一份数据时，syncOut 自己会记下「要重新完整读」并约一两分钟后再来
+    const queued = busy;
     syncOut(true).catch((e) => saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` })); // 不等待
-    return { ok: true };
+    return queued ? { error: '正在读另一份数据，一两分钟后会自动开始读「我回别人」，不用再点。' } : { ok: true };
   },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),

@@ -64,6 +64,8 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `root_mine` | 根帖是不是我的：`true` / `false` / `null`（抓取时那页看不出来） |
 | `text` | 回复内容摘要：去掉开头的 @、最多 100 字；只给弹窗「点开某人」看，拿不到是空串。2026-11-14 之前入库的没有这个字段，重新初始化会补上 |
 
+`db.js` 把整表读（`getEvents`）的结果缓存在 Service Worker 内存里，写入、清理、清空时作废；返回的数组是冻结共用的，调用方要排序先复制。
+
 表里存的是**所有直接回复我的**，包括 `root_mine` 为 `false` 的；是否上榜在 `rank.js` 的 `underMyPosts` 里过滤。这样以后改口径不用重新抓。`root_mine === null` 的，只有同一 `conversation_id` 下存在 `root_mine === true` 的记录时才计入。
 
 表 `out`（库版本 2 加的）：我在别人帖子下的回复，主键同样是 `[account, id]`。字段：`created_at`、`to_user_id`（直接回复的人）、`root_user_id`（对话根帖作者，`null` = 抓取时那页没带出根帖，统计时靠同一对话的其他回复补判，补不了不计）、`conversation_id`、`text`。我自己帖子下的回复在解析时就丢掉，不入库。
@@ -82,7 +84,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | `settings:<账号>` | `{ fetchEnabled, windowDays, topN, minCount, tiers: [{ min, color }], baseColor }`，后五项是榜单规则，见 `rank.js` 的 `DEFAULT_RULES` |
 | `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt }`。`nextIncAt` 是下一次增量最早什么时候跑。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量正常结束或读满上限时前移到本轮最新一条，出错中断时不动、下次重读这一段（靠主键去重） |
 | `job:<账号>` | 回填任务状态，见下 |
-| `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, color, last } } }`，内容就是回复榜；改任何设置、有 X 页面上线时都立刻重算 |
+| `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, color, last } } }`，内容就是回复榜；改任何设置、有 X 页面上线时都立刻重算。抓取过程中节流：最多每 30 秒重算一次，一轮结束或任务停下时补一次（`background.js` 的 `flushSnapshot`）；算出来和存着的一样就不写，免得各页面白白重画 |
 | `alert:<账号>` | 最近一次抓取或解析错误，下次成功后清除 |
 | `activeJobAccount` | 当前回填任务属于哪个账号（同一时刻只有一个） |
 | `domWarning` | 内容脚本发现页面结构对不上时置位 |
@@ -107,7 +109,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 | 限流退避 | 429 → 暂停；等待时间取「接口给的重置时间」和「15 分钟起、逐次翻倍、最长 4 小时」中的较大者；成功一页后退避重置 | |
 | 增量 | 大约每小时一次：每轮结束后随机定 50–70 分钟后的下一次，约一个专门的 `inc` 闹钟（不可配，要停用关总开关），从最新读回到上次的接续点为止，页间 3–6 秒，单次最多 40 页（约 800 条），两次尝试至少隔 10 分钟 | 间隔里来多少读多少；40 页上限是为了不超过 Service Worker 单次事件约 5 分钟的时限。读满 40 页还没接上就静默停止、放弃没读到的那段，不提示（负责人 2026-11-13 定：不需要那么严格） |
 | 增量被限流 | 放弃本轮，等下个周期 | |
-| 并发 | 全局 `busy` 锁，同一时刻只有一个抓取动作 | |
+| 并发 | 全局 `busy` 锁，同一时刻只有一个抓取动作。写法：先不占锁查该不该跑 → `if (busy) return; busy = true;`（中间不能有 `await`）→ 占住后再确认一遍；回填被占时约一个 1 分钟后的 `job` 闹钟再来 | `cursor:<账号>` 有多处读改写，一律走 `updateCursor`（排队），不要直接 `kvSet` |
 | 首次抓取 | 必须用户手动点「初始化」；没初始化过的账号不自动抓 | |
 | 总开关 | `fetchEnabled` 关闭后 `pull()` 直接拒绝，正在跑的任务被暂停 | |
 | 串号保护 | 每次请求带回当前会话的用户 ID，与任务账号不一致就报错停止 | |

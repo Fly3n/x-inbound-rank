@@ -150,7 +150,28 @@ function renderTiers(rules) {
 
 // ---------- 整体渲染 ----------
 
-async function render() {
+// 同一时间只画一遍：画的过程中又来的请求合并成画完后再补一遍，免得几遍交叠、旧结果盖掉新结果
+let drawing = null;
+let again = false;
+function render() {
+  if (drawing) {
+    again = true;
+    return drawing;
+  }
+  drawing = (async () => {
+    try {
+      do {
+        again = false;
+        await draw();
+      } while (again);
+    } finally {
+      drawing = null;
+    }
+  })();
+  return drawing;
+}
+
+async function draw() {
   const g = await call('getState');
   const handles = Object.keys(g.accounts);
   if (!view.account || !g.accounts[view.account]) view.account = g.current || handles[0] || null;
@@ -176,7 +197,7 @@ async function render() {
   banners(items);
 
   // 还没有任何数据时先落在设置页，那里有启动按钮
-  view.tab ??= s.eventCount || s.job ? 'board' : 'settings';
+  view.tab ??= s.db.in.count || s.job ? 'board' : 'settings';
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === view.tab);
   $('view-board').hidden = view.tab !== 'board';
   $('view-settings').hidden = view.tab !== 'settings';
@@ -185,7 +206,7 @@ async function render() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  Object.assign(view, { rows, rules, eventCount: s.eventCount, outReady: !!out?.lastAt });
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt });
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
   const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
   // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
@@ -201,7 +222,7 @@ async function render() {
     (outBad ? `${outBad}。${out.status === 'need_tpl' && g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}` : '') +
     (!out ? '「别人回我」初始化完成后一两分钟会自动开始，也可以直接点「初始化」。' : '') +
     (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
-  $('outLine').hidden = !(outBad && s.eventCount);
+  $('outLine').hidden = !(outBad && s.db.in.count);
   $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
   $('outSync').disabled = !isSession || !rules.fetchEnabled || !!running;
   $('outSync').textContent = running ? '读取中…' : '初始化';
@@ -375,6 +396,13 @@ $('bindBtn').addEventListener('click', async () => {
 
 $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
-// 任务状态、快照变化时自动刷新
-chrome.storage.onChanged.addListener(() => render());
+// 任务状态、快照变化时自动刷新。读取过程中一页要写好几次存储，攒 200 毫秒再画；
+// 只看和界面有关的键（tplTry 这类后台自用的不管）
+const WATCH = /^(accounts|current|pendingUserId|domWarning|tpl:replies|(settings|cursor|job|snap|alert):)/;
+let redrawTimer = null;
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !Object.keys(changes).some((k) => WATCH.test(k))) return;
+  clearTimeout(redrawTimer);
+  redrawTimer = setTimeout(render, 200);
+});
 render();

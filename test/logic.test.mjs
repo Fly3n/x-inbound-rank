@@ -3,8 +3,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../src/content/rel.js';
-import { board, ranking, outboundCounts, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import { ranking, outboundCounts, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
 import { parseMentions, parseMyReplies, ParseError } from '../src/x/parser.js';
+
+const board = (events, rules, now) => ranking(events, rules, now).rows;
 
 const NOW = Date.UTC(2026, 10, 13);
 const ev = (id, actor, daysAgo) => ({

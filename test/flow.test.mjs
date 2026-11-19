@@ -107,7 +107,7 @@ async function fireJob() {
   store['job:me'].nextAt = 0;
   await listeners.alarm({ name: 'job' });
 }
-const count = async () => (await send({ type: 'getAccountState', account: 'me' })).eventCount;
+const count = async () => (await send({ type: 'getAccountState', account: 'me' })).db.in.count;
 const boardRows = async () => (await send({ type: 'getBoard', account: 'me' })).rows;
 const setWindow = (days) => send({ type: 'setSettings', account: 'me', patch: { windowDays: days } });
 
@@ -242,6 +242,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   before = server.calls;
   await listeners.alarm({ name: 'inc' });
   assert.equal(server.calls - before, 1);
+
+  // 两个触发几乎同时到（比如浏览器重启时两个 x.com 标签页同时上线）：只跑一轮
+  store['cursor:me'].nextIncAt = 0;
+  store['cursor:me'].lastAttemptAt = 0;
+  before = server.calls;
+  await Promise.all([listeners.alarm({ name: 'inc' }), listeners.alarm({ name: 'inc' })]);
+  assert.equal(server.calls - before, 1, '同时到的两个触发只跑一轮');
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.color;

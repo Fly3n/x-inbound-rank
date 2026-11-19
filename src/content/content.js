@@ -56,6 +56,7 @@
     places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
     windowDays = snap?.windowDays || 7;
     show = { rank: true, out: true, rel: true, place: true, ...snap?.show };
+    hideTip(); // 数据变了，开着的提示可能已经过时
     rescan();
   }
 
@@ -252,7 +253,6 @@
   }
 
   function rescan() {
-    hideTip();
     document.querySelectorAll(SEL.userName).forEach(mark);
   }
 
@@ -265,7 +265,13 @@
       rescan();
     });
   }
-  new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
+  // 我们自己插、改标签也会触发这个监听；只动了自家节点的变化不用再扫一遍
+  const OURS = '.xir-badge, .xir-chip, .xir-tip';
+  const isOurs = (n) => n.nodeType === 1 && n.matches(OURS);
+  const onlyOurs = (r) => r.target.closest?.(OURS) || ([...r.addedNodes].every(isOurs) && [...r.removedNodes].every(isOurs));
+  new MutationObserver((records) => {
+    if (!records.every(onlyOurs)) scheduleScan();
+  }).observe(document.body, { childList: true, subtree: true });
   XIRRel.onChange = scheduleScan; // 页面又加载了一批数据，关系可能有新的
 
   // ---------- 页面结构自检 ----------

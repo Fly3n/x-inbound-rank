@@ -32,9 +32,25 @@ function done(tx) {
 
 const accountRange = (account) => IDBKeyRange.bound([account, ''], [account, '￿']);
 
+// 整表读的结果缓存在内存里（Service Worker 活着的这一阵）：算一次榜、弹窗打开一次、通知页问一次归属，
+// 都要把整张表读一遍，同一份数据没变时不必反复读。写入、清理、清空时作废。
+// 返回的数组是冻结的、和别处共用，调用方不能改它（要排序先复制）。
+const cache = new Map(); // `${表名}\n${账号}` -> Promise<rows>
+const cacheKey = (account, name) => `${name}\n${account}`;
+const forget = (account, names) => names.forEach((n) => cache.delete(cacheKey(account, n)));
+
 /** 写入事件，返回其中新增（此前不存在）的条数。 */
 export async function putEvents(account, events, name = STORE) {
   if (!events.length) return 0;
+  forget(account, [name]);
+  try {
+    return await putRows(account, events, name);
+  } finally {
+    forget(account, [name]);
+  }
+}
+
+async function putRows(account, events, name) {
   const db = await open();
   const tx = db.transaction(name, 'readwrite');
   const store = tx.objectStore(name);
@@ -51,7 +67,18 @@ export async function putEvents(account, events, name = STORE) {
   return added;
 }
 
-export async function getEvents(account, name = STORE) {
+/** 该账号在这张表里的全部事件。结果冻结、共用，不要改。 */
+export function getEvents(account, name = STORE) {
+  const k = cacheKey(account, name);
+  if (!cache.has(k)) {
+    const p = readAll(account, name).then(Object.freeze);
+    p.catch(() => cache.get(k) === p && cache.delete(k)); // 读失败不留在缓存里
+    cache.set(k, p);
+  }
+  return cache.get(k);
+}
+
+async function readAll(account, name) {
   const db = await open();
   const tx = db.transaction(name, 'readonly');
   const req = tx.objectStore(name).getAll(accountRange(account));
@@ -60,14 +87,28 @@ export async function getEvents(account, name = STORE) {
 }
 
 export async function clearEvents(account) {
+  forget(account, [STORE, OUT]);
   const db = await open();
   const tx = db.transaction([STORE, OUT], 'readwrite');
   for (const name of [STORE, OUT]) tx.objectStore(name).delete(accountRange(account));
-  await done(tx);
+  try {
+    await done(tx);
+  } finally {
+    forget(account, [STORE, OUT]);
+  }
 }
 
 /** 删掉早于 beforeTs 的事件，返回删了几条。 */
 export async function pruneEvents(account, beforeTs, name = STORE) {
+  forget(account, [name]);
+  try {
+    return await pruneRows(account, beforeTs, name);
+  } finally {
+    forget(account, [name]);
+  }
+}
+
+async function pruneRows(account, beforeTs, name) {
   const db = await open();
   const tx = db.transaction(name, 'readwrite');
   let removed = 0;
