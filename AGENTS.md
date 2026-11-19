@@ -140,7 +140,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 4. 内容脚本里的标签注入（`[data-testid="User-Name"]`）在真实时间线上的显示效果。
 5. 2026-11-14 起已在负责人的真实账号上运行（读取、榜单、名次标签能用）。负责人不做逐条人工核对，以体验反馈为准；现状见 `REQUIREMENTS.md` 第三节。
 
-**最大的维护风险**：X 网页版自己已改用 GraphQL `NotificationsTimeline`（变量 `{ timeline_type: "Mentions", count: 20 }`，查询 ID 当时为 `XANkUc-HLIcCl8q85rGC2A`，另带一长串 `features` 参数），上面的 REST 接口是旧版，随时可能下线。下线后要重写 `fetcher.js` 和 `parser.js`：GraphQL 的查询 ID 和 `features` 随 X 发版变化，需要从页面实际请求里取，不能写死太久。
+**提及的新接口实测（2026-11-19，小号）**：X 网页版读「提及」用 GraphQL `NotificationsTimeline`（查询 ID 当时仍是 `XANkUc-HLIcCl8q85rGC2A`，变量 `{ timeline_type: "Mentions", count, cursor }`，另带一长串 `features`）。额度 **1500 次 / 15 分钟**（旧 REST 接口 180 次）；网页版自己翻页用 `count: 40`；照模板重发不需要 `x-client-transaction-id`，`count: 40` 返回 200。返回在 `data.viewer_v2.user_results.result.notification_timeline.timeline.instructions`，条目是 `TimelineTimelineItem`，`clientEventInfo.element` 标明类型（回复我的是 `user_replied_to_your_tweet`），帖子在 `itemContent.tweet_results.result`，`legacy` 字段和「回复」栏的一样，游标在 `TimelineTimelineCursor`（`Top` / `Bottom`）。旧 REST 接口当天也还能用（200，180 次）。
 
 每次实测有新结论，更新本节和 README 的「实测结论」。
 
