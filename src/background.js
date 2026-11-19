@@ -19,10 +19,13 @@ const PACE = {
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
   restMs: [60_000, 120_000], // 一次读不完、分几轮读时，轮与轮之间的休息
-  slowPages: 20, // 一次要读很多页时（「我回别人」初始化、增量读满 40 页后的补读）：按回填的页间隔，一个闹钟事件最多读这么多页（约 4 分钟）
+  slowPages: 20, // 一次要读很多页时（增量读满 40 页后的补读）：按回填的页间隔，一个闹钟事件最多读这么多页（约 4 分钟）
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
-  outMaxPages: 40, // 我的回复：平时增量单次最多页数（和别人回我的增量一样）
-  outMaxRounds: 30, // 我的回复：一次读不完时最多接着读几轮（30 × 20 页 = 600 页，和回填单次上限一样），再多就到此为止
+  // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），比提及的 180 次小得多，单独定节奏：
+  // 一个闹钟事件最多读 5 页，读不完休息 4–6 分钟再接着读，约每 15 分钟 13 页，是额度的四分之一左右
+  outPages: 5,
+  outRestMs: [240_000, 360_000],
+  outMaxRounds: 120, // 我的回复：一次读不完时最多接着读几轮（120 × 5 页 = 600 页，和回填单次上限一样），再多就到此为止
   tplWaitMs: 25_000, // 我的回复：自己开标签页取请求地址时，最多等这么久
   tplRetryMs: 6 * 60 * 60_000, // 我的回复：自动读的时候没取到，隔这么久才再开一次标签页；手动点「初始化」不受限
 };
@@ -537,7 +540,7 @@ async function syncOut(force = false) {
     // 一次要读很多页（完整读、或接着上一轮读）时按回填的节奏，慢一些；平时的增量一般就一两页，按增量的节奏
     const slow = full || !!resume;
     const gap = slow ? PACE.pageGapMs : PACE.incPageGapMs;
-    const maxPages = slow ? PACE.slowPages : PACE.outMaxPages;
+    const maxPages = PACE.outPages; // 这个接口额度小，不管哪种读法一轮都只读几页
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
@@ -585,7 +588,7 @@ async function syncOut(force = false) {
     if (!complete && rounds < PACE.outMaxRounds) {
       // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读。读完之前接续点不动
       await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt } });
-      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.restMs) });
+      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outRestMs) });
       return;
     }
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）

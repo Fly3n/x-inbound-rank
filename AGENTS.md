@@ -18,7 +18,7 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - 每次「初始化」都从最新一条重新往回读，不做接续翻页（负责人知情后定）。
 - 只算别人**直接评论我的帖子**的（第一级，2026-11-19 负责人定，取代 11-13「我帖子下直接回复我的都算」）：`rank.js` 的 `countsToMe`，条件是 `target_post_id === conversation_id`。我帖子下的深层回复、别人帖子下的都不算。通知列表的 M 仍按「在我帖子下、任何一层」（`underMyPosts`），和计数口径分开。
 - 榜单每行另带「我回 N」：同一窗口内**我直接评论他的帖子**几次（2026-11-14 负责人定，11-19 改为只算第一级）：`rank.js` 的 `countsFromMe`，条件是 `reply_to_id === conversation_id`，记在根帖作者名下。在他帖子下回别人、回他的评论都不算。不影响排名。弹窗榜单和导出里显示；时间线名次标签里也带（同日负责人定）：第三段，纸飞机图标 + 次数，只有「我回别人」读完过一次才出现（快照里 `replied`），设置里 `showOut` 可关。
-- 「我回」的数据来自我自己主页「回复」栏背后的接口（GraphQL `UserTweetsAndReplies`）。它的查询 ID 和 `features` 参数随 X 发版变化，所以不写死：内容脚本从浏览器的资源计时记录里记下 X 页面自己发过的那条请求地址，抓取时只换掉 `userId`、`count`、`cursor` 照着发。手里没有这条地址时后台自己去取（`grabTpl`）：开一个不抢焦点的标签页到我主页的「回复」栏，内容脚本记下地址后关掉；自动读时取不到隔 6 小时才再试，手动「初始化」不受限。`chrome.tabs.create/remove` 不需要 `tabs` 权限。
+- 「我回」的数据来自我自己主页「回复」栏背后的接口（GraphQL，2026-11-19 实测名字是 `UserRepliesTimeline`，`fetcher.js` 的 `REPLIES_RE` 新旧名字都认）。它的查询 ID 和 `features` 参数随 X 发版变化，所以不写死：`tap.js` 看到 X 页面自己发的这条请求，把地址转给内容脚本记下（浏览器的资源计时记录在 x.com 上是空的，不能靠它），抓取时只换掉 `userId`、`count`、`cursor` 照着发。手里没有这条地址时后台自己去取（`grabTpl`）：开一个不抢焦点的标签页到我主页的「回复」栏，内容脚本记下地址后关掉；自动读时取不到隔 6 小时才再试，手动「初始化」不受限。`chrome.tabs.create/remove` 不需要 `tabs` 权限。
 - 数据来源是 X 网页版「通知 → 提及」的内部接口，用已登录的网页会话读。不走官方 API，不逐帖抓评论（请求量大、接口更脆，已比较过）。
 - 零写操作：不点赞、不关注、不发帖。数据只存本机，无任何上报。
 - 权限只有 `storage`、`alarms` 和 x.com / twitter.com 的站点权限。不加 `cookies`、`tabs`、`scripting`。
@@ -72,7 +72,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 
 表 `out`（库版本 2 加的）：我在别人帖子下的回复，主键同样是 `[account, id]`。字段：`created_at`、`reply_to_id`（回的是哪条帖子，0.10.0 加的；等于 `conversation_id` 就是直接评论根帖，「我回 N」只算这种）、`to_user_id`（直接回复的人）、`root_user_id`（对话根帖作者，`null` = 抓取时那页没带出根帖；第一级的回复一定有）、`conversation_id`、`text`。我自己帖子下的回复在解析时就丢掉，不入库。
 
-「我回」的同步状态在 `cursor.out`：`{ status: 'ok' | 'need_tpl' | 'error', message, syncedId, coverTs, fullFor, resume, lastAt, lastFullAt, lastFullDays, pages }`。`syncedId` 是上次读到的最新一条；`fullFor` 是最近一次完整读覆盖的统计范围（天）。`fullFor` 不小于当前范围时只读到 `syncedId` 为止；否则（第一次、范围改大了、手动点「初始化」把它清零）做一次完整读，读到范围起点。完整读和续读按回填的页间隔（8–15 秒），单个闹钟事件最多 20 页（`PACE.slowPages`）；平时增量按增量的页间隔，最多 40 页。没读完（完整读或增量都一样）就把位置记在 `resume`（`{ cursor, topId, rounds, full, stopAt }`）里，1–2 分钟后的下一个 `out` 闹钟接着读，读完之前 `syncedId` 不动，最多 30 轮（`PACE.outMaxRounds`）。完整读完记 `lastFullAt` / `lastFullDays` 和 `schema`。`schema` 是本机这份数据的版本（`rank.js` 的 `OUT_SCHEMA`，2 = 带 `reply_to_id`）：低于当前版本时视为要完整读，页面上线时 1–2 分钟后自动开始；读完之前弹窗和标签都不显示「我回 N」，不拿旧口径的数冒充。`lastAt` 是最近一次读完的时间，弹窗据此决定显不显示「我回 N」。平时由 `out` 闹钟触发：每轮增量或回填结束后 1–2 分钟，单独一个事件。接口返回 400 / 404 时认为模板过期，删掉 `tpl:replies` 并提示用户再打开一次「回复」栏；拿到新模板（`xir:tpl`）后 3 秒补读。事件里的 `root_handle`（根帖主人的 @ID）只给全量导出显示用，不参与统计。
+「我回」的同步状态在 `cursor.out`：`{ status: 'ok' | 'need_tpl' | 'error', message, syncedId, coverTs, fullFor, resume, lastAt, lastFullAt, lastFullDays, pages }`。`syncedId` 是上次读到的最新一条；`fullFor` 是最近一次完整读覆盖的统计范围（天）。`fullFor` 不小于当前范围时只读到 `syncedId` 为止；否则（第一次、范围改大了、手动点「初始化」把它清零）做一次完整读，读到范围起点。这个接口的额度只有 **50 次 / 15 分钟**（2026-11-19 实测），节奏单独定：不管哪种读法，单个闹钟事件最多 5 页（`PACE.outPages`；完整读和续读页间 8–15 秒，平时增量 3–6 秒）。没读完就把位置记在 `resume`（`{ cursor, topId, rounds, full, stopAt }`）里，休息 4–6 分钟（`PACE.outRestMs`）后的下一个 `out` 闹钟接着读，约每 15 分钟 13 页，是额度的四分之一左右。读完之前 `syncedId` 不动，最多 120 轮（`PACE.outMaxRounds`，共 600 页）。完整读完记 `lastFullAt` / `lastFullDays` 和 `schema`。`schema` 是本机这份数据的版本（`rank.js` 的 `OUT_SCHEMA`，2 = 带 `reply_to_id`）：低于当前版本时视为要完整读，页面上线时 1–2 分钟后自动开始；读完之前弹窗和标签都不显示「我回 N」，不拿旧口径的数冒充。`lastAt` 是最近一次读完的时间，弹窗据此决定显不显示「我回 N」。平时由 `out` 闹钟触发：每轮增量或回填结束后 1–2 分钟，单独一个事件。接口返回 400 / 404 时认为模板过期，删掉 `tpl:replies` 并提示用户再打开一次「回复」栏；拿到新模板（`xir:tpl`）后 3 秒补读。事件里的 `root_handle`（根帖主人的 @ID）只给全量导出显示用，不参与统计。
 
 **保留期**：两张表都只留最近 45 天（`background.js` 的 `KEEP_DAYS`），兜底闹钟里每天最多清一次。最长的统计范围是 30 天，更早的用不上；不清的话库会无限增长，而每次重算快照都要把该账号的事件全读一遍。量级参考：一条约 300–500 字节，一周 1 万条回复时 45 天约 6 万多条、二三十 MB，全读一遍在百毫秒级。
 
@@ -130,7 +130,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号小写 handl
 - 列表为空时 `globalObjects` 是 `{}`，只返回一个 `Top` 游标。
 - `twid`、`ct0` 可从 `document.cookie` 读到；`a[data-testid="AppTabBar_Profile_Link"]` 能取到 handle。
 
-**「我回」这条线整个待实测（2026-11-14 写成，一次真实请求都没发过）**：① 登录后的网页版读「回复」栏是不是还发 `GET /i/api/graphql/<id>/UserTweetsAndReplies?variables=…&features=…`（未登录的 x.com 已换成另一套前端，看不到登录后的请求）；② 资源计时记录里能不能看到这条地址；③ 照模板重发要不要 `x-client-transaction-id`（提及接口不需要，GraphQL 未知）；④ 返回结构是否如 `parseMyReplies` 所假设（帖子是 `{ legacy: { id_str, user_id_str, in_reply_to_*, conversation_id_str }, core.user_results }`，对话条目会带出根帖）。任何一项不符，结果是弹窗里「我回」那行显示读不了或出错，榜单其余部分不受影响。
+**「我回」这条线的实测（2026-11-19，小号；看的是两个公开账号的「回复」栏，和读我自己的是同一个接口）**：① 登录后读「回复」栏发的是 `GET /i/api/graphql/<id>/UserRepliesTimeline?variables=…&features=…`（名字变了，`REPLIES_RE` 认得）；② 资源计时记录在 x.com 上是空的，模板只能靠 `tap.js` 截到；③ 照模板重发**不需要** `x-client-transaction-id`，返回 200；④ 返回结构和 `parseMyReplies` 的假设一致（`legacy` 带 `in_reply_to_*`、`conversation_id_str`；条目是对话模块，带出我回的那条，但**不一定带出根帖**）；⑤ 额度 50 次 / 15 分钟。深层回复能不能认出根帖主人：两个账号共 63 条深层，根帖在页里的 29 条；根帖不在、但同一页有别的帖子直接回根帖、从而能推出主人的 29 条（现在的 `parseMyReplies` 还没用这一招）；认不出的 5 条。只看在别人帖子下的深层，认不出的约一半。开头那串 @ 里总包含根帖主人，但位置不固定，不能单靠它认。
 
 **未确认**（没有真实回复数据，第一次在有回复的账号上运行时才见分晓）：
 
