@@ -1,12 +1,12 @@
 {
   "name": "x-inbound-rank",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Chrome 插件「X 回复榜」：统计谁最常在我的 X 帖子下回复我",
   "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test"
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0"

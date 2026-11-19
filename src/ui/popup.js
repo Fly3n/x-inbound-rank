@@ -89,8 +89,8 @@ function renderList() {
               el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
             ]),
             ...(view.outReady
-              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，我直接评论他的帖子几次', textContent: `我回 ${r.replied}` })]
-              : []),
+              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，本机已读取的直接评论次数', textContent: `我回 ${r.replied}` })]
+              : [el('span', { className: 'mine zero', textContent: '我回 —' })]),
             el('span', { className: 'chip', dataset: { xirC: r.color }, title: '榜单范围内他在我的帖子下回复我几次，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
           ...(view.open === r.actor_id ? [detailRow()] : []),
@@ -206,7 +206,7 @@ async function draw() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA });
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA || s.db.out.count > 0 });
   // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
   // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
   const initStart = Date.now() - rules.initDays * DAY_MS;
@@ -230,26 +230,29 @@ async function draw() {
   if (inOldest) $('shortLine').textContent = `本机最早只有 ${fmtDay(inOldest)} 的数据，榜单按已有的算。`;
 
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
-  const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
+  const outBad = out?.message || '';
   // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
   const span = (d) => (d.count ? `本机 ${d.count} 条，${fmtDay(d.from)} – ${fmtDay(d.to)}。` : '本机还没有数据。');
   const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
-  $('outStatus').textContent =
-    (running ? `正在读取：已读 ${running.pages} 页…` : '') +
-    (running && !s.tplAt ? '（第一次读：正在后台开一个标签页看 X 怎么读这个列表，几秒后自动关掉）' : '') +
-    span(s.db.out) +
-    (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
-    (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +
-    (out?.resume ? '还在继续往回读…' : '') +
-    (out?.lastAt && (out.schema || 1) < OUT_SCHEMA && !out.resume ? '「我回」的统计口径改了，要重新读一遍才显示，后台会自动开始。' : '') +
-    (outBad ? `${outBad}。${out.status === 'need_tpl' && g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}` : '') +
-    (!out?.syncedId && !running && out?.fullFor !== 0 ? '还没初始化，点「初始化」开始。' : '') +
-    (out?.fullFor === 0 && !running && !out?.syncedId ? '已排上，一两分钟后开始读。' : '') +
-    (outCovered && !running ? `已有${fmtDay(outFrom)}以来的完整数据，包含最近${windowLabel(rules.initDays)}，不用再初始化。` : '');
-  $('outLine').hidden = !(outBad && s.db.in.count);
-  $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
-  $('outSync').disabled = !isSession || !rules.fetchEnabled || !!running || outCovered;
-  $('outSync').textContent = running ? '读取中…' : '初始化';
+  const outPhase = running ? '进行中' : out?.status === 'queued' ? '排队中'
+    : out?.status === 'need_tpl' ? '等待回复页' : out?.status === 'waiting_tab' ? '等待 X 页面'
+    : out?.resume && out.status !== 'error' ? '等待续读' : '';
+  const outPending = !!outPhase || out?.fullFor === 0 && out?.status !== 'error';
+  const outProgress = running ? `进行中，本轮已读 ${running.pages} 页。`
+    : outPhase ? `${outPhase}。` : '';
+  $('outStatus').textContent = span(s.db.out) + outProgress + outBad +
+    (outCovered && !outPending ? '已覆盖所选范围。' : '');
+  const handle = g.accounts[view.account]?.handle;
+  const outLink = $('outRepliesLink');
+  outLink.hidden = !(isSession && out?.status === 'need_tpl' && /^[A-Za-z0-9_]{1,15}$/.test(handle || ''));
+  if (!outLink.hidden) outLink.href = `https://x.com/${handle}/with_replies`;
+  $('outLine').hidden = false;
+  $('outLine').textContent = outProgress || outBad
+    ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
+    : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
+  $('outLine').hidden = !$('outLine').textContent;
+  $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCovered || starting.has('outSync');
+  $('outSync').textContent = outPhase || (outPending || starting.has('outSync') ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);
   $('initRange').value = String(rules.initDays);
   $('exportBoard').disabled = !rows.length;
@@ -270,8 +273,10 @@ async function draw() {
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
-  $('start').textContent = active ? '重新初始化' : '初始化';
-  $('start').disabled = !isSession || !rules.fetchEnabled || (inCovered && !active);
+  const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
+    : job?.status === 'paused' ? '已暂停' : '';
+  $('start').textContent = inPhase || (starting.has('start') ? '启动中' : '初始化');
+  $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || (inCovered && !active) || starting.has('start');
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const lb = s.cursor.lastBackfill;
   $('coverage').textContent =
@@ -279,7 +284,7 @@ async function draw() {
     (lb ? `上次初始化完成：${fmtTime(lb.finishedAt)}（最近${windowLabel(lb.rangeDays)}）。` : '') +
     (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
     (inCovered && !active ? `已有${lb.reachedEnd ? '提及列表里能翻到的全部' : `${fmtDay(inFrom)}以来的完整`}数据，包含最近${windowLabel(rules.initDays)}，不用再初始化。` : '') +
-    (s.mentionsApi === 'gql' ? '' : '现在用旧的读法；打开一次 X 的通知页，之后会自动换成新的读法（快一倍）。');
+    (s.mentionsApi === 'gql' ? '' : '当前可直接读取。你平时打开 X 通知页后，插件会自动启用新版读取方式。');
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -406,11 +411,26 @@ $('exportAll').addEventListener('click', async () => {
 });
 
 $('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
-$('start').addEventListener('click', () => {
-  const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速读取最近${windowLabel(view.rules.initDays)}别人对你的回复。${again}确定开始？`)) act('startBackfill');
-});
-$('outSync').addEventListener('click', () => act('syncOutNow'));
+const starting = new Set();
+async function initialize(id, type) {
+  const button = $(id);
+  if (button.disabled) return;
+  starting.add(id);
+  button.disabled = true;
+  button.textContent = '启动中';
+  try {
+    const result = await call(type, { account: view.account });
+    if (result?.error) alert(result.error);
+  } catch {
+    alert('未能启动初始化，请重新打开弹窗再试。');
+  } finally {
+    starting.delete(id);
+    await render();
+  }
+}
+
+$('start').addEventListener('click', () => initialize('start', 'startBackfill'));
+$('outSync').addEventListener('click', () => initialize('outSync', 'syncOutNow'));
 $('keepExport').addEventListener('click', () => $('exportAll').click());
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));

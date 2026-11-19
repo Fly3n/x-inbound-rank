@@ -27,8 +27,6 @@ const PACE = {
   outPages: 5,
   outRestMs: [240_000, 360_000],
   outMaxRounds: 120, // 我的回复：一次读不完时最多接着读几轮（120 × 5 页 = 600 页，和回填单次上限一样），再多就到此为止
-  tplWaitMs: 25_000, // 我的回复：自己开标签页取请求地址时，最多等这么久
-  tplRetryMs: 6 * 60 * 60_000, // 我的回复：自动读的时候没取到，隔这么久才再开一次标签页；手动点「初始化」不受限
 };
 
 // 本地数据保存多久见 rank.js 的 KEEP_DAYS（90 天，和最长的榜单范围一致）
@@ -231,6 +229,7 @@ async function scheduleJob(job, delayMs) {
 }
 
 async function startBackfill(account) {
+  if (account !== await kvGet(keys.current)) return { error: '只能读当前登录 X 的账号' };
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return { error: '自动更新已关闭，先在设置里打开' };
   const rangeDays = settings.initDays; // 往回读多远看初始化范围，和榜单范围分开
@@ -247,9 +246,14 @@ async function startBackfill(account) {
     startedAt: now(),
     backoffMs: PACE.backoffStartMs,
   };
-  await saveJob(account, job);
-  await kvSet(ACTIVE_JOB, account);
-  stepBackfill(); // 不等待，界面立刻返回
+  const accepted = await serial(async () => {
+    const existing = await kvGet(keys.job(account));
+    if (existing?.status === 'running' || existing?.status === 'waiting_tab' || existing?.auto && existing.status === 'paused') return;
+    await saveJob(account, job);
+    await kvSet(ACTIVE_JOB, account);
+    return true;
+  });
+  if (accepted) stepBackfill(); // 不等待，界面立刻返回
   return { ok: true };
 }
 
@@ -513,40 +517,13 @@ async function maybeIncremental() {
 //   running：{ at, pages } 正在读、已读几页（读完清掉）；syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的初始化范围（天），手动点「初始化」时清成 0 表示要完整读；
 //   resume：完整读被页数上限截断时的续读位置；lastAt：最近一次读完的时间；lastFullAt / lastFullDays：最近一次完整读（初始化）完成的时间和范围。
 
-const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
-
-/**
- * 读「回复」列表要照着 X 页面自己发的那条请求（查询 ID 和参数随 X 发版变，不能写死）。
- * 手里没有的时候自己去取：在后台开一个标签页到我主页的「回复」栏，X 页面会发那条请求，
- * 那个页面里的内容脚本记下地址（xir:tpl）后，把这个标签页关掉。用户不用做任何事。
- * force：手动点的，不受重试间隔限制。取不到返回 null。
- */
-async function grabTpl(me, force) {
-  if (!/^[A-Za-z0-9_]{1,15}$/.test(me.handle || '')) return null;
-  if (!force && now() - (await kvGet(keys.tplTry, 0)) < PACE.tplRetryMs) return null;
-  await kvSet(keys.tplTry, now());
-  let tab;
-  try {
-    tab = await chrome.tabs.create({ url: `https://x.com/${me.handle}/with_replies`, active: false });
-    for (const until = now() + PACE.tplWaitMs; now() < until; await sleep(500)) {
-      const tpl = await kvGet(keys.tpl);
-      if (tpl) return tpl;
-    }
-  } catch {
-    // 开不了标签页就当没取到
-  } finally {
-    if (tab?.id != null) await chrome.tabs.remove(tab.id).catch(() => {});
-  }
-  return null;
-}
-
 const saveOut = (account, patch) =>
   updateCursor(account, (cur) => {
     cur.out = { ...cur.out, ...patch };
   });
 
-/** force：手动点「初始化」，不管上次读到哪，按初始化范围重新读一遍。不是手动点的，没初始化过就不读。 */
-async function syncOut(force = false) {
+/** 读取已排队的初始化，或更新已经初始化过的账号。 */
+async function syncOut() {
   const account = await kvGet(keys.current);
   if (!account) return;
   const settings = await getSettings(account);
@@ -554,21 +531,24 @@ async function syncOut(force = false) {
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return;
   if (busy) {
-    // 正在读另一份数据：过一两分钟再来。手动点的先把「要重新完整读」记下，到时候照办
-    if (force) await saveOut(account, { fullFor: 0, resume: null });
+    // 正在读另一份数据：稍后继续。
     await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
     return;
   }
   busy = true;
   let started = false;
   try {
-    if (force) await saveOut(account, { fullFor: 0, resume: null });
     const cur = await kvGet(keys.cursor(account), {});
 
-    const targetTs = now() - settings.initDays * DAY_MS;
     const prev = cur.out || {};
+    if (prev.resume?.nextAt > now()) {
+      await chrome.alarms.create(OUT_ALARM, { when: prev.resume.nextAt });
+      return;
+    }
+    const initDays = prev.initDays ?? settings.initDays;
+    const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
     // 第一次必须手动点「初始化」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
-    if (!force && !prev.syncedId && prev.fullFor !== 0) return;
+    if (!prev.lastAt && !prev.syncedId && prev.fullFor !== 0) return;
     // 完整读：手动初始化（fullFor 被清成 0）、或本机数据是旧版本存的——读到初始化范围的起点。否则只读到上次的位置。
     const full = !prev.syncedId || prev.fullFor === 0 || (prev.schema || 1) < OUT_SCHEMA;
     // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
@@ -581,9 +561,9 @@ async function syncOut(force = false) {
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
-    await saveOut(account, { running: { at: now(), pages: 0 } });
-    const tpl = (await kvGet(keys.tpl)) || (await grabTpl(me, force));
-    if (!tpl) return saveOut(account, { status: 'need_tpl', message: `没能自动取到 X 读「回复」列表的方式。${NEED_TPL}（x.com/${me.handle}/with_replies），插件看到后会自己开始读` });
+    await saveOut(account, { status: 'reading', message: null, running: { at: now(), pages: 0 } });
+    const tpl = await kvGet(keys.tpl);
+    if (!tpl) return saveOut(account, { status: 'need_tpl', message: '打开 X 的「回复」栏一次，插件会自动继续。' });
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let reachedTs = null;
@@ -591,15 +571,15 @@ async function syncOut(force = false) {
     let pages = 0;
     for (; pages < maxPages; pages++) {
       if (pages) await sleep(rand(gap));
+      if (!(await getSettings(account)).fetchEnabled) return saveOut(account, { status: 'error', message: '自动更新已关闭，读取已暂停。' });
       const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor });
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
-      if (r.error === 'no_tab') return force && saveOut(account, { status: 'error', message: '没有可用的 X 标签页。打开或刷新一个 x.com 页面后再点「初始化」' });
-      if (r.userId && me.userId && r.userId !== me.userId) return force && saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
-      if (r.status === 429) return saveOut(account, { status: 'error', message: '被 X 限流（429），下一轮再读' });
+      if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', message: '打开或刷新一个 X 页面后自动继续。' });
+      if (r.userId && me.userId && r.userId !== me.userId) return saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
+      if (r.status === 429) return saveOut(account, { status: 'error', message: 'X 暂时限制了读取（429），请稍后再试。' });
       if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
         await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
-        await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
-        return saveOut(account, { status: 'need_tpl', message: `X 的回复列表接口参数变了（${r.status || '模板无效'}），一两分钟后自动重新取一次再读` });
+        return saveOut(account, { status: 'need_tpl', resume: null, message: 'X 的读取方式已更新。打开「回复」页后自动继续。' });
       }
       if (!r.ok) return saveOut(account, { status: 'error', message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
 
@@ -624,15 +604,16 @@ async function syncOut(force = false) {
     const rounds = (resume?.rounds || 0) + 1;
     if (!complete && rounds < PACE.outMaxRounds) {
       // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读。读完之前接续点不动
-      await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt } });
-      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outRestMs) });
+      const nextAt = now() + rand(PACE.outRestMs);
+      await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
+      await chrome.alarms.create(OUT_ALARM, { when: nextAt });
       return;
     }
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
     const done = { status: 'ok', message: null, pages, syncedId, resume: null, lastAt: now() };
     if (!full) return saveOut(account, done);
-    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.initDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: settings.initDays });
+    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: initDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: initDays, initDays: null, targetTs: null });
   } catch (e) {
     // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
     await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
@@ -702,6 +683,7 @@ const handlers = {
       // 「我回别人」是旧版本存的（口径不全）：不等下一次增量，一两分钟后就重新读
       const out = (await kvGet(keys.cursor(account), {})).out;
       if (out?.lastAt && (out.schema || 1) < OUT_SCHEMA && !(await chrome.alarms.get(OUT_ALARM))) await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+      if (out?.status === 'waiting_tab') await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
       wakeJob(true).then(maybeIncremental);
     }
     return { account };
@@ -716,7 +698,7 @@ const handlers = {
     // 之前因为没有模板没读成的，现在马上补读
     const account = await kvGet(keys.current);
     const out = account && (await kvGet(keys.cursor(account), {})).out;
-    if (out?.status === 'need_tpl' && !busy) await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 }); // busy：正在读的那一轮自己会用上
+    if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 }); // busy：正在读的那一轮自己会用上
     return {};
   },
   // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
@@ -761,11 +743,18 @@ const handlers = {
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
     if (!(await getSettings(account)).fetchEnabled) return { error: '自动更新已关闭，先打开' };
-    // 点了一定要有回应：进度和读不了的原因都显示在设置页「我回别人」那一行。
-    // 正在读另一份数据时，syncOut 自己会记下「要重新完整读」并约一两分钟后再来
-    const queued = busy;
-    syncOut(true).catch((e) => saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` })); // 不等待
-    return queued ? { error: '正在读另一份数据，一两分钟后会自动开始读「我回别人」，不用再点。' } : { ok: true };
+    const { initDays } = await getSettings(account);
+    const queued = await updateCursor(account, (cur) => {
+      const out = cur.out || {};
+      if (out.running && now() - out.running.at < 120_000) return;
+      if (['queued', 'need_tpl', 'waiting_tab'].includes(out.status) || out.resume && out.status !== 'error') return;
+      cur.out = { ...out, status: 'queued', message: null, fullFor: 0, resume: null, initDays, targetTs: now() - initDays * DAY_MS };
+      return true;
+    });
+    if (!queued) return { ok: true };
+    await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+    syncOut().catch((e) => saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` }));
+    return { ok: true };
   },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),

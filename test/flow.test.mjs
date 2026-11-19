@@ -154,9 +154,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await send({ type: 'syncOutNow', account: 'me' });
   await until(() => store['cursor:me'].out?.status === 'need_tpl' && !store['cursor:me'].out.running, '没有请求地址');
   assert.equal(server.outCalls, 0);
-  assert.deepEqual(server.opened, ['https://x.com/Me/with_replies'], '没有请求地址时自己去开「回复」栏取');
+  assert.deepEqual(server.opened, [], '等待用户打开回复页，插件不打开标签页');
   await listeners.alarm({ name: 'out' });
-  assert.equal(server.opened.length, 1, '自动读没取到，短时间内不反复开标签页');
+  assert.equal(server.opened.length, 0, '后台重试不打开标签页');
   assert.equal((await boardRows())[0].replied, 0);
   // 页面上出现了那条请求：记下地址，马上补读。7 天窗口读到 9 天前那条为止（2 页）
   delete alarms.out;
@@ -215,18 +215,19 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store['cursor:me'].out.status, 'need_tpl');
   assert.equal(store['tpl:replies'], undefined);
   assert.equal((await boardRows())[0].replied, 4, '已有的数还在');
-  assert.ok(alarms.out, '约好下一轮');
-  delete store.tplTry;
   delete alarms.out;
-  server.tplOnOpen = 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D';
+  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
+  assert.ok(alarms.out, '页面提供新地址后安排续读');
   await listeners.alarm({ name: 'out' });
-  assert.deepEqual([store['cursor:me'].out.status, server.closed, server.outUrls.at(-1).includes('QID2'), alarms.out], ['ok', [9], true, undefined]);
+  assert.deepEqual([store['cursor:me'].out.status, server.opened, server.outUrls.at(-1).includes('QID2')], ['ok', [], true]);
 
   assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
 
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
   await send({ type: 'startBackfill', account: 'me' });
   await until(() => job().pages === 1 && job().nextAt, '重跑第 1 页');
+  await send({ type: 'startBackfill', account: 'me' });
+  assert.equal(job().pages, 1, '重复初始化不会重置正在进行的任务');
   while (job().status === 'running') await fireJob();
   assert.equal(job().status, 'done');
   assert.equal(job().reachedEnd, true);
