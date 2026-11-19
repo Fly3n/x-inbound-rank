@@ -4,14 +4,14 @@
 (() => {
   const API = /\/i\/api\/(graphql|2)\//;
   // 每个接口请求报一下名字（诊断用：插件认不出「回复」列表时，能看到页面实际发的是哪些请求）；
-  // 名字像「回复」列表的（User…Replies…），把完整地址也报上去，插件照着它读我自己的回复
+  // 名字像「回复」列表的（User…Replies…）和读通知的（NotificationsTimeline），把完整地址也报上去，插件照着它读
   const OP = /\/i\/api\/graphql\/[\w-]+\/(\w+)/;
   const note = (url, method) => {
     try {
       const op = url.match(OP)?.[1];
       if (!op) return;
       const msg = { xirOp: `${op}${String(method || 'GET').toUpperCase() === 'GET' ? '' : '(POST)'}` };
-      if (/^User\w*Replies/.test(op)) msg.xirTpl = new URL(url, location.href).href;
+      if (/^User\w*Replies|^NotificationsTimeline$/.test(op)) msg.xirTpl = new URL(url, location.href).href;
       window.postMessage(msg, location.origin);
     } catch {
       // 忽略

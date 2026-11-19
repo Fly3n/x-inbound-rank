@@ -1,8 +1,11 @@
 // 解析层：把接口的原始 JSON 变成与 X 无关的结构。X 改返回结构时只改这个文件和 fetcher.js。
 // parseMentions：别人对我的回复（提及列表）；parseMyReplies：我在别人帖子下的回复（文件后半）。
 //
-// 【待实测】按 X 网页版 v2 timeline 形态（globalObjects + timeline.instructions）写成，
-// 尚未用真实返回验证；字段对不上时抛 ParseError，由上层提示用户，不静默吞掉。
+// 提及有两种来源，parseMentions 自己认：
+// - GraphQL NotificationsTimeline（X 网页版现在用的，2026-11-19 小号实测结构）：data…notification_timeline.timeline.instructions，
+//   条目 TimelineTimelineItem 里是 itemContent.tweet_results.result（legacy + core.user_results），游标在 TimelineTimelineCursor。
+// - 旧版 REST mentions.json：globalObjects + timeline.instructions，在真实账号上用过。
+// 字段对不上时抛 ParseError，由上层提示用户，不静默吞掉。
 
 export class ParseError extends Error {}
 
@@ -26,17 +29,8 @@ function walk(node, visit) {
   for (const v of Array.isArray(node) ? node : Object.values(node)) walk(v, visit);
 }
 
-/**
- * @param body 接口原始返回
- * @param me   { handle, userId } 当前账号
- * @returns {{
- *   events: Array,        // 别人对我的回复
- *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
- *   newestId: string|null, oldestId: string|null, oldestTs: number|null,
- *   bottomCursor: string|null
- * }}
- */
-export function parseMentions(body, me) {
+/** 旧版 REST：globalObjects 里是帖子和用户，时间线条目只引用帖子 ID。 */
+function fromRest(body) {
   const go = body?.globalObjects;
   const instructions = body?.timeline?.instructions;
   // 实测：列表为空时 globalObjects 是 {}，没有 tweets / users 这两个键
@@ -57,7 +51,65 @@ export function parseMentions(body, me) {
   if (!entryIds.length && Object.keys(tweets).length) {
     throw new ParseError('返回里有帖子，但时间线条目里找不到对它们的引用');
   }
+  return { tweets, users, entryIds, bottomCursor };
+}
 
+/** GraphQL：每个条目自带帖子和作者，这里换成和 REST 一样的形状（帖子表、用户表、条目里的帖子 ID）。 */
+function fromGraphql(body) {
+  let instructions = null;
+  walk(body.data, (n) => {
+    if (!instructions && Array.isArray(n.instructions)) instructions = n.instructions;
+  });
+  if (!instructions) {
+    const err = body?.errors?.[0]?.message;
+    throw new ParseError(err ? `X 返回错误：${String(err).slice(0, 200)}` : '返回里找不到通知时间线（instructions）');
+  }
+  const tweets = {};
+  const users = {};
+  const entryIds = [];
+  let bottomCursor = null;
+  let blank = 0;
+  for (const ins of instructions) {
+    for (const entry of ins?.entries || []) {
+      const c = entry?.content;
+      if (c?.cursorType === 'Bottom' && typeof c.value === 'string') bottomCursor = c.value;
+      const item = c?.itemContent;
+      if (!item || item.itemType !== 'TimelineTweet') continue;
+      let t = item.tweet_results?.result;
+      if (t?.__typename === 'TweetWithVisibilityResults') t = t.tweet;
+      const l = t?.legacy;
+      if (!l || typeof l.id_str !== 'string') {
+        blank++;
+        continue;
+      }
+      const u = t.core?.user_results?.result;
+      tweets[l.id_str] = l;
+      entryIds.push(l.id_str);
+      if (u && l.user_id_str && !users[l.user_id_str]) {
+        users[l.user_id_str] = {
+          screen_name: u.core?.screen_name ?? u.legacy?.screen_name,
+          name: u.core?.name ?? u.legacy?.name ?? '',
+          profile_image_url_https: u.avatar?.image_url ?? u.legacy?.profile_image_url_https ?? '',
+        };
+      }
+    }
+  }
+  if (blank && !entryIds.length) throw new ParseError('通知里有帖子条目，但解析不出帖子内容');
+  return { tweets, users, entryIds, bottomCursor };
+}
+
+/**
+ * @param body 接口原始返回
+ * @param me   { handle, userId } 当前账号
+ * @returns {{
+ *   events: Array,        // 别人对我的回复
+ *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
+ *   newestId: string|null, oldestId: string|null, oldestTs: number|null,
+ *   bottomCursor: string|null
+ * }}
+ */
+export function parseMentions(body, me) {
+  const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body) : fromRest(body);
   const myHandle = me.handle.toLowerCase();
   const isMe = (userId, screenName) =>
     (me.userId && userId === me.userId) || (screenName && screenName.toLowerCase() === myHandle);
@@ -210,9 +262,10 @@ export function parseMyReplies(body, me) {
     let rootScreen = null;
     if (conv === t.in_reply_to_status_id_str) [rootUser, rootScreen] = [t.in_reply_to_user_id_str || null, t.in_reply_to_screen_name];
     else if (root) [rootUser, rootScreen] = [root.user_id_str, root.screen];
-    if (rootUser && isMe(rootUser, rootScreen)) continue; // 我自己帖子下的回复不要
-    if (!rootUser && !me.userId && rootScreen && rootScreen.toLowerCase() === myHandle) continue;
+    // 我自己帖子下的回复：不计数，只记下「这个对话是我的」，帮别人回我的那份认出深层回复是不是在我帖子下
+    const own = (rootUser && isMe(rootUser, rootScreen)) || (!rootUser && !me.userId && !!rootScreen && rootScreen.toLowerCase() === myHandle);
     events.push({
+      ...(own ? { own: true } : {}),
       id: t.id_str,
       created_at: tweetTime(t),
       reply_to_id: t.in_reply_to_status_id_str, // 回的是哪条帖子；等于 conversation_id 就是直接评论根帖

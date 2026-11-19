@@ -1,7 +1,10 @@
 // 统计层：纯函数，不依赖 X 的接口或页面结构。只统计回复。
 
 export const DAY_MS = 86400000;
-export const WINDOWS = [7, 15, 30]; // 可选的统计范围（天）
+export const WINDOWS = [7, 15, 30, 60, 90]; // 榜单范围（天）：榜单、「我回 N」、时间线标签都按它
+export const INIT_WINDOWS = [7, 15, 30]; // 初始化范围（天）：点「初始化」时往回读多远，和榜单范围分开（2026-11-19 定）
+export const KEEP_DAYS = 90; // 本机数据保存多久，和最长的榜单范围一致；更早的每天自动清掉
+export const WARN_DAYS = 80; // 最早的数据存满这么多天时，榜单上方提示「快到期了，先导出」
 export const COLORS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray']; // 色值在 content/badge.css
 export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // maxTiers：阈值档最多 4 个，加上兜底色共 5 种颜色
 // 「我回别人」表的数据版本。2：每条多存 reply_to_id（回的是哪条帖子），用来判断是不是直接评论他的帖子。
@@ -15,7 +18,8 @@ export const OUT_SCHEMA = 2;
  *   名次本身说明不了「值不值得回」）。达到某档的 min 就用那档的颜色，都没达到用 baseColor。
  */
 export const DEFAULT_RULES = {
-  windowDays: 7,
+  windowDays: 7, // 榜单范围
+  initDays: 7, // 初始化范围
   topN: 100,
   minCount: 2,
   tiers: [
@@ -48,6 +52,8 @@ export function cleanRules(raw = {}) {
     .slice(0, LIMITS.maxTiers);
   return {
     windowDays: WINDOWS.includes(raw.windowDays) ? raw.windowDays : d.windowDays,
+    // 0.11.0 之前只有一个范围（7/15/30）：没存过初始化范围的，沿用当时那个
+    initDays: INIT_WINDOWS.includes(raw.initDays) ? raw.initDays : INIT_WINDOWS.includes(raw.windowDays) ? raw.windowDays : d.initDays,
     topN: clampInt(raw.topN, LIMITS.topN, d.topN),
     minCount: clampInt(raw.minCount, LIMITS.minCount, d.minCount),
     tiers,
@@ -62,24 +68,27 @@ export function cleanRules(raw = {}) {
 export const colorOf = (count, rules) => (rules.tiers.find((t) => count >= t.min) || { color: rules.baseColor }).color;
 
 /**
- * 计入回复榜的那一条（负责人 2026-11-19 定）：直接评论我的帖子（第一级）。
- * 我帖子下的深层回复（他评论 → 我回他 → 他再回我）、我去别人帖子下评论后对方回我的，都不算。
- * 第一级 = 回复的就是对话根帖；解析时只有「回复的是我」的才入库，所以根帖必然是我的。
+ * 「我回 N」计入的那一条：我直接评论他的帖子（第一层），记在帖子主人名下（负责人 2026-11-19 定）。
+ * 深层（回他帖子下的评论、他回我后我再回）不算：实测只有一半左右认得出根帖是谁的。
+ * own：我在自己帖子下的回复，只用来认「哪些对话是我的」，不计数。没有 reply_to_id 的是旧版本存的，判断不了，不算。
  */
-export const countsToMe = (e) => e.root_mine === true && !!e.target_post_id && e.target_post_id === e.conversation_id;
+export const countsFromMe = (o) => !o.own && !!o.reply_to_id && o.reply_to_id === o.conversation_id && !!o.root_user_id;
 
-/**
- * 「我回 N」计入的那一条：我直接评论他的帖子（第一级），记在帖子主人名下。
- * 在他帖子下回复别的评论者、回复他的评论都不算。没有 reply_to_id 的是旧版本存的，判断不了，不算。
- */
-export const countsFromMe = (o) => !!o.reply_to_id && o.reply_to_id === o.conversation_id && !!o.root_user_id;
-
-/**
- * 「在我的帖子下」的回复（任何一层）：对话根帖是我的。只用来给通知列表标 M，不用于计数。
- * root_mine 为 null 的（抓取时那一页看不出根帖是谁的），如果同一对话里有别的回复已证明根帖是我的，也算；否则不算。
- */
-export function underMyPosts(events) {
+/** 本机数据能证明根帖是我的那些对话：入站里 root_mine 为 true 的，加上「我回别人」表里我在自己帖子下回复过的。 */
+function myConversations(events, out = []) {
   const mine = new Set(events.filter((e) => e.root_mine === true).map((e) => e.conversation_id));
+  for (const o of out) if (o.own) mine.add(o.conversation_id);
+  return mine;
+}
+
+/**
+ * 「在我的帖子下」的回复（任何一层）：对话根帖是我的。计数（回复榜）和通知列表的 M 都用它（负责人 2026-11-19 定：别人回我不分层都算）。
+ * 表里存的都是「回复的是我」的，所以这里只要判断根帖是不是我的。
+ * root_mine 为 null 的（抓取时看不出根帖是谁的），同一对话里有别的记录证明根帖是我的就算；否则不算。
+ * 他在别人帖子下（包括他自己的帖子）回我的不算。
+ */
+export function underMyPosts(events, out = []) {
+  const mine = myConversations(events, out);
   return events.filter((e) => e.root_mine === true || (e.root_mine === null && mine.has(e.conversation_id)));
 }
 
@@ -88,9 +97,9 @@ export function underMyPosts(events) {
  * 我的帖子靠入站事件的 root_mine；不是我的，就看「我回别人」那张表里同一个对话的根帖主人是谁。
  */
 export function replyPlaces(events, out, ids) {
-  const mine = new Set(underMyPosts(events).map((e) => e.id));
+  const mine = new Set(underMyPosts(events, out).map((e) => e.id));
   const byId = new Map(events.map((e) => [e.id, e]));
-  const rootOf = new Map(out.filter((o) => o.root_user_id).map((o) => [o.conversation_id, o.root_user_id]));
+  const rootOf = new Map(out.filter((o) => o.root_user_id && !o.own).map((o) => [o.conversation_id, o.root_user_id]));
   return Object.fromEntries(
     ids.map((id) => {
       const e = byId.get(id);
@@ -113,12 +122,12 @@ export function outboundCounts(out, windowDays, now = Date.now()) {
   return counts;
 }
 
-/** 按回复者聚合时间窗内计入榜单的回复（口径见 countsToMe）。返回 Map<actor_id, row>。 */
-export function aggregate(events, windowDays, now = Date.now()) {
+/** 按回复者聚合时间窗内计入榜单的回复（口径见 underMyPosts）。返回 Map<actor_id, row>。 */
+export function aggregate(events, windowDays, now = Date.now(), out = []) {
   const since = now - windowDays * DAY_MS;
   const byActor = new Map();
-  for (const e of events) {
-    if (!countsToMe(e) || e.created_at < since || e.created_at > now) continue;
+  for (const e of underMyPosts(events, out)) {
+    if (e.created_at < since || e.created_at > now) continue;
     let row = byActor.get(e.actor_id);
     if (!row) {
       row = { actor_id: e.actor_id, handle: e.actor_handle, name: e.actor_name, avatar: e.actor_avatar, count: 0, last: 0 };
@@ -140,11 +149,11 @@ export function aggregate(events, windowDays, now = Date.now()) {
  * 回复榜 + 窗口内的总量。
  * rows：窗口内回复至少 minCount 次的人，最多前 topN 名；次数相同按最近回复时间排，再按 handle。每行带名次、标签颜色，
  *       以及 replied——同一窗口内我直接评论他的帖子几次（out 是我发出的回复，没有就都是 0）。
- * people / replies：窗口内直接评论过我帖子的总人数和总次数（不受 minCount、topN 影响）。
+ * people / replies：窗口内在我帖子下回复过我的总人数和总次数（不受 minCount、topN 影响）。
  */
 export function ranking(events, rules, now = Date.now(), out = []) {
   const mine = outboundCounts(out, rules.windowDays, now);
-  const all = [...aggregate(events, rules.windowDays, now).values()];
+  const all = [...aggregate(events, rules.windowDays, now, out).values()];
   const rows = all.filter((r) => r.count >= rules.minCount);
   rows.sort((a, b) => b.count - a.count || b.last - a.last || a.handle.localeCompare(b.handle));
   return {
@@ -155,20 +164,21 @@ export function ranking(events, rules, now = Date.now(), out = []) {
 }
 
 /** 某个人在窗口内计入榜单的回复（就是他那一行的次数由哪几条组成），新的在前。total 是总数，items 最多 limit 条。 */
-export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50) {
+export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50, out = []) {
   const since = now - rules.windowDays * DAY_MS;
-  const mine = events
-    .filter((e) => countsToMe(e) && e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
+  const mine = underMyPosts(events, out)
+    .filter((e) => e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
     .sort((a, b) => b.created_at - a.created_at);
   return { total: mine.length, items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })) };
 }
 
 /**
  * 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, color, last, replied? } }。
- * replied：同一窗口内我直接评论他的帖子几次。只有传了 out（「我回别人」已经读过）才带，没读过时不写 0，免得看成「一次没回」。
+ * replied：同一窗口内我直接评论他的帖子几次。只有 showOut 为 true（「我回别人」已经读完）才带，没读过时不写 0，免得看成「一次没回」。
+ * out 总是要传本机有的：认「哪些对话是我的」也要用它。
  */
-export function badgeSnapshot(events, rules, now = Date.now(), out = null) {
+export function badgeSnapshot(events, rules, now = Date.now(), out = [], showOut = true) {
   const users = {};
-  for (const r of ranking(events, rules, now, out || []).rows) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, color: r.color, last: r.last, ...(out ? { replied: r.replied } : {}) };
+  for (const r of ranking(events, rules, now, out || []).rows) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, color: r.color, last: r.last, ...(showOut ? { replied: r.replied } : {}) };
   return users;
 }

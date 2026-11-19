@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../src/content/rel.js';
-import { ranking, outboundCounts, countsToMe, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import { ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
 import { parseMentions, parseMyReplies, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
@@ -38,12 +38,23 @@ test('回复榜：名次上限可调，默认 100', () => {
 
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  const r = cleanRules({ windowDays: 60, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
   // 三个显示开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  assert.deepEqual(r, { windowDays: 7, initDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
+});
+
+test('两个范围：榜单范围可到 3 个月，初始化范围只有 7/15/30；老设置没有初始化范围时沿用当时的统计范围', () => {
+  assert.deepEqual([60, 90].map((d) => cleanRules({ windowDays: d }).windowDays), [60, 90]);
+  assert.equal(cleanRules({ initDays: 60 }).initDays, 7);
+  assert.equal(cleanRules({ initDays: 30 }).initDays, 30);
+  assert.equal(cleanRules({ windowDays: 15 }).initDays, 15, '0.10 存的设置：统计范围 15 天，初始化也按 15 天');
+  assert.equal(cleanRules({ windowDays: 90 }).initDays, 7);
+  // 榜单范围比初始化长：照常按榜单范围算
+  const evs = [ev(1, 'a', 50), ev(2, 'a', 80), ev(3, 'a', 95)];
+  assert.equal(board(evs, rules({ windowDays: 90, minCount: 1 }), NOW)[0].count, 2);
 });
 
 test('标签颜色：按次数分档，不按名次', () => {
@@ -52,14 +63,14 @@ test('标签颜色：按次数分档，不按名次', () => {
 });
 
 test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
-  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, { ...ev(6, 'a', 1), target_post_id: 'deep' }, ev(5, 'b', 1)];
+  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, { ...ev(6, 'a', 1.5), target_post_id: 'deep' }, ev(5, 'b', 1)];
   const d = repliesOf(events, 'a', rules(), NOW);
-  assert.deepEqual([d.total, d.items.map((x) => [x.id, x.text])], [2, [['1', '早'], ['2', '']]]);
+  assert.deepEqual([d.total, d.items.map((x) => [x.id, x.text])], [3, [['1', '早'], ['6', ''], ['2', '']]], '深层回复也算，别人帖子下的不算');
   assert.equal(repliesOf(events, 'a', rules(), NOW, 1).items.length, 1);
 });
 
 test('标签快照：就是榜上的人，键为小写 handle', () => {
-  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW);
+  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW, [], false);
   assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
   // 「我回别人」读过之后带上我回他几次；一次没回是 0
   const mine = [{ id: 'o1', created_at: NOW - DAY_MS, conversation_id: 'x1', reply_to_id: 'x1', root_user_id: 'a' }, { id: 'o2', created_at: NOW - 20 * DAY_MS, conversation_id: 'x2', reply_to_id: 'x2', root_user_id: 'a' }];
@@ -68,14 +79,18 @@ test('标签快照：就是榜上的人，键为小写 handle', () => {
   assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, []).a.replied, 0);
 });
 
-test('口径：只算直接评论我帖子的（第一级），深层回复和别人帖子下的不算', () => {
-  const e = (id, target, root_mine) => ({ ...ev(id, 'a', 1), conversation_id: 'p', target_post_id: target, root_mine });
-  assert.equal(countsToMe(e(1, 'p', true)), true, '他直接评论我的帖子 p');
-  assert.equal(countsToMe(e(2, 'my-comment', true)), false, '我帖子下：他评论 → 我回他 → 他再回我，这条不算');
-  assert.equal(countsToMe(e(3, 'p', false)), false, '别人的帖子');
-  assert.equal(countsToMe(e(4, 'x', null)), false, '看不出根帖是谁的');
-  const events = [e(1, 'p', true), e(2, 'my-comment', true), { ...e(5, 'q', true), conversation_id: 'q' }];
+test('口径：别人回我，在我帖子下回我的都算、不分层；别人帖子下的不算', () => {
+  const e = (id, conv, target, root_mine) => ({ ...ev(id, 'a', 1), conversation_id: conv, target_post_id: target, root_mine });
+  const events = [
+    e(1, 'p', 'p', true), // 直接评论我的帖子 p
+    e(2, 'p', 'my-comment', null), // 我帖子下：他评论 → 我回他 → 他再回我。根帖看不出来，但同一对话里第 1 条证明是我的
+    e(3, 'q', 'x', false), // 别人的帖子（包括他自己的）下回我
+    e(4, 'r', 'x', null), // 看不出根帖是谁的、也没有旁证：不算
+    e(5, 's', 'my-thread', null), // 我自己串推下回我：「我回别人」表里我在 s 下回过（own），证明 s 是我的
+  ];
+  const own = [{ id: 'o', own: true, conversation_id: 's', reply_to_id: 's', root_user_id: '1', created_at: NOW - DAY_MS }];
   assert.deepEqual(ranking(events, rules(), NOW).rows.map((r) => r.count), [2]);
+  assert.deepEqual(ranking(events, rules(), NOW, own).rows.map((r) => [r.count, r.replied]), [[3, 0]], 'own 只用来认对话，不算「我回 N」');
 });
 
 test('通知列表 M 的「在我帖子下」不分层：根帖归属未知的靠同一对话补判', () => {
@@ -134,6 +149,40 @@ test('解析：只收直接回复我的，引用和提及不计', () => {
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10);
 });
 
+// 新接口 NotificationsTimeline 的返回（按 2026-11-19 小号实测的结构）
+const nt = (id, uid, screen, extra = {}) => ({
+  entryId: `notification-${id}`,
+  content: {
+    entryType: 'TimelineTimelineItem',
+    clientEventInfo: { element: 'user_replied_to_your_tweet' },
+    itemContent: { itemType: 'TimelineTweet', tweet_results: { result: { __typename: 'Tweet', core: { user_results: { result: { rest_id: uid, core: { screen_name: screen, name: screen }, avatar: { image_url: `https://pbs.twimg.com/${uid}.jpg` } } } }, legacy: { id_str: id, user_id_str: uid, created_at: 'Thu Nov 12 08:00:00 +0000 2026', ...extra } } } },
+  },
+});
+const notif = (entries, bottom = 'B') => ({
+  data: { viewer_v2: { user_results: { result: { notification_timeline: { timeline: { instructions: [
+    { type: 'TimelineClearCache' },
+    { type: 'TimelineAddEntries', entries: [{ entryId: 'cursor-top', content: { cursorType: 'Top', value: 'T' } }, ...entries, ...(bottom ? [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: bottom } }] : [])] },
+  ] } } } } } },
+});
+
+test('解析新接口的提及：和旧接口一样分类', () => {
+  const r = parseMentions(
+    notif([
+      nt('500', '2', 'Fan', { full_text: '@Me 好', in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' }),
+      nt('501', '2', 'Fan', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '170', conversation_id_str: '90' }),
+      nt('502', '3', 'Other', {}), // 普通提及
+    ]),
+    me,
+  );
+  assert.deepEqual(r.events.map((e) => [e.id, e.actor_handle, e.root_mine, e.text, e.actor_avatar]), [
+    ['500', 'Fan', true, '好', 'https://pbs.twimg.com/2.jpg'],
+    ['501', 'Fan', null, '', 'https://pbs.twimg.com/2.jpg'],
+  ]);
+  assert.deepEqual([r.entryIds.length, r.newestId, r.oldestId, r.bottomCursor], [3, '502', '500', 'B']);
+  assert.deepEqual(parseMentions(notif([], null), me).events, [], '空列表不算错');
+  assert.throws(() => parseMentions({ errors: [{ message: 'boom' }] }, me), /boom/);
+});
+
 test('解析：只有手填 handle、没有用户 ID 时靠 screen_name 匹配', () => {
   const b = body([tweet('300', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'ME', in_reply_to_status_id_str: '100', conversation_id_str: '100' })], ['300']);
   assert.equal(parseMentions(b, { handle: 'me', userId: null }).events.length, 1);
@@ -141,6 +190,7 @@ test('解析：只有手填 handle、没有用户 ID 时靠 screen_name 匹配',
 
 test('解析：结构不对就报错，不返回空结果', () => {
   assert.throws(() => parseMentions({ data: {} }, me), ParseError);
+  assert.throws(() => parseMentions({ foo: 1 }, me), ParseError);
   assert.throws(() => parseMentions(body([], ['999']), me), ParseError);
   assert.equal(parseMentions(body([], [], null), me).bottomCursor, null); // 空列表是合法的「到底了」
   // 实测到的空账号返回：globalObjects 是 {}，时间线里只有一个 Top 游标
@@ -200,12 +250,14 @@ test('解析我的回复：只留别人帖子下的，置顶、原创、转发�
     gt('10', '1', old),
   );
   const r = parseMyReplies(body, me);
-  assert.deepEqual(r.events.map((e) => [e.id, e.root_user_id, e.to_user_id, e.text]), [
-    ['900', '2', '2', '好文'],
-    ['901', '3', '4', 't901'],
-    ['902', null, '5', 't902'],
+  assert.deepEqual(r.events.map((e) => [e.id, e.root_user_id, e.to_user_id, e.text, !!e.own]), [
+    ['900', '2', '2', '好文', false],
+    ['901', '3', '4', 't901', false],
+    ['902', null, '5', 't902', false],
+    ['903', '1', '2', 't903', true], // 我自己帖子下的：留着认对话，标 own，不计数
   ]);
-  assert.deepEqual(r.events.map((e) => e.root_handle), ['u2', 'u3', null], '根帖主人的 @ID 只给导出用');
+  assert.equal(countsFromMe(r.events[3]), false);
+  assert.deepEqual(r.events.map((e) => e.root_handle), ['u2', 'u3', null, 'Me'], '根帖主人的 @ID 只给导出用');
   assert.deepEqual([r.newestId, r.oldestId, r.bottomCursor], ['905', '900', 'NEXT'], '范围只看每个条目里我发的最后一条');
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10, '置顶帖和被回复的旧帖不拉低时间范围');
 });

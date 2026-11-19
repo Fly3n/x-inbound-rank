@@ -34,10 +34,12 @@
     <!-- 榜单页 -->
     <section id="view-board">
       <div class="row toolbar">
-        <select id="window" title="统计范围">
+        <select id="window" title="榜单范围：榜单、我回 N、时间线标签都按它">
           <option value="7">最近 7 天</option>
           <option value="15">最近半个月</option>
           <option value="30">最近一个月</option>
+          <option value="60">最近 2 个月</option>
+          <option value="90">最近 3 个月</option>
         </select>
         <input id="search" type="search" placeholder="搜名字或 @ID">
         <details class="menu" id="exportMenu">
@@ -52,13 +54,17 @@
       <div class="tip" id="tip-board" hidden>
         <ul>
           <li id="boardHint"></li>
-          <li>排名：统计范围内，他直接评论我的帖子几次。</li>
-          <li>「我回 N」：同一范围内，我直接评论他的帖子几次。</li>
+          <li>排名：所选范围内，他在我的帖子下回复我几次，不分第几层。</li>
+          <li>「我回 N」：同一范围内，我直接评论他的帖子几次（只算第一层）。</li>
+          <li>范围可以比初始化读的长：数据是攒出来的，本机最多存 3 个月。</li>
           <li>点头像去他的主页；点这一行其他地方，展开他回复我的每一条。</li>
           <li>次数小块的颜色和时间线标签一致，在设置页改。</li>
           <li>导出榜单：当前榜上的人；导出全量数据：本机存的每一条回复。</li>
         </ul>
       </div>
+      <div class="banner err" id="keepWarn" hidden><span id="keepWarnText"></span> <button id="keepExport">导出全量数据</button></div>
+      <p class="hint" id="keepLine" hidden></p>
+      <p class="hint" id="shortLine" hidden></p>
       <p class="hint" id="jobLine" hidden></p>
       <p class="hint" id="outLine" hidden></p>
       <ol id="list"></ol>
@@ -70,23 +76,24 @@
         <h2>数据读取 <button class="q" data-tip="tip-data" title="读取方式说明">?</button></h2>
         <div class="tip" id="tip-data" hidden>
           <ul>
-            <li>「初始化」按统计范围往回读一遍，每次都从最新一条重新读，已有的不重复计数。</li>
-            <li>限速执行：别人回我每小时约 4000 条。范围越大越久，一个月可能要读好几个小时。</li>
+            <li>「初始化」按初始化范围往回读一遍，从最新一条读起；本机已有的不删、不重复计数。</li>
+            <li>本机数据已经覆盖所选范围时，按钮是灰的，不用再点。要读更早的，把范围调大。</li>
+            <li>限速执行，范围越大越久：别人回我每小时约 4000–9000 条；我回别人每小时约 1000 条。</li>
             <li>初始化之后靠「自动更新」只读新来的，每次随机隔 50–70 分钟。</li>
             <li>读取时要有一个 x.com 标签页开着，没有就顺延。</li>
-            <li>本机只保留最近 45 天的数据，更早的自动清理。</li>
+            <li>本机只保留最近 3 个月的数据，更早的自动清理。</li>
           </ul>
         </div>
 
         <div class="row field">
-          <span>统计范围</span>
-          <select id="range">
+          <span>初始化范围</span>
+          <select id="initRange">
             <option value="7">最近 7 天</option>
             <option value="15">最近半个月</option>
             <option value="30">最近一个月</option>
           </select>
         </div>
-        <p class="hint">榜单、标签和初始化往回读多远都按它。改大后要再点一次「初始化」补数据。</p>
+        <p class="hint">点「初始化」时往回读多远。榜单看多久在榜单页单独选。</p>
 
         <div class="src">
           <div class="row between">
@@ -99,9 +106,9 @@
           </div>
           <div class="tip" id="tip-in" hidden>
             <ul>
-              <li>只算别人<b>直接评论我的帖子</b>的那一条（第一级）。榜单排名和时间线标签用它。</li>
-              <li>来源：X「通知 → 提及」的列表。</li>
-              <li>不算：我帖子下的深层回复（他评论、我回他、他再回我的那条）、我去别人帖子下评论后对方回我的、引用、普通 @。</li>
+              <li>算：在<b>我的帖子下</b>回复我的每一条，不分第几层（他评论我、我回他、他再回我的也算）。榜单排名和时间线标签用它。</li>
+              <li>不算：他在别人帖子下（包括他自己的帖子）回我的、引用、普通 @。</li>
+              <li>来源：X「通知 → 提及」的列表。打开过一次 X 的通知页后，改用 X 网页版现在用的读法（更快、额度更大）。</li>
             </ul>
           </div>
           <p id="jobStatus" hidden></p>
@@ -115,9 +122,9 @@
           </div>
           <div class="tip" id="tip-out" hidden>
             <ul>
-              <li>只算我<b>直接评论别人帖子</b>的那一条（第一级），记到帖子主人头上。榜单里的「我回 N」用它。</li>
-              <li>来源：我自己主页「回复」栏的列表。</li>
-              <li>不算：在他帖子下回别的评论者、回他的评论、在我自己帖子下回别人的。</li>
+              <li>只算我<b>直接评论别人帖子</b>的那一条（第一层），记到帖子主人头上。榜单里的「我回 N」用它。</li>
+              <li>不算：在他帖子下回别的评论者、回他的评论（深层回复只有一半左右认得出是谁的帖子，不算）、在我自己帖子下回别人的。</li>
+              <li>来源：我自己主页「回复」栏的列表。X 给这个列表的额度小，读得慢。</li>
               <li>第一次读之前，插件会在后台开一个标签页到我主页的「回复」栏，看一眼 X 是怎么读这个列表的，几秒后自动关掉；X 改版后会自动再来一次。</li>
             </ul>
           </div>
@@ -125,6 +132,7 @@
         </div>
 
         <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新：约每小时把两份数据各读一次</label>
+        <p class="hint" id="storage"></p>
       </section>
 
       <section class="card">
@@ -147,7 +155,7 @@
         <h2>榜单口径 <button class="q" data-tip="tip-rules" title="口径说明">?</button></h2>
         <div class="tip" id="tip-rules" hidden>
           <ul>
-            <li>上榜只看两个条件：统计范围内至少回复几次、最多前几名。</li>
+            <li>上榜只看两个条件：榜单范围内至少回复几次、最多前几名。先看次数够不够，再取前几名。</li>
             <li>榜单和时间线标签共用。名次上限 10–500，次数 1–99，可直接输入数字。</li>
           </ul>
         </div>
@@ -167,7 +175,7 @@
         <h2>标签颜色 <button class="q" data-tip="tip-colors" title="颜色说明">?</button></h2>
         <div class="tip" id="tip-colors" hidden>
           <ul>
-            <li>按统计范围内的回复次数定颜色，从上往下先满足哪一档用哪个。</li>
+            <li>按榜单范围内的回复次数定颜色，从上往下先满足哪一档用哪个。</li>
             <li>最多 5 种颜色。都是实心底色，X 的深色、浅色主题下都看得清。</li>
           </ul>
         </div>

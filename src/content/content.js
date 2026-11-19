@@ -82,33 +82,23 @@
       return false;
     }
     if (msg?.type !== 'xir:fetch') return false;
-    (msg.kind === 'out' ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor) : XIRFetcher.fetchMentions(msg.cursor)).then(sendResponse);
+    (msg.kind === 'out' ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor) : XIRFetcher.fetchMentions(msg.cursor, msg.tpl)).then(sendResponse);
     return true;
   });
 
-  // ---------- 记下 X 自己读「回复」栏的请求地址 ----------
-  // 「我回他多少次」要读我自己的回复列表，那个接口的参数随 X 发版变化。这里不拦截也不改页面的请求，
-  // 只从浏览器的资源计时记录里看到地址（不含请求头和返回内容），交给后台存成模板。
-  let lastTpl = null;
+  // ---------- 记下 X 自己读「回复」栏、读通知的请求地址 ----------
+  // 这两个接口的参数随 X 发版变化。tap.js 看到 X 页面自己发的这两种请求，把地址报过来（不含请求头和返回内容），
+  // 这里交给后台存成模板，读的时候照着发。浏览器的资源计时记录在 x.com 上是空的（2026-11-19 实测），不能靠它。
+  const lastTpl = {};
   function noteTpl(url) {
-    if (!alive || url === lastTpl || XIRFetcher.isOwn(url)) return;
-    try {
-      const u = new URL(url);
-      if (u.origin !== location.origin || !XIRFetcher.REPLIES_RE.test(u.pathname + '?')) return;
-    } catch {
-      return;
-    }
-    lastTpl = url;
-    send({ type: 'xir:tpl', url });
+    if (!alive || XIRFetcher.isOwn(url)) return;
+    const kind = XIRFetcher.tplKind(url);
+    if (!kind || lastTpl[kind] === url) return;
+    lastTpl[kind] = url;
+    send({ type: 'xir:tpl', url, kind });
   }
-  // tap.js 也会把它看到的这个请求地址报过来
   XIRRel.onTpl = noteTpl;
-  if (XIRRel.tpl) noteTpl(XIRRel.tpl); // 这个脚本就绪之前页面已经发过的
-  try {
-    new PerformanceObserver((list) => list.getEntries().forEach((e) => noteTpl(e.name))).observe({ type: 'resource', buffered: true });
-  } catch {
-    // 浏览器不支持就拿不到模板，弹窗里会提示「我回他」暂时没数据
-  }
+  for (const url of XIRRel.tpls) noteTpl(url); // 这个脚本就绪之前页面已经发过的
 
   // ---------- 内联标签 ----------
 
@@ -240,7 +230,7 @@
     if (!u) return;
     tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
     tip.textContent =
-      `最近 ${windowDays} 天直接评论我的帖子第 ${u.rank} 名，共 ${u.count} 次\n` +
+      `最近 ${windowDays} 天在我帖子下回复我，第 ${u.rank} 名，共 ${u.count} 次\n` +
       (u.replied != null ? `我直接评论他的帖子 ${u.replied} 次\n` : '') +
       `最近一次：${fmtDate(u.last)}`;
     const r = e.currentTarget.getBoundingClientRect();

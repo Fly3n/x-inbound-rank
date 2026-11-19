@@ -91,7 +91,7 @@ globalThis.chrome = {
       return { id: 9 };
     },
     remove: async (id) => void server.closed.push(id),
-    query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : respond(msg.cursor)) },
+    query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : ((server.mentionTpl = msg.tpl), respond(msg.cursor))) },
 };
 
 await import('../src/background.js');
@@ -145,10 +145,14 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
   assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, color: 'gray', last: store['snap:me'].users.fan.last });
 
-  // 我回他多少次：回填完成后约一两分钟读我的回复列表。还没见过 X 自己的那条请求时读不了，只提示
-  assert.ok(alarms.out.when - Date.now() >= 59_000, '回填完成后约好读我的回复');
+  // 我回他多少次：第一次也要手动点「初始化」，到点的闹钟不会自己开始读
+  assert.ok(alarms.out.when - Date.now() >= 59_000, '回填完成后照常约好闹钟');
   await listeners.alarm({ name: 'out' });
-  assert.equal(store['cursor:me'].out.status, 'need_tpl');
+  assert.equal(store['cursor:me'].out, undefined, '没点过初始化，不自动读');
+  assert.deepEqual([server.outCalls, server.opened], [0, []]);
+  // 点了：还没见过 X 自己的那条请求时读不了，只提示
+  await send({ type: 'syncOutNow', account: 'me' });
+  await until(() => store['cursor:me'].out?.status === 'need_tpl' && !store['cursor:me'].out.running, '没有请求地址');
   assert.equal(server.outCalls, 0);
   assert.deepEqual(server.opened, ['https://x.com/Me/with_replies'], '没有请求地址时自己去开「回复」栏取');
   await listeners.alarm({ name: 'out' });
@@ -166,8 +170,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await listeners.alarm({ name: 'out' });
   assert.equal(server.outCalls, 3);
 
-  // 窗口切到半个月：榜单和标签快照立刻按新窗口重算，不发请求
-  assert.ok((await setWindow(60)).error, '只接受 7、15、30');
+  // 榜单范围切到半个月：榜单和标签快照立刻按新范围重算，不发请求
+  assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
+  assert.ok((await send({ type: 'setSettings', account: 'me', patch: { initDays: 60 } })).error, '初始化范围只接受 7、15、30');
   await setWindow(15);
   assert.equal(server.calls, 3);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 5]]);
@@ -187,12 +192,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await set({ topN: 100, tiers: [{ min: 20, color: 'red' }, { min: 10, color: 'orange' }, { min: 5, color: 'blue' }], baseColor: 'gray' });
   assert.equal(server.calls, 3, '改设置不发请求');
 
-  // 窗口变大后，我的回复要重新读到半个月前（3 页，读到 20 天前那条为止）
+  // 改了初始化范围也不会自己去读：闹钟到点只读新来的（1 页）。榜单按半个月算，本机已有的 9 天前那条也算上
+  await set({ initDays: 15 });
   let outBefore = server.outCalls;
   await listeners.alarm({ name: 'out' });
-  assert.equal(server.outCalls - outBefore, 3);
-  assert.equal((await boardRows())[0].replied, 4);
-  assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
+  assert.equal(server.outCalls - outBefore, 1);
+  assert.equal((await boardRows())[0].replied, 3);
+  assert.equal(store['cursor:me'].out.lastFullDays, 7, '还是上次初始化的范围');
   // 手动点「初始化」：不管上次读到哪，按范围重新读一遍
   outBefore = server.outCalls;
   await send({ type: 'syncOutNow', account: 'me' });
@@ -215,6 +221,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   server.tplOnOpen = 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D';
   await listeners.alarm({ name: 'out' });
   assert.deepEqual([store['cursor:me'].out.status, server.closed, server.outUrls.at(-1).includes('QID2'), alarms.out], ['ok', [9], true, undefined]);
+
+  assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
 
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
   await send({ type: 'startBackfill', account: 'me' });
@@ -245,6 +253,26 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   before = server.calls;
   await listeners.alarm({ name: 'inc' });
   assert.equal(server.calls - before, 1);
+
+  // 打开过 X 的通知页：记下它读通知的请求，下一轮起用新接口读提及；新接口参数过期（404）就删掉、改回旧接口
+  assert.equal(server.mentionTpl, undefined, '没记下之前用旧接口');
+  const NT = 'https://x.com/i/api/graphql/NQ/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22All%22%7D';
+  await send({ type: 'xir:tpl', url: NT, kind: 'mentions' });
+  assert.equal(store['tpl:replies'].url.includes('QID2'), true, '两种模板分开存');
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  await listeners.alarm({ name: 'inc' });
+  assert.equal(server.mentionTpl, NT);
+  assert.equal((await send({ type: 'getAccountState', account: 'me' })).mentionsApi, 'gql');
+  const realSend2 = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async (_id, msg) => (msg.tpl ? { ok: false, status: 404, userId: '1' } : realSend2(_id, msg));
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  await listeners.alarm({ name: 'inc' });
+  chrome.tabs.sendMessage = realSend2;
+  assert.equal(store['tpl:mentions'], undefined, '过期的模板删掉');
+  assert.ok(store['cursor:me'].nextIncAt - Date.now() < 3 * 60_000, '一两分钟后用旧接口重读');
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  await listeners.alarm({ name: 'inc' });
+  assert.equal(server.mentionTpl, undefined);
 
   // 两个触发几乎同时到（比如浏览器重启时两个 x.com 标签页同时上线）：只跑一轮
   store['cursor:me'].nextIncAt = 0;
@@ -309,13 +337,14 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store['cursor:me'], undefined);
   assert.equal(store['settings:me'].fetchEnabled, false);
 
-  // 过期清理：只留最近 45 天，一天最多清一次
+  // 过期清理：只留最近 90 天，一天最多清一次；清掉过数据就记下（弹窗据此不再挂红字提示）
   const { putEvents } = await import('../src/db.js');
   const old = (id, daysAgo) => ({ id, actor_id: '2', actor_handle: 'Fan', actor_name: 'Fan', actor_avatar: '', created_at: Date.now() - daysAgo * DAY, conversation_id: '1', root_mine: true });
-  await putEvents('me', [old('1', 1), old('2', 44), old('3', 46), old('4', 90)]);
+  await putEvents('me', [old('1', 1), old('2', 46), old('3', 85), old('4', 95)]);
   await listeners.alarm({ name: 'tick' });
-  assert.equal(await count(), 2);
-  await putEvents('me', [old('5', 50)]);
+  assert.equal(await count(), 3);
+  assert.ok(store['cursor:me'].prunedAt);
+  await putEvents('me', [old('5', 100)]);
   await listeners.alarm({ name: 'tick' });
-  assert.equal(await count(), 3, '24 小时内不重复清');
+  assert.equal(await count(), 4, '24 小时内不重复清');
 });

@@ -2,11 +2,12 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
-import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, OUT_SCHEMA } from './rank.js';
+import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
 
-// 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
-// 每小时约 220 页 ≈ 4400 条提及。X 的行为风控不公开，要再调快先小步试。
+// 请求节奏。提及：旧接口额度实测 180 次 / 15 分钟、每页 20 条，新接口 1500 次 / 15 分钟、每页 40 条（2026-11-19）。
+// 下面的回填节奏约 55 次 / 15 分钟（旧接口额度的三成，负责人用了一周没被限流），每小时约 220 页。
+// 新接口额度大得多，暂不提速，每页条数翻倍已经快一倍。X 的行为风控不公开，要再调快先小步试。
 const PACE = {
   pageGapMs: [8_000, 15_000], // 回填：两页之间的随机间隔
   batchPages: 20, // 回填：每批页数
@@ -30,8 +31,7 @@ const PACE = {
   tplRetryMs: 6 * 60 * 60_000, // 我的回复：自动读的时候没取到，隔这么久才再开一次标签页；手动点「初始化」不受限
 };
 
-// 本地只留最近这么多天的回复：最长的统计范围是 30 天，更早的用不上，不删的话库会一直涨、每次算榜都要全读一遍
-const KEEP_DAYS = 45;
+// 本地数据保存多久见 rank.js 的 KEEP_DAYS（90 天，和最长的榜单范围一致）
 
 const TICK_ALARM = 'tick';
 const JOB_ALARM = 'job';
@@ -123,14 +123,27 @@ async function pingPages() {
   return { versions: [...new Set(seen.map((r) => r.version).filter(Boolean))], ops: [...new Set(seen.flatMap((r) => r.ops || []))] };
 }
 
-/** 抓一页并入库。返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'error',message} */
-async function pull(account, cursor) {
+/** 读提及用哪个接口：记下过 X 页面读通知的请求（模板）就用新接口 'gql'，否则用旧接口 'rest'。两种接口的翻页游标不通用。 */
+const mentionsApi = async () => ((await kvGet(keys.tplMentions)) ? 'gql' : 'rest');
+
+/**
+ * 抓一页提及并入库。api：'gql' | 'rest'，同一次翻页（一个回填任务、一轮补读）从头到尾用同一个。
+ * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'error',message}
+ * tpl_bad：新接口的模板没了或过期了（已删掉），调用方改用旧接口从最新一页重来。
+ */
+async function pull(account, cursor, api = 'rest') {
   if (!(await getSettings(account)).fetchEnabled) return { kind: 'error', message: '后台抓取已关闭' };
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return { kind: 'error', message: '账号未绑定' };
 
-  const r = await fetchViaTab({ cursor });
+  const tpl = api === 'gql' ? await kvGet(keys.tplMentions) : null;
+  if (api === 'gql' && !tpl) return { kind: 'tpl_bad' };
+  const r = await fetchViaTab({ cursor, tpl: tpl?.url });
   if (r.error === 'no_tab') return { kind: 'no_tab' };
+  if (tpl && (r.error === 'bad_tpl' || r.status === 400 || r.status === 404)) {
+    await kvRemove(keys.tplMentions); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口
+    return { kind: 'tpl_bad' };
+  }
   if (r.userId && me.userId && r.userId !== me.userId) {
     return { kind: 'error', message: `当前登录的 X 账号不是 @${me.handle}，已停止，避免数据串号` };
   }
@@ -176,8 +189,8 @@ async function refreshSnapshot(account) {
   const rules = await getSettings(account);
   // 「我回别人」读完过一次之后，标签里才带「我回他几次」
   const o = (await kvGet(keys.cursor(account), {})).out;
-  const out = o?.lastAt && (o.schema || 1) >= OUT_SCHEMA ? await getEvents(account, OUT) : null; // 旧版本存的数据口径不全，宁可先不显示
-  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), out) };
+  const outReady = !!o?.lastAt && (o.schema || 1) >= OUT_SCHEMA; // 旧版本存的数据口径不全，宁可先不显示
+  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outReady) };
   // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
   const prev = await kvGet(keys.snap(account));
   if (prev && JSON.stringify({ windowDays: prev.windowDays, show: prev.show, users: prev.users }) === JSON.stringify(snap)) return;
@@ -220,9 +233,10 @@ async function scheduleJob(job, delayMs) {
 async function startBackfill(account) {
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return { error: '自动更新已关闭，先在设置里打开' };
-  const rangeDays = settings.windowDays; // 回填范围就是统计窗口
+  const rangeDays = settings.initDays; // 往回读多远看初始化范围，和榜单范围分开
   const job = {
     status: 'running',
+    api: await mentionsApi(), // 这次翻页用哪个接口，中途不换（游标不通用）
     rangeDays,
     targetTs: now() - rangeDays * DAY_MS,
     cursor: null,
@@ -281,12 +295,22 @@ async function stepBackfill() {
     account = cur.account;
     const job = cur.job;
 
-    const res = await pull(account, job.cursor);
+    const res = await pull(account, job.cursor, job.api || 'rest');
     // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
     const latest = await kvGet(keys.job(account));
     if (!latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
 
-    if (res.kind === 'no_tab') {
+    if (res.kind === 'tpl_bad') {
+      // 新接口的模板失效：换旧接口从最新一页重来，已入库的靠主键去重
+      job.api = 'rest';
+      job.cursor = null;
+      job.topId = null;
+      job.restarted = (job.restarted || 0) + 1;
+      if (job.restarted > 3) {
+        job.status = 'error';
+        job.message = '读取方式反复失效，已停止';
+      } else await scheduleJob(job, rand(PACE.pageGapMs));
+    } else if (res.kind === 'no_tab') {
       job.status = 'waiting_tab';
       job.message = '没有可用的 X 标签页。打开或刷新一个 x.com 页面后自动继续';
     } else if (res.kind === 'rate') {
@@ -302,7 +326,7 @@ async function stepBackfill() {
       await setAlert(account, res.message);
     } else {
       const p = res.parsed;
-      if (job.pages === 0) job.topId = p.newestId; // 本次回填的起点，完成后作为增量的接续点
+      if (!job.topId) job.topId = p.newestId; // 本次回填的起点，完成后作为增量的接续点
       job.pages++;
       job.batchPages++;
       job.added += res.added;
@@ -411,15 +435,16 @@ async function maybeIncremental() {
     const due = await incDue(); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
     if (!due) return;
     account = due.account;
-    const { cur, settings } = due;
+    const { cur } = due;
 
     // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少，不丢。
-    // 一轮最多 40 页（约 800 条），平时一小时的量远到不了。读满还没接上（比如电脑关了一整天），
-    // 记下位置，一两分钟后按回填的慢节奏接着读，直到接上、或者读到统计范围的起点（更早的用不上）。
+    // 一轮最多 40 页，平时一小时的量远到不了。读满还没接上（比如电脑关了一整天），
+    // 记下位置，一两分钟后按回填的慢节奏接着读，直到接上、或者读到保存期限（90 天前，更早的反正要清掉）。
     // 接上之前接续点不动；出错中断时下次重读这一段，靠主键去重。
     const stopAt = cur.syncedId;
     const resume = cur.incResume?.stopAt === stopAt ? cur.incResume : null;
-    const floorTs = now() - settings.windowDays * DAY_MS;
+    const floorTs = now() - KEEP_DAYS * DAY_MS;
+    const api = resume?.api || (await mentionsApi()); // 接着上一轮读的，游标是哪个接口的就用哪个
     const gap = resume ? PACE.pageGapMs : PACE.incPageGapMs;
     const maxPages = resume ? PACE.slowPages : PACE.incMaxPages;
     let cursor = resume?.cursor || null;
@@ -427,8 +452,18 @@ async function maybeIncremental() {
     let caughtUp = false;
     for (let page = 0; page < maxPages; page++) {
       if (page) await sleep(rand(gap));
-      const res = await pull(account, cursor);
+      const res = await pull(account, cursor, api);
       if (res.kind === 'no_tab') return; // 没有 X 标签页，等下次有页面上线再试，不记失败
+      if (res.kind === 'tpl_bad') {
+        // 新接口的模板失效：一两分钟后用旧接口从最新一页重读这一段
+        const when = now() + rand(PACE.restMs);
+        await updateCursor(account, (c) => {
+          delete c.incResume;
+          c.nextIncAt = when;
+        });
+        await chrome.alarms.create(INC_ALARM, { when });
+        return;
+      }
       await updateCursor(account, (c) => {
         c.lastAttemptAt = now();
       });
@@ -453,7 +488,7 @@ async function maybeIncremental() {
       const when = now() + rand(PACE.restMs);
       await updateCursor(account, (c) => {
         if (!c.syncedId) return; // 读的过程中被清空了
-        c.incResume = { cursor, topId, stopAt };
+        c.incResume = { cursor, topId, stopAt, api };
         c.nextIncAt = when;
       });
       await chrome.alarms.create(INC_ALARM, { when });
@@ -475,7 +510,7 @@ async function maybeIncremental() {
 // ---------- 我在别人帖子下的回复 ----------
 // 数据来自我自己主页「回复」栏的列表（里面混着原创帖和转发，解析时只留回复）。
 // 状态放在 cursor.out：{ status: 'ok'|'need_tpl'|'error', message, syncedId, coverTs, lastAt, pages }
-//   running：{ at, pages } 正在读、已读几页（读完清掉）；syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的统计范围（天），比当前范围小就要重新完整读；
+//   running：{ at, pages } 正在读、已读几页（读完清掉）；syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的初始化范围（天），手动点「初始化」时清成 0 表示要完整读；
 //   resume：完整读被页数上限截断时的续读位置；lastAt：最近一次读完的时间；lastFullAt / lastFullDays：最近一次完整读（初始化）完成的时间和范围。
 
 const NEED_TPL = '请在 X 上打开你自己主页的「回复」栏一次';
@@ -510,7 +545,7 @@ const saveOut = (account, patch) =>
     cur.out = { ...cur.out, ...patch };
   });
 
-/** force：手动点「初始化」，不管上次读到哪，按统计范围重新读一遍。 */
+/** force：手动点「初始化」，不管上次读到哪，按初始化范围重新读一遍。不是手动点的，没初始化过就不读。 */
 async function syncOut(force = false) {
   const account = await kvGet(keys.current);
   if (!account) return;
@@ -530,10 +565,12 @@ async function syncOut(force = false) {
     if (force) await saveOut(account, { fullFor: 0, resume: null });
     const cur = await kvGet(keys.cursor(account), {});
 
-    const targetTs = now() - settings.windowDays * DAY_MS;
+    const targetTs = now() - settings.initDays * DAY_MS;
     const prev = cur.out || {};
-    // 完整读：第一次、统计范围调大了、手动初始化、或本机数据是旧版本存的——读到范围起点。否则只读到上次的位置。
-    const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays || (prev.schema || 1) < OUT_SCHEMA;
+    // 第一次必须手动点「初始化」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
+    if (!force && !prev.syncedId && prev.fullFor !== 0) return;
+    // 完整读：手动初始化（fullFor 被清成 0）、或本机数据是旧版本存的——读到初始化范围的起点。否则只读到上次的位置。
+    const full = !prev.syncedId || prev.fullFor === 0 || (prev.schema || 1) < OUT_SCHEMA;
     // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
     const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
     const stopAt = full ? null : resume?.stopAt || prev.syncedId;
@@ -595,7 +632,7 @@ async function syncOut(force = false) {
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
     const done = { status: 'ok', message: null, pages, syncedId, resume: null, lastAt: now() };
     if (!full) return saveOut(account, done);
-    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.windowDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: settings.windowDays });
+    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.initDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: settings.initDays });
   } catch (e) {
     // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
     await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
@@ -613,10 +650,10 @@ async function syncOut(force = false) {
 async function maybePrune(account) {
   const cur = await kvGet(keys.cursor(account), {});
   if (now() - (cur.lastPruneAt || 0) < DAY_MS) return; // 一天最多清一次
-  await pruneEvents(account, now() - KEEP_DAYS * DAY_MS);
-  await pruneEvents(account, now() - KEEP_DAYS * DAY_MS, OUT);
+  const removed = (await pruneEvents(account, now() - KEEP_DAYS * DAY_MS)) + (await pruneEvents(account, now() - KEEP_DAYS * DAY_MS, OUT));
   await updateCursor(account, (c) => {
     c.lastPruneAt = now();
+    if (removed) c.prunedAt = now(); // 清掉过到期的数据：之后弹窗不再挂红字提示，改成一行小字
   });
 }
 
@@ -669,8 +706,12 @@ const handlers = {
     }
     return { account };
   },
-  async 'xir:tpl'({ url }) {
+  async 'xir:tpl'({ url, kind }) {
     if (typeof url !== 'string' || url.length > 30000) return {};
+    if (kind === 'mentions') {
+      await kvSet(keys.tplMentions, { url, at: now() }); // 下一次翻页起改用新接口（正在翻的那次不换，游标不通用）
+      return {};
+    }
     await kvSet(keys.tpl, { url, at: now() });
     // 之前因为没有模板没读成的，现在马上补读
     const account = await kvGet(keys.current);
@@ -700,7 +741,7 @@ const handlers = {
   async getAccountState({ account }) {
     // 本机两份数据各有多少条、从哪天到哪天
     const span = (rows) => rows.reduce((d, e) => ({ count: d.count + 1, from: Math.min(d.from ?? e.created_at, e.created_at), to: Math.max(d.to ?? e.created_at, e.created_at) }), { count: 0, from: null, to: null });
-    const db = { in: span(await getEvents(account)), out: span(await getEvents(account, OUT)) };
+    const db = { in: span(await getEvents(account)), out: span((await getEvents(account, OUT)).filter((o) => !o.own)) }; // own：我在自己帖子下的回复，只用来认对话，不算这份数据
     return {
       settings: await getSettings(account),
       cursor: await kvGet(keys.cursor(account), {}),
@@ -708,13 +749,14 @@ const handlers = {
       alert: await kvGet(keys.alert(account)),
       db,
       tplAt: (await kvGet(keys.tpl))?.at || null, // 什么时候看到过 X 读「回复」列表的请求；没看到过就读不了「我回别人」
+      mentionsApi: await mentionsApi(), // 别人回我现在用哪个接口：'gql' 新 / 'rest' 旧
     };
   },
   async getBoard({ account }) {
     return board(account); // { rows, people, replies }
   },
   exportAll: async ({ account }) => ({ inbound: await getEvents(account), out: await getEvents(account, OUT) }),
-  getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account)),
+  getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account), now(), 50, await getEvents(account, OUT)),
   startBackfill: ({ account }) => startBackfill(account),
   async syncOutNow({ account }) {
     if (account !== (await kvGet(keys.current))) return { error: '只能读当前登录 X 的账号' };
@@ -728,7 +770,8 @@ const handlers = {
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
-    if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '统计范围只能是 7 天、15 天或 30 天' };
+    if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '榜单范围只能是 7 天、15 天、30 天、2 个月或 3 个月' };
+    if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '初始化范围只能是 7 天、15 天或 30 天' };
     const merged = { ...(await getSettings(account)), ...patch };
     const next = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) }; // 其余越界的值夹回范围
     await kvSet(keys.settings(account), next);

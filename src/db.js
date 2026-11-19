@@ -146,6 +146,7 @@ export const keys = {
   settings: (a) => `settings:${a}`,
   cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt, out }
   tpl: 'tpl:replies', // { url, at }：X 页面自己读「回复」栏时的请求地址，读我的回复列表时照着它发
+  tplMentions: 'tpl:mentions', // { url, at }：X 页面自己读通知时的请求地址，有它就用新接口读提及
   tplTry: 'tplTry', // 最近一次自己去取上面这个地址的时间（自动读的时候隔一阵才再试）
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
@@ -155,6 +156,7 @@ export const keys = {
 
 /** 读出来的设置总是合法的：缺的补默认，越界的夹回范围。 */
 export async function getSettings(a) {
-  const raw = { ...DEFAULT_SETTINGS, ...(await kvGet(keys.settings(a), {})) };
+  // initDays 不从默认值补：0.11.0 之前存的设置没有它，cleanRules 会沿用当时的统计范围
+  const raw = { ...DEFAULT_SETTINGS, initDays: undefined, ...(await kvGet(keys.settings(a), {})) };
   return { fetchEnabled: raw.fetchEnabled !== false, ...cleanRules(raw) };
 }

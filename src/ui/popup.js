@@ -1,5 +1,5 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
-import { COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, colorOf, countsToMe, countsFromMe } from '../rank.js';
+import { COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, KEEP_DAYS, WARN_DAYS, DAY_MS, colorOf, underMyPosts, countsFromMe } from '../rank.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
@@ -10,7 +10,7 @@ const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cy
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const windowLabel = (days) => ({ 15: '半个月', 30: '一个月' })[days] || ` ${days} 天`;
+const windowLabel = (days) => ({ 15: '半个月', 30: '一个月', 60: ' 2 个月', 90: ' 3 个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
   const { dataset, ...rest } = props;
@@ -56,7 +56,7 @@ function detailRow() {
   if (!d) return el('li', { className: 'detail hint', textContent: '读取中…' });
   const more = d.total > d.items.length ? `，这里显示最近 ${d.items.length} 条` : '';
   return el('li', { className: 'detail' }, [
-    el('div', { className: 'hint', textContent: `统计范围内直接评论我的帖子 ${d.total} 次${more}：` }),
+    el('div', { className: 'hint', textContent: `榜单范围内在我的帖子下回复我 ${d.total} 次${more}：` }),
     ...d.items.map((it) =>
       el('a', { className: 'reply', href: `https://x.com/i/status/${it.id}`, target: '_blank', rel: 'noreferrer' }, [
         el('span', { className: 'time', textContent: fmtTime(it.created_at) }),
@@ -91,7 +91,7 @@ function renderList() {
             ...(view.outReady
               ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，我直接评论他的帖子几次', textContent: `我回 ${r.replied}` })]
               : []),
-            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '统计范围内他直接评论我的帖子几次，颜色和时间线标签一致', textContent: `${r.count} 次` }),
+            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '榜单范围内他在我的帖子下回复我几次，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
           ...(view.open === r.actor_id ? [detailRow()] : []),
         ])
@@ -207,6 +207,28 @@ async function draw() {
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
   Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA });
+  // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
+  // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
+  const initStart = Date.now() - rules.initDays * DAY_MS;
+  const lbIn = s.cursor.lastBackfill;
+  const inFrom = lbIn ? lbIn.finishedAt - lbIn.rangeDays * DAY_MS : null;
+  const inCovered = !!lbIn && !!s.cursor.syncedId && (lbIn.reachedEnd || inFrom <= initStart);
+  const outFrom = out?.lastFullAt && out.lastFullDays ? out.lastFullAt - out.lastFullDays * DAY_MS : null;
+  const outCovered = !!outFrom && !!out.syncedId && out.fullFor !== 0 && (out.schema || 1) >= OUT_SCHEMA && outFrom <= initStart;
+
+  // 保存期限：最早的数据存满 80 天时挂红字提示先导出；第一次清理之后数据每天滚动清，改成一行小字
+  const oldest = Math.min(s.db.in.from ?? Infinity, s.db.out.from ?? Infinity);
+  const age = Number.isFinite(oldest) ? (Date.now() - oldest) / DAY_MS : 0;
+  const warn = !s.cursor.prunedAt && age >= WARN_DAYS;
+  $('keepWarn').hidden = !warn;
+  if (warn) $('keepWarnText').textContent = `本机最早的数据是 ${fmtDay(oldest)} 的，约 ${Math.max(0, Math.ceil(KEEP_DAYS - age))} 天后开始自动清理（只保留最近 3 个月）。需要留底的话先导出。`;
+  $('keepLine').hidden = !s.cursor.prunedAt;
+  $('keepLine').textContent = '本机只保留最近 3 个月的数据，更早的已自动清理。';
+  // 榜单范围比本机数据长：照常算，说清楚最早只有哪天
+  const inOldest = s.db.in.from;
+  $('shortLine').hidden = !(inOldest && inOldest > Date.now() - rules.windowDays * DAY_MS + DAY_MS);
+  if (inOldest) $('shortLine').textContent = `本机最早只有 ${fmtDay(inOldest)} 的数据，榜单按已有的算。`;
+
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
   const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
   // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
@@ -221,17 +243,19 @@ async function draw() {
     (out?.resume ? '还在继续往回读…' : '') +
     (out?.lastAt && (out.schema || 1) < OUT_SCHEMA && !out.resume ? '「我回」的统计口径改了，要重新读一遍才显示，后台会自动开始。' : '') +
     (outBad ? `${outBad}。${out.status === 'need_tpl' && g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}` : '') +
-    (!out ? '「别人回我」初始化完成后一两分钟会自动开始，也可以直接点「初始化」。' : '') +
-    (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
+    (!out?.syncedId && !running && out?.fullFor !== 0 ? '还没初始化，点「初始化」开始。' : '') +
+    (out?.fullFor === 0 && !running && !out?.syncedId ? '已排上，一两分钟后开始读。' : '') +
+    (outCovered && !running ? `已有${fmtDay(outFrom)}以来的完整数据，包含最近${windowLabel(rules.initDays)}，不用再初始化。` : '');
   $('outLine').hidden = !(outBad && s.db.in.count);
   $('outLine').textContent = outBad ? `「我回」${outBad}` : '';
-  $('outSync').disabled = !isSession || !rules.fetchEnabled || !!running;
+  $('outSync').disabled = !isSession || !rules.fetchEnabled || !!running || outCovered;
   $('outSync').textContent = running ? '读取中…' : '初始化';
-  $('window').value = $('range').value = String(rules.windowDays);
+  $('window').value = String(rules.windowDays);
+  $('initRange').value = String(rules.initDays);
   $('exportBoard').disabled = !rows.length;
   $('exportAll').disabled = !s.db.in.count && !s.db.out.count;
   $('boardHint').textContent =
-    `最近${label}共 ${people} 人直接评论了我的帖子 ${replies} 次；上榜 ${rows.length} 人` +
+    `最近${label}共 ${people} 人在我的帖子下回复我 ${replies} 次；上榜 ${rows.length} 人` +
     `（回复 ${rules.minCount} 次及以上，最多前 ${rules.topN} 名）。`;
   const job = s.job;
   const unfinished = job && job.status !== 'done';
@@ -247,15 +271,20 @@ async function draw() {
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
   $('start').textContent = active ? '重新初始化' : '初始化';
-  $('start').disabled = !isSession || !rules.fetchEnabled;
+  $('start').disabled = !isSession || !rules.fetchEnabled || (inCovered && !active);
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const lb = s.cursor.lastBackfill;
-  const short = s.cursor.earliestTs > Date.now() - rules.windowDays * 86400000;
   $('coverage').textContent =
     span(s.db.in) +
     (lb ? `上次初始化完成：${fmtTime(lb.finishedAt)}（最近${windowLabel(lb.rangeDays)}）。` : '') +
     (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
-    (s.cursor.earliestTs && short ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
+    (inCovered && !active ? `已有${lb.reachedEnd ? '提及列表里能翻到的全部' : `${fmtDay(inFrom)}以来的完整`}数据，包含最近${windowLabel(rules.initDays)}，不用再初始化。` : '') +
+    (s.mentionsApi === 'gql' ? '' : '现在用旧的读法；打开一次 X 的通知页，之后会自动换成新的读法（快一倍）。');
+  // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
+  navigator.storage?.estimate?.().then(
+    (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
+    () => {},
+  );
   $('fetchEnabled').checked = rules.fetchEnabled;
   for (const k of SHOW) $(k).checked = rules[k];
 
@@ -279,7 +308,8 @@ $('tabs').addEventListener('click', (e) => {
   view.tab = tab;
   render();
 });
-for (const id of ['window', 'range']) $(id).addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
+$('window').addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
+$('initRange').addEventListener('change', (e) => saveRules({ initDays: Number(e.target.value) }));
 
 // 小问号：点了展开或收起它对应的说明
 document.addEventListener('click', (e) => {
@@ -357,13 +387,15 @@ $('exportBoard').addEventListener('click', () =>
 
 // 导出全量数据：本机存的每一条回复，一条一行，两份数据放在同一张表里用「类型」区分
 $('exportAll').addEventListener('click', async () => {
-  const { inbound, out } = await call('exportAll', { account: view.account });
+  const { inbound, out: outAll } = await call('exportAll', { account: view.account });
+  const counted = new Set(underMyPosts(inbound, outAll).map((e) => e.id)); // 计入回复榜的（在我帖子下回我的）
+  const out = outAll.filter((o) => !o.own); // 我在自己帖子下的回复只用来认对话，不导出
   const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
   const link = (id) => `https://x.com/i/status/${id}`;
   const rows = [
     ...inbound.map((e) => ({
       ts: e.created_at,
-      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, countsToMe(e) ? '是' : '否', e.text || '', link(e.id)],
+      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, counted.has(e.id) ? '是' : '否', e.text || '', link(e.id)],
     })),
     ...out.map((e) => {
       const h = e.root_handle || handleOf.get(e.root_user_id);
@@ -376,9 +408,10 @@ $('exportAll').addEventListener('click', async () => {
 $('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
 $('start').addEventListener('click', () => {
   const again = $('start').textContent === '重新初始化' ? '当前任务会被丢弃并从头开始。' : '';
-  if (confirm(`将用你的 X 登录会话，限速读取最近${windowLabel(view.rules.windowDays)}别人对你的回复。${again}确定开始？`)) act('startBackfill');
+  if (confirm(`将用你的 X 登录会话，限速读取最近${windowLabel(view.rules.initDays)}别人对你的回复。${again}确定开始？`)) act('startBackfill');
 });
 $('outSync').addEventListener('click', () => act('syncOutNow'));
+$('keepExport').addEventListener('click', () => $('exportAll').click());
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 const SHOW = ['showRank', 'showOut', 'showRel', 'showPlace']; // 时间线上几种标签的开关
@@ -398,7 +431,7 @@ $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
 // 任务状态、快照变化时自动刷新。读取过程中一页要写好几次存储，攒 200 毫秒再画；
 // 只看和界面有关的键（tplTry 这类后台自用的不管）
-const WATCH = /^(accounts|current|pendingUserId|domWarning|tpl:replies|(settings|cursor|job|snap|alert):)/;
+const WATCH = /^(accounts|current|pendingUserId|domWarning|tpl:(replies|mentions)|(settings|cursor|job|snap|alert):)/;
 let redrawTimer = null;
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !Object.keys(changes).some((k) => WATCH.test(k))) return;
