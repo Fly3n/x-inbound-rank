@@ -2,7 +2,7 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
-import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS } from './rank.js';
+import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, OUT_SCHEMA } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
 
 // 请求节奏。接口硬额度实测为 180 次 / 15 分钟；下面的回填节奏约 55 次 / 15 分钟（额度的三成），
@@ -16,11 +16,13 @@ const PACE = {
   backoffMaxMs: 4 * 60 * 60_000,
   incPageGapMs: [3_000, 6_000], // 增量：页与页之间的间隔
   incIntervalMs: [50 * 60_000, 70 * 60_000], // 增量：大约每小时一次，每轮结束后在这个范围里随机定下一次，不卡整点
-  incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）；到了就停，不提示
-  incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔
+  incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）
+  incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
+  restMs: [60_000, 120_000], // 一次读不完、分几轮读时，轮与轮之间的休息
+  slowPages: 20, // 一次要读很多页时（「我回别人」初始化、增量读满 40 页后的补读）：按回填的页间隔，一个闹钟事件最多读这么多页（约 4 分钟）
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
-  outMaxPages: 40, // 我的回复：单次（一个闹钟事件里）最多页数
-  outMaxRounds: 10, // 我的回复：一次完整读最多接着读几轮（共约 8000 条帖子），再多就到此为止
+  outMaxPages: 40, // 我的回复：平时增量单次最多页数（和别人回我的增量一样）
+  outMaxRounds: 30, // 我的回复：一次读不完时最多接着读几轮（30 × 20 页 = 600 页，和回填单次上限一样），再多就到此为止
   tplWaitMs: 25_000, // 我的回复：自己开标签页取请求地址时，最多等这么久
   tplRetryMs: 6 * 60 * 60_000, // 我的回复：自动读的时候没取到，隔这么久才再开一次标签页；手动点「初始化」不受限
 };
@@ -170,7 +172,8 @@ async function refreshSnapshot(account) {
   snapAt.set(account, now());
   const rules = await getSettings(account);
   // 「我回别人」读完过一次之后，标签里才带「我回他几次」
-  const out = (await kvGet(keys.cursor(account), {})).out?.lastAt ? await getEvents(account, OUT) : null;
+  const o = (await kvGet(keys.cursor(account), {})).out;
+  const out = o?.lastAt && (o.schema || 1) >= OUT_SCHEMA ? await getEvents(account, OUT) : null; // 旧版本存的数据口径不全，宁可先不显示
   const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), out) };
   // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
   const prev = await kvGet(keys.snap(account));
@@ -378,11 +381,12 @@ async function wakeJob(tabOnline) {
 
 // ---------- 增量 ----------
 
-/** 增量现在该不该跑：该跑返回 { account, cur }，不该返回 null。 */
+/** 增量现在该不该跑：该跑返回 { account, cur, settings }，不该返回 null。 */
 async function incDue() {
   const account = await kvGet(keys.current);
   if (!account) return null;
-  if (!(await getSettings(account)).fetchEnabled) return null;
+  const settings = await getSettings(account);
+  if (!settings.fetchEnabled) return null;
   const cur = await kvGet(keys.cursor(account), {});
   if (!cur.syncedId) return null; // 还没完成过初始化，不自动抓
   const job = await kvGet(keys.job(account));
@@ -390,8 +394,8 @@ async function incDue() {
   if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
   const t = now();
   if (t < (cur.nextIncAt || 0)) return null;
-  if (t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
-  return { account, cur };
+  if (!cur.incResume && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
+  return { account, cur, settings };
 }
 
 async function maybeIncremental() {
@@ -404,16 +408,22 @@ async function maybeIncremental() {
     const due = await incDue(); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
     if (!due) return;
     account = due.account;
-    const cur = due.cur;
+    const { cur, settings } = due;
 
-    // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少页。
-    // 出错中断时接续点不动，下次重读这一段，靠主键去重。
-    // 读满上限还没接上（一小时超过约 800 条）就到此为止：接续点照样前移，没读到的那段放弃，不提示（负责人定，不需要那么严格）。
+    // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少，不丢。
+    // 一轮最多 40 页（约 800 条），平时一小时的量远到不了。读满还没接上（比如电脑关了一整天），
+    // 记下位置，一两分钟后按回填的慢节奏接着读，直到接上、或者读到统计范围的起点（更早的用不上）。
+    // 接上之前接续点不动；出错中断时下次重读这一段，靠主键去重。
     const stopAt = cur.syncedId;
-    let cursor = null;
-    let topId = null;
-    for (let page = 0; page < PACE.incMaxPages; page++) {
-      if (page) await sleep(rand(PACE.incPageGapMs));
+    const resume = cur.incResume?.stopAt === stopAt ? cur.incResume : null;
+    const floorTs = now() - settings.windowDays * DAY_MS;
+    const gap = resume ? PACE.pageGapMs : PACE.incPageGapMs;
+    const maxPages = resume ? PACE.slowPages : PACE.incMaxPages;
+    let cursor = resume?.cursor || null;
+    let topId = resume?.topId || null;
+    let caughtUp = false;
+    for (let page = 0; page < maxPages; page++) {
+      if (page) await sleep(rand(gap));
       const res = await pull(account, cursor);
       if (res.kind === 'no_tab') return; // 没有 X 标签页，等下次有页面上线再试，不记失败
       await updateCursor(account, (c) => {
@@ -429,15 +439,27 @@ async function maybeIncremental() {
         return;
       }
       const p = res.parsed;
-      if (page === 0) topId = p.newestId;
-      if (!p.entryIds.length || !idGt(p.oldestId, stopAt) || !p.bottomCursor) {
+      if (page === 0 && !resume) topId = p.newestId;
+      if (!p.entryIds.length || !idGt(p.oldestId, stopAt) || !p.bottomCursor || p.oldestTs <= floorTs) {
+        caughtUp = true;
         break;
       }
       cursor = p.bottomCursor;
     }
+    if (!caughtUp) {
+      const when = now() + rand(PACE.restMs);
+      await updateCursor(account, (c) => {
+        if (!c.syncedId) return; // 读的过程中被清空了
+        c.incResume = { cursor, topId, stopAt };
+        c.nextIncAt = when;
+      });
+      await chrome.alarms.create(INC_ALARM, { when });
+      return;
+    }
     const next = await updateCursor(account, (c) => {
       // 读的过程中被清空了（没有 syncedId）就不补：清空后要重新初始化才自动抓
       if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
+      delete c.incResume;
       return planNextInc(c, now());
     });
     await armInc(next);
@@ -507,10 +529,15 @@ async function syncOut(force = false) {
 
     const targetTs = now() - settings.windowDays * DAY_MS;
     const prev = cur.out || {};
-    // 完整读：第一次、统计范围调大了、或手动初始化——读到范围起点。否则只读到上次的位置。
-    const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays;
-    const resume = full ? prev.resume : null; // 上一轮完整读被页数上限截断，这一轮接着读
-    const stopAt = full ? null : prev.syncedId;
+    // 完整读：第一次、统计范围调大了、手动初始化、或本机数据是旧版本存的——读到范围起点。否则只读到上次的位置。
+    const full = !prev.syncedId || (prev.fullFor || 0) < settings.windowDays || (prev.schema || 1) < OUT_SCHEMA;
+    // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
+    const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
+    const stopAt = full ? null : resume?.stopAt || prev.syncedId;
+    // 一次要读很多页（完整读、或接着上一轮读）时按回填的节奏，慢一些；平时的增量一般就一两页，按增量的节奏
+    const slow = full || !!resume;
+    const gap = slow ? PACE.pageGapMs : PACE.incPageGapMs;
+    const maxPages = slow ? PACE.slowPages : PACE.outMaxPages;
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
@@ -522,8 +549,8 @@ async function syncOut(force = false) {
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
     let pages = 0;
-    for (; pages < PACE.outMaxPages; pages++) {
-      if (pages) await sleep(rand(PACE.incPageGapMs));
+    for (; pages < maxPages; pages++) {
+      if (pages) await sleep(rand(gap));
       const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor });
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
       if (r.error === 'no_tab') return force && saveOut(account, { status: 'error', message: '没有可用的 X 标签页。打开或刷新一个 x.com 页面后再点「初始化」' });
@@ -554,17 +581,18 @@ async function syncOut(force = false) {
       }
       cursor = p.bottomCursor;
     }
-    const done = { status: 'ok', message: null, pages, syncedId: topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId };
-    if (!full) return saveOut(account, { ...done, lastAt: now() });
     const rounds = (resume?.rounds || 0) + 1;
     if (!complete && rounds < PACE.outMaxRounds) {
-      // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读
-      await saveOut(account, { ...done, coverTs: reachedTs, resume: { cursor, topId, rounds } });
-      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+      // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读。读完之前接续点不动
+      await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt } });
+      await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.restMs) });
       return;
     }
-    // 完整读结束（读到了范围起点、列表到底，或续读轮数用完）：记下完成时间
-    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.windowDays, resume: null, lastAt: now(), lastFullAt: now(), lastFullDays: settings.windowDays });
+    // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
+    const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
+    const done = { status: 'ok', message: null, pages, syncedId, resume: null, lastAt: now() };
+    if (!full) return saveOut(account, done);
+    await saveOut(account, { ...done, coverTs: reachedTs, fullFor: settings.windowDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: settings.windowDays });
   } catch (e) {
     // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
     await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
@@ -631,6 +659,9 @@ const handlers = {
     if (account) {
       // 每次有 X 页面上线都重算一次快照：插件更新后旧快照可能缺新字段（实测：缺 tier 时标签全是默认灰色）
       await refreshSnapshot(account);
+      // 「我回别人」是旧版本存的（口径不全）：不等下一次增量，一两分钟后就重新读
+      const out = (await kvGet(keys.cursor(account), {})).out;
+      if (out?.lastAt && (out.schema || 1) < OUT_SCHEMA && !(await chrome.alarms.get(OUT_ALARM))) await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
       wakeJob(true).then(maybeIncremental);
     }
     return { account };

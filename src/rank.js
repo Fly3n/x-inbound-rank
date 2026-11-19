@@ -4,6 +4,9 @@ export const DAY_MS = 86400000;
 export const WINDOWS = [7, 15, 30]; // 可选的统计范围（天）
 export const COLORS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray']; // 色值在 content/badge.css
 export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // maxTiers：阈值档最多 4 个，加上兜底色共 5 种颜色
+// 「我回别人」表的数据版本。2：每条多存 reply_to_id（回的是哪条帖子），用来判断是不是直接评论他的帖子。
+// 本机数据低于这个版本时，「我回 N」先不显示，后台自动重新读一遍补上。
+export const OUT_SCHEMA = 2;
 
 /**
  * 榜单口径和标签颜色的默认值，用户可在弹窗「设置」里改，「恢复默认」回到这里（不含 windowDays）。
@@ -59,7 +62,20 @@ export function cleanRules(raw = {}) {
 export const colorOf = (count, rules) => (rules.tiers.find((t) => count >= t.min) || { color: rules.baseColor }).color;
 
 /**
- * 只留「我的帖子下」的回复：对话根帖是我的才算，我去别人帖子下评论、对方回我的不算。
+ * 计入回复榜的那一条（负责人 2026-11-19 定）：直接评论我的帖子（第一级）。
+ * 我帖子下的深层回复（他评论 → 我回他 → 他再回我）、我去别人帖子下评论后对方回我的，都不算。
+ * 第一级 = 回复的就是对话根帖；解析时只有「回复的是我」的才入库，所以根帖必然是我的。
+ */
+export const countsToMe = (e) => e.root_mine === true && !!e.target_post_id && e.target_post_id === e.conversation_id;
+
+/**
+ * 「我回 N」计入的那一条：我直接评论他的帖子（第一级），记在帖子主人名下。
+ * 在他帖子下回复别的评论者、回复他的评论都不算。没有 reply_to_id 的是旧版本存的，判断不了，不算。
+ */
+export const countsFromMe = (o) => !!o.reply_to_id && o.reply_to_id === o.conversation_id && !!o.root_user_id;
+
+/**
+ * 「在我的帖子下」的回复（任何一层）：对话根帖是我的。只用来给通知列表标 M，不用于计数。
  * root_mine 为 null 的（抓取时那一页看不出根帖是谁的），如果同一对话里有别的回复已证明根帖是我的，也算；否则不算。
  */
 export function underMyPosts(events) {
@@ -86,29 +102,23 @@ export function replyPlaces(events, out, ids) {
   );
 }
 
-/**
- * 我在别人帖子下的回复，按「帖子是谁的」计数。返回 Map<user_id, 次数>。
- * 算的是对话根帖的作者：在他的帖子下回复任何人都算他的；在我自己帖子下回他的不算（解析时已去掉）。
- * root_user_id 为 null 的（抓取时那一页看不出根帖是谁的），同一对话里有别的回复知道根帖是谁的就跟着算，否则不算。
- */
+/** 窗口内我直接评论了谁的帖子几次（口径见 countsFromMe）。返回 Map<帖子主人 user_id, 次数>。 */
 export function outboundCounts(out, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
-  const rootOf = new Map(out.filter((e) => e.root_user_id).map((e) => [e.conversation_id, e.root_user_id]));
   const counts = new Map();
   for (const e of out) {
-    if (e.created_at < since || e.created_at > now) continue;
-    const root = e.root_user_id || rootOf.get(e.conversation_id);
-    if (root) counts.set(root, (counts.get(root) || 0) + 1);
+    if (e.created_at < since || e.created_at > now || !countsFromMe(e)) continue;
+    counts.set(e.root_user_id, (counts.get(e.root_user_id) || 0) + 1);
   }
   return counts;
 }
 
-/** 按回复者聚合时间窗内、我帖子下的回复。返回 Map<actor_id, row>。 */
+/** 按回复者聚合时间窗内计入榜单的回复（口径见 countsToMe）。返回 Map<actor_id, row>。 */
 export function aggregate(events, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
   const byActor = new Map();
-  for (const e of underMyPosts(events)) {
-    if (e.created_at < since || e.created_at > now) continue;
+  for (const e of events) {
+    if (!countsToMe(e) || e.created_at < since || e.created_at > now) continue;
     let row = byActor.get(e.actor_id);
     if (!row) {
       row = { actor_id: e.actor_id, handle: e.actor_handle, name: e.actor_name, avatar: e.actor_avatar, count: 0, last: 0 };
@@ -129,8 +139,8 @@ export function aggregate(events, windowDays, now = Date.now()) {
 /**
  * 回复榜 + 窗口内的总量。
  * rows：窗口内回复至少 minCount 次的人，最多前 topN 名；次数相同按最近回复时间排，再按 handle。每行带名次、标签颜色，
- *       以及 replied——同一窗口内我在他帖子下回复了几次（out 是我发出的回复，没有就都是 0）。
- * people / replies：窗口内在我帖子下回复过的总人数和总次数（不受 minCount、topN 影响）。
+ *       以及 replied——同一窗口内我直接评论他的帖子几次（out 是我发出的回复，没有就都是 0）。
+ * people / replies：窗口内直接评论过我帖子的总人数和总次数（不受 minCount、topN 影响）。
  */
 export function ranking(events, rules, now = Date.now(), out = []) {
   const mine = outboundCounts(out, rules.windowDays, now);
@@ -144,18 +154,18 @@ export function ranking(events, rules, now = Date.now(), out = []) {
   };
 }
 
-/** 某个人在窗口内、我帖子下的回复，新的在前。total 是总数，items 最多 limit 条。 */
+/** 某个人在窗口内计入榜单的回复（就是他那一行的次数由哪几条组成），新的在前。total 是总数，items 最多 limit 条。 */
 export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50) {
   const since = now - rules.windowDays * DAY_MS;
-  const mine = underMyPosts(events)
-    .filter((e) => e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
+  const mine = events
+    .filter((e) => countsToMe(e) && e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
     .sort((a, b) => b.created_at - a.created_at);
   return { total: mine.length, items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })) };
 }
 
 /**
  * 给内联标签用的快照：就是回复榜上的人。返回 { handle小写: { rank, count, color, last, replied? } }。
- * replied：同一窗口内我在他帖子下回复了几次。只有传了 out（「我回别人」已经读过）才带，没读过时不写 0，免得看成「一次没回」。
+ * replied：同一窗口内我直接评论他的帖子几次。只有传了 out（「我回别人」已经读过）才带，没读过时不写 0，免得看成「一次没回」。
  */
 export function badgeSnapshot(events, rules, now = Date.now(), out = null) {
   const users = {};

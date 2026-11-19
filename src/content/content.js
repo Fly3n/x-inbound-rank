@@ -240,8 +240,8 @@
     if (!u) return;
     tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
     tip.textContent =
-      `最近 ${windowDays} 天回复我第 ${u.rank} 名，共 ${u.count} 次\n` +
-      (u.replied != null ? `我在他的帖子下回复了 ${u.replied} 次\n` : '') +
+      `最近 ${windowDays} 天直接评论我的帖子第 ${u.rank} 名，共 ${u.count} 次\n` +
+      (u.replied != null ? `我直接评论他的帖子 ${u.replied} 次\n` : '') +
       `最近一次：${fmtDate(u.last)}`;
     const r = e.currentTarget.getBoundingClientRect();
     tip.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;

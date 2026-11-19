@@ -136,7 +136,7 @@ function collectTweets(node, out) {
 
 /**
  * @returns {{
- *   events: Array,   // 我在别人帖子下的回复：{ id, created_at, to_user_id, root_user_id, root_handle, conversation_id, text }
+ *   events: Array,   // 我在别人帖子下的回复：{ id, created_at, reply_to_id, to_user_id, root_user_id, root_handle, conversation_id, text }
  *   newestId, oldestId, oldestTs,   // 本页里我自己发的帖子（每个条目取最后一条，不含置顶）的范围，用于判断翻到哪了
  *   bottomCursor
  * }}
@@ -215,6 +215,7 @@ export function parseMyReplies(body, me) {
     events.push({
       id: t.id_str,
       created_at: tweetTime(t),
+      reply_to_id: t.in_reply_to_status_id_str, // 回的是哪条帖子；等于 conversation_id 就是直接评论根帖
       to_user_id: t.in_reply_to_user_id_str || null,
       root_user_id: rootUser, // null = 这一页里看不出根帖是谁的
       root_handle: rootScreen || null, // 只给导出时显示用

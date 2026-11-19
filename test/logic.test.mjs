@@ -3,14 +3,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../src/content/rel.js';
-import { ranking, outboundCounts, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import { ranking, outboundCounts, countsToMe, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
 import { parseMentions, parseMyReplies, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
 
 const NOW = Date.UTC(2026, 10, 13);
 const ev = (id, actor, daysAgo) => ({
-  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, root_mine: true,
+  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, target_post_id: 'c' + id, root_mine: true, // 直接评论我的帖子 c{id}
 });
 
 const rules = (o = {}) => cleanRules({ ...DEFAULT_RULES, ...o });
@@ -52,7 +52,7 @@ test('标签颜色：按次数分档，不按名次', () => {
 });
 
 test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
-  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, ev(5, 'b', 1)];
+  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, { ...ev(6, 'a', 1), target_post_id: 'deep' }, ev(5, 'b', 1)];
   const d = repliesOf(events, 'a', rules(), NOW);
   assert.deepEqual([d.total, d.items.map((x) => [x.id, x.text])], [2, [['1', '早'], ['2', '']]]);
   assert.equal(repliesOf(events, 'a', rules(), NOW, 1).items.length, 1);
@@ -62,13 +62,23 @@ test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW);
   assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
   // 「我回别人」读过之后带上我回他几次；一次没回是 0
-  const mine = [{ id: 'o1', created_at: NOW - DAY_MS, conversation_id: 'x1', root_user_id: 'a' }, { id: 'o2', created_at: NOW - 20 * DAY_MS, conversation_id: 'x2', root_user_id: 'a' }];
+  const mine = [{ id: 'o1', created_at: NOW - DAY_MS, conversation_id: 'x1', reply_to_id: 'x1', root_user_id: 'a' }, { id: 'o2', created_at: NOW - 20 * DAY_MS, conversation_id: 'x2', reply_to_id: 'x2', root_user_id: 'a' }];
   const evs = [ev(1, 'a', 1), ev(2, 'a', 10)];
   assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, mine).a.replied, 1);
   assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, []).a.replied, 0);
 });
 
-test('口径：只算我帖子下的回复，根帖归属未知的靠同一对话补判', () => {
+test('口径：只算直接评论我帖子的（第一级），深层回复和别人帖子下的不算', () => {
+  const e = (id, target, root_mine) => ({ ...ev(id, 'a', 1), conversation_id: 'p', target_post_id: target, root_mine });
+  assert.equal(countsToMe(e(1, 'p', true)), true, '他直接评论我的帖子 p');
+  assert.equal(countsToMe(e(2, 'my-comment', true)), false, '我帖子下：他评论 → 我回他 → 他再回我，这条不算');
+  assert.equal(countsToMe(e(3, 'p', false)), false, '别人的帖子');
+  assert.equal(countsToMe(e(4, 'x', null)), false, '看不出根帖是谁的');
+  const events = [e(1, 'p', true), e(2, 'my-comment', true), { ...e(5, 'q', true), conversation_id: 'q' }];
+  assert.deepEqual(ranking(events, rules(), NOW).rows.map((r) => r.count), [2]);
+});
+
+test('通知列表 M 的「在我帖子下」不分层：根帖归属未知的靠同一对话补判', () => {
   const e = (id, conversation_id, root_mine) => ({ ...ev(id, 'a', 1), conversation_id, root_mine });
   const kept = underMyPosts([
     e(1, 'mine', true), // 直接评论我的帖子
@@ -140,10 +150,19 @@ test('解析：结构不对就报错，不返回空结果', () => {
 
 // ---- 我在别人帖子下的回复 ----
 
-test('我回：按帖子是谁的计数，根帖未知的靠同一对话补判', () => {
-  const o = (id, daysAgo, conv, root) => ({ id, created_at: NOW - daysAgo * DAY_MS, conversation_id: conv, root_user_id: root, to_user_id: 'x' });
-  const out = [o('1', 1, 'c1', 'a'), o('2', 2, 'c1', null), o('3', 3, 'c2', null), o('4', 10, 'c3', 'a'), o('5', 1, 'c4', 'b')];
+test('我回：只算我直接评论他的帖子（第一级），记在帖子主人名下', () => {
+  const o = (id, daysAgo, conv, root, replyTo = conv) => ({ id, created_at: NOW - daysAgo * DAY_MS, conversation_id: conv, reply_to_id: replyTo, root_user_id: root, to_user_id: 'x' });
+  const out = [
+    o('1', 1, 'c1', 'a'), // 直接评论 a 的帖子
+    o('2', 2, 'c1', 'a', 'cmt'), // 在 a 的帖子下回评论：不算
+    o('3', 3, 'c2', null, 'cmt'), // 根帖不明的深层回复：不算
+    o('6', 2, 'c5', 'a'), // 又一次直接评论 a
+    o('4', 10, 'c3', 'a'), // 窗口外
+    o('5', 1, 'c4', 'b'),
+    { ...o('7', 1, 'c6', 'b'), reply_to_id: undefined }, // 旧版本存的，没有 reply_to_id：判断不了，不算
+  ];
   assert.deepEqual([...outboundCounts(out, 7, NOW)], [['a', 2], ['b', 1]]);
+  assert.equal(countsFromMe(out[1]), false);
   const events = [ev(1, 'a', 1), ev(2, 'a', 2), ev(3, 'b', 1), ev(4, 'b', 2)];
   assert.deepEqual(ranking(events, rules(), NOW, out).rows.map((r) => [r.actor_id, r.replied]), [['a', 2], ['b', 1]]);
   assert.deepEqual(ranking(events, rules(), NOW).rows.map((r) => r.replied), [0, 0], '没有出站数据时是 0');

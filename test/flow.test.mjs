@@ -5,6 +5,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const DAY = 86400000;
+// 后台页与页之间要等好几秒（真实节奏）；测试里把一秒以上的等待都快进成立刻，只验证流程
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 ? 0 : ms, ...args);
 const store = {};
 const alarms = {};
 const listeners = {};
@@ -279,6 +282,24 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(st.db.out.from < st.db.out.to && st.cursor.out.lastFullAt);
   const all = await send({ type: 'exportAll', account: 'me' });
   assert.deepEqual([all.inbound.length, all.out.length], [15, 6]);
+
+  // 增量读满 40 页（约 800 条）还没接上（比如电脑关了一整天）：不再放弃，记下位置，一两分钟后接着读到接上为止
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+  for (let i = 0; i < 130; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(3000 + i) });
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  before = server.calls;
+  await listeners.alarm({ name: 'inc' });
+  assert.equal(server.calls - before, 40, '一轮最多 40 页');
+  assert.equal(store['cursor:me'].syncedId, '2006', '没接上之前接续点不动');
+  assert.ok(store['cursor:me'].incResume, '记下读到哪了');
+  const rest = alarms.inc.when - Date.now();
+  assert.ok(rest >= 59_000 && rest <= 120_000, '休息一两分钟接着读');
+  store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
+  await listeners.alarm({ name: 'inc' });
+  assert.equal(server.calls - before, 44);
+  assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
+  assert.equal(await count(), 15 + 130, '一条不丢');
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
 
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });

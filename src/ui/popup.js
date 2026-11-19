@@ -1,5 +1,5 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
-import { COLORS, LIMITS, DEFAULT_RULES, colorOf } from '../rank.js';
+import { COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, colorOf, countsToMe, countsFromMe } from '../rank.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
@@ -56,7 +56,7 @@ function detailRow() {
   if (!d) return el('li', { className: 'detail hint', textContent: '读取中…' });
   const more = d.total > d.items.length ? `，这里显示最近 ${d.items.length} 条` : '';
   return el('li', { className: 'detail' }, [
-    el('div', { className: 'hint', textContent: `统计范围内在我的帖子下回复了 ${d.total} 次${more}：` }),
+    el('div', { className: 'hint', textContent: `统计范围内直接评论我的帖子 ${d.total} 次${more}：` }),
     ...d.items.map((it) =>
       el('a', { className: 'reply', href: `https://x.com/i/status/${it.id}`, target: '_blank', rel: 'noreferrer' }, [
         el('span', { className: 'time', textContent: fmtTime(it.created_at) }),
@@ -89,9 +89,9 @@ function renderList() {
               el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
             ]),
             ...(view.outReady
-              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，我在他的帖子下回复了几次', textContent: `我回 ${r.replied}` })]
+              ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，我直接评论他的帖子几次', textContent: `我回 ${r.replied}` })]
               : []),
-            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '统计范围内他在我帖子下的回复次数，颜色和时间线标签一致', textContent: `${r.count} 次` }),
+            el('span', { className: 'chip', dataset: { xirC: r.color }, title: '统计范围内他直接评论我的帖子几次，颜色和时间线标签一致', textContent: `${r.count} 次` }),
           ]),
           ...(view.open === r.actor_id ? [detailRow()] : []),
         ])
@@ -206,7 +206,7 @@ async function draw() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt });
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA });
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
   const outBad = out && out.status !== 'ok' ? `${out.status === 'need_tpl' ? '还读不了' : '读取出错'}：${out.message}` : '';
   // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
@@ -219,6 +219,7 @@ async function draw() {
     (out?.lastFullAt ? `上次初始化完成：${fmtTime(out.lastFullAt)}（最近${windowLabel(out.lastFullDays)}）。` : '') +
     (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '') +
     (out?.resume ? '还在继续往回读…' : '') +
+    (out?.lastAt && (out.schema || 1) < OUT_SCHEMA && !out.resume ? '「我回」的统计口径改了，要重新读一遍才显示，后台会自动开始。' : '') +
     (outBad ? `${outBad}。${out.status === 'need_tpl' && g.page?.ops?.length ? `（页面见过的请求：${g.page.ops.join('、')}）` : ''}` : '') +
     (!out ? '「别人回我」初始化完成后一两分钟会自动开始，也可以直接点「初始化」。' : '') +
     (out?.status === 'ok' && !out.resume && (out.fullFor || 0) < rules.windowDays ? `还没覆盖满最近${label}，点「初始化」补齐。` : '');
@@ -230,7 +231,7 @@ async function draw() {
   $('exportBoard').disabled = !rows.length;
   $('exportAll').disabled = !s.db.in.count && !s.db.out.count;
   $('boardHint').textContent =
-    `最近${label}共 ${people} 人在我的帖子下回复了 ${replies} 次；上榜 ${rows.length} 人` +
+    `最近${label}共 ${people} 人直接评论了我的帖子 ${replies} 次；上榜 ${rows.length} 人` +
     `（回复 ${rules.minCount} 次及以上，最多前 ${rules.topN} 名）。`;
   const job = s.job;
   const unfinished = job && job.status !== 'done';
@@ -349,7 +350,7 @@ const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
 // 导出榜单：当前榜上的人，一人一行
 $('exportBoard').addEventListener('click', () =>
   download(`回复榜_${view.rules.windowDays}天`, [
-    ['名次', '名字', 'ID', '回复次数', '我在他帖子下回复次数', '最近一次回复', '主页'],
+    ['名次', '名字', 'ID', '回复次数', '我回他次数', '最近一次回复', '主页'],
     ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outReady ? r.replied : '', fullTime(r.last), `https://x.com/${r.handle}`]),
   ]),
 );
@@ -358,19 +359,18 @@ $('exportBoard').addEventListener('click', () =>
 $('exportAll').addEventListener('click', async () => {
   const { inbound, out } = await call('exportAll', { account: view.account });
   const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
-  const mine = new Set(inbound.filter((e) => e.root_mine === true).map((e) => e.conversation_id));
   const link = (id) => `https://x.com/i/status/${id}`;
   const rows = [
     ...inbound.map((e) => ({
       ts: e.created_at,
-      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, e.root_mine === true || (e.root_mine === null && mine.has(e.conversation_id)) ? '是' : '否', e.text || '', link(e.id)],
+      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, countsToMe(e) ? '是' : '否', e.text || '', link(e.id)],
     })),
     ...out.map((e) => {
       const h = e.root_handle || handleOf.get(e.root_user_id);
-      return { ts: e.created_at, line: ['我回别人', fullTime(e.created_at), '', h ? `@${h}` : e.root_user_id ? `用户编号 ${e.root_user_id}` : '未知', '', e.text || '', link(e.id)] };
+      return { ts: e.created_at, line: ['我回别人', fullTime(e.created_at), '', h ? `@${h}` : e.root_user_id ? `用户编号 ${e.root_user_id}` : '未知', countsFromMe(e) ? '是' : '否', e.text || '', link(e.id)] };
     }),
   ].sort((x, y) => y.ts - x.ts);
-  download('全量数据', [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入榜单', '内容摘要', '链接'], ...rows.map((r) => r.line)]);
+  download('全量数据', [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入统计', '内容摘要', '链接'], ...rows.map((r) => r.line)]);
 });
 
 $('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
