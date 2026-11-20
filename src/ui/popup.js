@@ -454,7 +454,7 @@ async function showDiagnostics(exportAll = false) {
     };
     const link = el('a', {
       href: URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })),
-      download: 'X回复榜-诊断日志.json',
+      download: 'X 友-诊断日志.json',
     });
     document.body.append(link);
     link.click();
