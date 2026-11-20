@@ -82,7 +82,12 @@
       return false;
     }
     if (msg?.type !== 'xir:fetch') return false;
-    (msg.kind === 'out' ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor) : XIRFetcher.fetchMentions(msg.cursor, msg.tpl)).then(sendResponse);
+    const run = msg.kind === 'out'
+      ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor)
+      : msg.kind === 'scheduled'
+        ? XIRFetcher.fetchScheduled(msg.tpl)
+        : XIRFetcher.fetchMentions(msg.cursor, msg.tpl);
+    run.then(sendResponse);
     return true;
   });
 
@@ -99,6 +104,8 @@
   }
   XIRRel.onTpl = noteTpl;
   for (const url of XIRRel.tpls) noteTpl(url); // 这个脚本就绪之前页面已经发过的
+  XIRRel.onScheduledTap = (text) => { if (alive) send({ type: 'xir:scheduled:tap', text }); };
+  XIRRel.onPostEvent = (ev) => { if (alive) send({ type: 'xir:postEvent', ...ev }); };
 
   // ---------- 内联标签 ----------
 
@@ -256,7 +263,7 @@
     });
   }
   // 我们自己插、改标签也会触发这个监听；只动了自家节点的变化不用再扫一遍
-  const OURS = '.xir-badge, .xir-chip, .xir-tip';
+  const OURS = '.xir-badge, .xir-chip, .xir-tip, .xir-sched';
   const isOurs = (n) => n.nodeType === 1 && n.matches(OURS);
   const onlyOurs = (r) => r.target.closest?.(OURS) || ([...r.addedNodes].every(isOurs) && [...r.removedNodes].every(isOurs));
   new MutationObserver((records) => {

@@ -65,8 +65,8 @@ const XIRRel = (() => {
   const rel = new Map(); // 小写 handle -> 'mutual' | 'fan' | 'following' | 'none'
   const tweets = new Map(); // 帖子 ID -> { uid, conv, rtoStatus, rtoUser }
   const ops = new Set(); // 这个页面发过的接口请求的名字，只留最近 40 个（诊断用）
-  // tpls：页面读「回复」列表、读通知的请求地址（content.js 就绪之前来的先存着）；onTpl：content.js 就绪后接手，之后每来一个就通知它
-  const api = { extract, relOf, placeOf, rel, tweets, ops, tpls: [], onChange: null, onTpl: null };
+  // tpls：页面读「回复」列表、读通知、读已排期列表的请求地址（content.js 就绪之前来的先存着）；onTpl：content.js 就绪后接手
+  const api = { extract, relOf, placeOf, rel, tweets, ops, tpls: [], onChange: null, onTpl: null, onScheduledTap: null, onPostEvent: null };
 
   // 页面开久了会越攒越多，超了就把最早的一批丢掉
   const trim = (map, max) => {
@@ -111,10 +111,20 @@ const XIRRel = (() => {
       }
       if (typeof e.data?.xirTpl === 'string') {
         api.tpls.push(e.data.xirTpl);
-        if (api.tpls.length > 4) api.tpls.shift();
+        if (api.tpls.length > 6) api.tpls.shift();
         api.onTpl?.(e.data.xirTpl);
       }
+      if (e.data?.xirPostEvent && typeof e.data.xirPostEvent.op === 'string') {
+        api.onPostEvent?.(e.data.xirPostEvent);
+      }
       if (typeof e.data?.xirTap !== 'string') return;
+      if (e.data.xirTapOp === 'FetchScheduledTweets') {
+        try {
+          api.onScheduledTap?.(e.data.xirTap);
+        } catch {
+          // 忽略
+        }
+      }
       try {
         take(e.data.xirTap);
       } catch {

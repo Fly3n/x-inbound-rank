@@ -2,7 +2,7 @@
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
 import { record, readDiagnostics } from './diagnostics.js';
-import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
+import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError, idGt } from './x/parser.js';
 import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
 
@@ -98,7 +98,7 @@ const serviceWait = (attempt = 0) => Math.min(60, 5 * 2 ** attempt) * 60_000;
 
 async function fetchViaTab(req, trace) {
   const started = now();
-  const source = req.kind === 'out' ? 'replies' : req.tpl ? 'mentions-graphql' : 'mentions-rest';
+  const source = req.kind === 'out' ? 'replies' : req.kind === 'scheduled' ? 'scheduled' : req.tpl ? 'mentions-graphql' : 'mentions-rest';
   let tabsTried = 0;
   const report = async (result) => {
     await record('request', { ...trace, source, tabsTried, retryResetAt: result.rateResetAt ?? null, status: result.status || 0, outcome: result.error || 'response', continuation: !!req.cursor, durationMs: now() - started });
@@ -208,7 +208,7 @@ async function refreshSnapshot(account) {
   // 「我回别人」读完过一次之后，标签里才带「我回他几次」
   const o = (await kvGet(keys.cursor(account), {})).out;
   const outReady = !!o?.lastAt && (o.schema || 1) >= OUT_SCHEMA; // 旧版本存的数据口径不全，宁可先不显示
-  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace }, users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outReady) };
+  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace, schedule: rules.showSchedule }, users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outReady) };
   // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
   const prev = await kvGet(keys.snap(account));
   if (prev && JSON.stringify({ windowDays: prev.windowDays, show: prev.show, users: prev.users }) === JSON.stringify(snap)) return;
@@ -721,7 +721,7 @@ async function clearData(account) {
   }
   await clearEvents(account);
   snapDirty.delete(account);
-  await serial(() => kvRemove([keys.cursor(account), keys.job(account), keys.snap(account), keys.alert(account)])); // 和改 cursor 的排同一个队
+  await serial(() => kvRemove([keys.cursor(account), keys.job(account), keys.snap(account), keys.alert(account), keys.scheduled(account), keys.lastPostAt(account)])); // 和改 cursor 的排同一个队
 }
 
 // ---------- 事件入口 ----------
@@ -769,12 +769,72 @@ const handlers = {
       await kvSet(keys.tplMentions, { url, at: now() }); // 下一次翻页起改用新接口（正在翻的那次不换，游标不通用）
       return {};
     }
+    if (kind === 'scheduled') {
+      await kvSet(keys.tplScheduled, { url, at: now() });
+      return {};
+    }
     await kvSet(keys.tpl, { url, at: now() });
     // 之前因为没有模板没读成的，现在马上补读
     const account = await kvGet(keys.current);
     const out = account && (await kvGet(keys.cursor(account), {})).out;
     if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 }); // busy：正在读的那一轮自己会用上
     return {};
+  },
+  async 'xir:scheduled:tap'({ text }) {
+    const account = await kvGet(keys.current);
+    if (!account || typeof text !== 'string') return {};
+    try {
+      const items = parseScheduledTweets(JSON.parse(text));
+      const syncedAt = now();
+      await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
+      return { ok: true, items, syncedAt };
+    } catch {
+      return {};
+    }
+  },
+  async 'xir:postEvent'({ op, at }) {
+    const account = await kvGet(keys.current);
+    if (!account) return {};
+    const ts = Number.isFinite(at) ? at : now();
+    if (op === 'CreateTweet' || op === 'CreateScheduledTweet') {
+      await kvSet(keys.lastPostAt(account), ts);
+    }
+    if (op === 'CreateScheduledTweet' || op === 'DeleteScheduledTweet') {
+      const cached = await kvGet(keys.scheduled(account));
+      if (cached) await kvSet(keys.scheduled(account), { ...cached, syncedAt: 0 }); // 下次打开排期弹窗立刻拉最新
+    }
+    return {};
+  },
+  async 'xir:scheduled:sync'({ force } = {}) {
+    const account = await kvGet(keys.current);
+    if (!account) return { items: [], syncedAt: 0, lastPostAt: 0, status: 'error', message: '未识别到当前 X 账号' };
+    const cached = (await kvGet(keys.scheduled(account))) || { items: [], syncedAt: 0, error: null };
+    const lastPostAt = (await kvGet(keys.lastPostAt(account))) || 0;
+    const tpl = await kvGet(keys.tplScheduled);
+    if (!tpl) {
+      return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '点一下下方「已排期帖子」完成首次同步' };
+    }
+    // 30 秒防抖：连续开关排期弹窗不重复发请求
+    if (!force && cached.syncedAt && now() - cached.syncedAt < 30_000) {
+      return { items: cached.items || [], syncedAt: cached.syncedAt, lastPostAt, status: 'ok' };
+    }
+    const r = await fetchViaTab({ kind: 'scheduled', tpl: tpl.url }, { mode: 'scheduled_sync', run: now(), page: 1 });
+    if (r.error === 'no_tab') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '未连接到 X 页面，已显示上次缓存' };
+    if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
+      await kvRemove(keys.tplScheduled);
+      return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '接口参数已更新，请点一下「已排期帖子」重新连接' };
+    }
+    if (r.status === 429) return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '暂时被 X 限流（429），已显示上次缓存' };
+    if (!r.ok) return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `同步排期失败（${r.error || 'HTTP ' + r.status}），已显示缓存` };
+    try {
+      const items = parseScheduledTweets(r.body);
+      const syncedAt = now();
+      await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
+      return { items, syncedAt, lastPostAt, status: 'ok' };
+    } catch (e) {
+      const why = e instanceof ParseError ? e.message : String(e);
+      return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `排期解析失败：${why}` };
+    }
   },
   // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
   async 'xir:where'({ ids }) {

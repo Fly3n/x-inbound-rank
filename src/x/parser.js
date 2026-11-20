@@ -279,3 +279,42 @@ export function parseMyReplies(body, me) {
 
   return { events, newestId, oldestId, oldestTs, bottomCursor };
 }
+
+// ---------- 已排期帖子列表（GraphQL：FetchScheduledTweets） ----------
+// 【待实测】按 X 网页版 FetchScheduledTweets 常见结构解析：data.viewer.scheduled_tweet_list（或 data 下任意 scheduled_tweet_list 数组），
+// 每项含 rest_id / id、scheduling_info.execute_at（秒或毫秒时间戳）、tweet_create_request.status。结构对不上就抛 ParseError。
+
+const schedSnippet = (raw) => (typeof raw === 'string' ? [...raw.replace(/\s+/g, ' ').trim()].slice(0, 60).join('') : '');
+
+/**
+ * 解析已排期帖子列表。
+ * @returns {Array<{ id: string, executeAt: number, text: string }>} 按执行时间升序
+ */
+export function parseScheduledTweets(body) {
+  if (Array.isArray(body?.errors) && body.errors.length && !body?.data) {
+    throw new ParseError(`X 返回错误：${String(body.errors[0]?.message || '未知错误').slice(0, 200)}`);
+  }
+  let list = null;
+  walk(body?.data, (n) => {
+    if (!list && Array.isArray(n.scheduled_tweet_list)) list = n.scheduled_tweet_list;
+  });
+  if (!list) {
+    const err = body?.errors?.[0]?.message;
+    throw new ParseError(err ? `X 返回错误：${String(err).slice(0, 200)}` : '返回里找不到已排期列表（scheduled_tweet_list）');
+  }
+  const items = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rawTs = Number(raw.scheduling_info?.execute_at ?? raw.execute_at);
+    if (!Number.isFinite(rawTs) || rawTs <= 0) continue;
+    const executeAt = rawTs < 1e12 ? rawTs * 1000 : rawTs;
+    const id = String(raw.rest_id ?? raw.id ?? executeAt);
+    const text = schedSnippet(raw.tweet_create_request?.status ?? raw.status ?? raw.text ?? '');
+    items.push({ id, executeAt, text });
+  }
+  if (list.length && !items.length) {
+    throw new ParseError('已排期列表不为空，但解析不出排期时间（execute_at）');
+  }
+  items.sort((a, b) => a.executeAt - b.executeAt);
+  return items;
+}

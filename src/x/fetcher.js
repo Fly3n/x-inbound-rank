@@ -135,17 +135,34 @@ const XIRFetcher = (() => {
     return get(url, { 'content-type': 'application/json' });
   }
 
-  /** 这个地址是哪种模板：'replies' 我的回复列表、'mentions' 通知，都不是返回 null。 */
+  // ---- 已排期帖子列表（GraphQL：FetchScheduledTweets）----
+  // 同样不写死查询 ID 和 features，照着 X 页面自己发过的模板 URL 原样 GET 一次。
+  const SCHED_RE = /\/i\/api\/graphql\/[\w-]+\/FetchScheduledTweets(?:\?|$)/;
+
+  /** 读当前账号的已排期帖子列表（只读 GET）。 */
+  function fetchScheduled(tpl) {
+    try {
+      const u = new URL(tpl, location.origin);
+      if (u.origin !== location.origin || !SCHED_RE.test(u.pathname + (u.search ? '?' : ''))) {
+        return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
+      }
+      return get(`${location.origin}${u.pathname}${u.search}`, { 'content-type': 'application/json' });
+    } catch {
+      return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
+    }
+  }
+
+  /** 这个地址是哪种模板：'replies' 我的回复列表、'mentions' 通知、'scheduled' 已排期列表，都不是返回 null。 */
   function tplKind(url) {
     try {
       const u = new URL(url, location.origin);
       if (u.origin !== location.origin) return null;
       const path = u.pathname + '?';
-      return REPLIES_RE.test(path) ? 'replies' : NOTIF_RE.test(path) ? 'mentions' : null;
+      return REPLIES_RE.test(path) ? 'replies' : NOTIF_RE.test(path) ? 'mentions' : SCHED_RE.test(path) ? 'scheduled' : null;
     } catch {
       return null;
     }
   }
 
-  return { fetchMentions, fetchMyReplies, sessionUserId, tplKind, isOwn: (url) => own.has(url) };
+  return { fetchMentions, fetchMyReplies, fetchScheduled, sessionUserId, tplKind, isOwn: (url) => own.has(url) };
 })();

@@ -92,3 +92,161 @@
 .xir-tip[hidden] {
   display: none;
 }
+
+/* ---- 发帖排期快捷档期条（嵌入 X 原生排期弹窗） ---- */
+.xir-sched {
+  --xir-s-bg: #f7f9f9;
+  --xir-s-bd: #cfd9de;
+  --xir-s-fg: #0f1419;
+  --xir-s-muted: #536471;
+  --xir-s-slot-bg: #ffffff;
+  --xir-s-slot-hover: #e8f5fd;
+  --xir-s-busy-bg: #eff3f4;
+  --xir-s-busy-fg: #9aa5ad;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--xir-s-bd);
+  border-radius: 12px;
+  background: var(--xir-s-bg);
+  color: var(--xir-s-fg);
+  font: 13px/1.4 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  box-sizing: border-box;
+}
+
+.xir-sched[data-xir-theme="dark"] {
+  --xir-s-bg: #16181c;
+  --xir-s-bd: #2f3336;
+  --xir-s-fg: #e7e9ea;
+  --xir-s-muted: #8b98a5;
+  --xir-s-slot-bg: #0f1419;
+  --xir-s-slot-hover: rgba(29, 155, 240, 0.16);
+  --xir-s-busy-bg: #202327;
+  --xir-s-busy-fg: #5c6670;
+}
+
+.xir-sched-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.xir-sched-title {
+  font-weight: 700;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.xir-sched-stat {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--xir-s-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xir-sched-stat.is-ok { color: #16a34a; font-weight: 600; }
+.xir-sched-stat.is-warn { color: #ea580c; }
+
+.xir-sched-refresh {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--xir-s-bd);
+  border-radius: 999px;
+  background: var(--xir-s-slot-bg);
+  color: var(--xir-s-fg);
+  font: 13px/22px inherit;
+  cursor: pointer;
+}
+.xir-sched-refresh:hover:not(:disabled) {
+  border-color: #1d9bf0;
+  color: #1d9bf0;
+}
+.xir-sched-refresh:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.xir-sched-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.xir-sched-slot,
+.xir-sched-more {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--xir-s-bd);
+  border-radius: 999px;
+  background: var(--xir-s-slot-bg);
+  color: var(--xir-s-fg);
+  font: 500 12px/26px inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.xir-sched-slot.is-hour {
+  font-weight: 700;
+}
+
+.xir-sched-slot:hover:not(:disabled),
+.xir-sched-more:hover {
+  border-color: #1d9bf0;
+  background: var(--xir-s-slot-hover);
+  color: #1d9bf0;
+}
+
+.xir-sched-slot.is-picked {
+  border-color: #1d9bf0;
+  background: #1d9bf0;
+  color: #fff;
+}
+
+.xir-sched-slot.is-busy,
+.xir-sched-slot:disabled {
+  border-color: transparent;
+  background: var(--xir-s-busy-bg);
+  color: var(--xir-s-busy-fg);
+  text-decoration: line-through;
+  cursor: not-allowed;
+}
+
+.xir-sched-more {
+  color: #1d9bf0;
+  border-color: rgba(29, 155, 240, 0.45);
+}
+.xir-sched-more.is-open {
+  background: var(--xir-s-slot-hover);
+}
+
+.xir-sched-drop {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--xir-s-bd);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.xir-sched-day + .xir-sched-day {
+  margin-top: 10px;
+}
+
+.xir-sched-day-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--xir-s-muted);
+}
+
+.xir-sched-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+

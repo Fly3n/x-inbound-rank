@@ -3,8 +3,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../src/content/rel.js';
+import '../src/content/schedule.js';
 import { ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
-import { parseMentions, parseMyReplies, ParseError } from '../src/x/parser.js';
+import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
 
@@ -39,8 +40,8 @@ test('回复榜：名次上限可调，默认 100', () => {
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
   const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
-  // 三个显示开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, initDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  // 显示开关：只有明确写 false 才是关
+  assert.deepEqual(r, { windowDays: 7, initDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
@@ -298,4 +299,79 @@ test('帖子归属：页面数据能定的直接定，定不了的靠本机两�
   const events = [inb('a', '2', 'c1', true), inb('b', '2', 'c2', false), inb('c', '2', 'c3', false), inb('d', '2', 'c4', false)];
   const out = [{ id: 'o1', conversation_id: 'c2', root_user_id: '2' }, { id: 'o2', conversation_id: 'c3', root_user_id: '8' }];
   assert.deepEqual(replyPlaces(events, out, ['a', 'b', 'c', 'd', 'zz']), { a: 'me', b: 'him', c: 'other', d: null, zz: null });
+});
+
+// ---- 发帖排期辅助 ----
+
+test('解析已排期列表：兼容秒和毫秒时间戳，按时间升序，结构不对抛错', () => {
+  const t1 = 1_795_000_000; // 秒
+  const t2 = 1_795_003_600_000; // 毫秒
+  const body = {
+    data: {
+      viewer: {
+        scheduled_tweet_list: [
+          { rest_id: 's2', scheduling_info: { execute_at: t2 }, tweet_create_request: { status: '第二条  排期帖子' } },
+          { rest_id: 's1', scheduling_info: { execute_at: t1 }, tweet_create_request: { status: '第一条排期' } },
+        ],
+      },
+    },
+  };
+  assert.deepEqual(parseScheduledTweets(body), [
+    { id: 's1', executeAt: t1 * 1000, text: '第一条排期' },
+    { id: 's2', executeAt: t2, text: '第二条 排期帖子' },
+  ]);
+  assert.deepEqual(parseScheduledTweets({ data: { viewer: { scheduled_tweet_list: [] } } }), [], '空排期列表不算错');
+  assert.throws(() => parseScheduledTweets({ errors: [{ message: 'denied' }] }), /denied/);
+  assert.throws(() => parseScheduledTweets({ data: {} }), ParseError);
+  assert.throws(() => parseScheduledTweets({ data: { viewer: { scheduled_tweet_list: [{ rest_id: 'bad' }] } } }), ParseError);
+});
+
+test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过，刚发帖后自动顺延', () => {
+  const { buildDaySlots, buildSchedulePlan } = globalThis.XIRSchedule;
+  const at = (h, m, dayOffset = 0) => new Date(2026, 10, 20 + dayOffset, h, m, 0, 0).getTime();
+
+  // 中午 12:00 打开：上午的都不显示，第一个档是 12:30，最后一个是 24:00
+  const noon = buildDaySlots({ nowTs: at(12, 0), dayOffset: 0 });
+  assert.equal(noon.slots[0].label, '12:30');
+  assert.equal(noon.slots[noon.slots.length - 1].label, '24:00');
+
+  // 12:25 打开：距离 12:30 不足 10 分钟，首个档顺延到 13:00
+  const tight = buildDaySlots({ nowTs: at(12, 25), dayOffset: 0 });
+  assert.equal(tight.slots[0].label, '13:00');
+
+  // 12:19 刚发过帖，12:20 打开：12:19 + 15m = 12:34 > 12:30，跳过 12:30 从 13:00 开始
+  const justPosted = buildDaySlots({ nowTs: at(12, 20), dayOffset: 0, lastPostAt: at(12, 19) });
+  assert.equal(justPosted.slots[0].label, '13:00');
+
+  // 明天完整覆盖 07:00–24:00（共 35 档）
+  const plan = buildSchedulePlan({ nowTs: at(12, 0), days: 7 });
+  assert.equal(plan.groups.length, 7);
+  assert.equal(plan.groups[1].slots.length, 35);
+  assert.equal(plan.groups[1].slots[0].label, '07:00');
+  assert.equal(plan.groups[1].slots[34].label, '24:00');
+});
+
+test('排期冲突与随机浮动：±15 分钟半开区间判定，浮动避开整点、过去和冲突', () => {
+  const { buildDaySlots, pickJitteredTime } = globalThis.XIRSchedule;
+  const at = (h, m) => new Date(2026, 10, 20, h, m, 0, 0).getTime();
+  const scheduled = [
+    { id: '1', executeAt: at(15, 22), text: '下午茶' }, // 落在 15:30 档 [15:15, 15:45)
+    { id: '2', executeAt: at(15, 45), text: '边界测试' }, // 正好 15:45，归入 16:00 档 [15:45, 16:15)，不重复占 15:30
+  ];
+  const day = buildDaySlots({ nowTs: at(14, 0), dayOffset: 0, scheduled });
+  const byLabel = Object.fromEntries(day.slots.map((s) => [s.label, s]));
+  assert.equal(byLabel['15:00'].occupied, false);
+  assert.equal(byLabel['15:30'].occupied, true);
+  assert.deepEqual(byLabel['15:30'].items.map((x) => x.id), ['1']);
+  assert.equal(byLabel['16:00'].occupied, true);
+  assert.deepEqual(byLabel['16:00'].items.map((x) => x.id), ['2']);
+  assert.equal(byLabel['16:30'].occupied, false);
+
+  // 点击 15:00：15:22 已排，所以 +6 分钟内（最多 15:06）距离 15:22 为 16 分钟合法，且不会选 15:00 整点
+  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
+    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r });
+    const diffMin = Math.round((picked - at(15, 0)) / 60_000);
+    assert.ok(diffMin !== 0 && Math.abs(diffMin) <= 6, `应浮动 1-6 分钟，实际 ${diffMin}`);
+    assert.ok(Math.abs(picked - at(15, 22)) >= 15 * 60_000, '不应与 15:22 撞档');
+  }
 });

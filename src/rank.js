@@ -33,6 +33,7 @@ export const DEFAULT_RULES = {
   showOut: true, // 名次标签里再带上「我回他几次」
   showRel: true, // 关系：互 / 粉
   showPlace: true, // 通知列表里回复在我的帖子下的标 M
+  showSchedule: true, // 发帖排期弹窗里显示快捷档期
 };
 
 const clampInt = (v, [lo, hi], fallback) => {
@@ -62,6 +63,7 @@ export function cleanRules(raw = {}) {
     showOut: raw.showOut !== false,
     showRel: raw.showRel !== false,
     showPlace: raw.showPlace !== false,
+    showSchedule: raw.showSchedule !== false,
   };
 }
 
