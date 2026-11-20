@@ -279,8 +279,8 @@ async function draw() {
   $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
-  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, s.cursor.lastIncrementalAt);
-  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, out?.lastAt);
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, out?.lastReadAt ?? out?.lastAt);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -302,7 +302,7 @@ function renderDataStatus(id, data, initializedAt, days, updatedAt) {
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtDay(data.from)} – ${fmtDay(data.to)}` : '暂无记录'],
     ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
-    ['上次读取', updatedAt ? fmtTime(updatedAt) : '暂无记录'],
+    ['上次读取', updatedAt ? fullTime(updatedAt) : '暂无记录'],
   ];
   $(id).replaceChildren(...fields.flatMap(([label, value]) => [
     el('dt', { textContent: label }),
@@ -492,7 +492,7 @@ $('updateNow').addEventListener('click', async () => {
   let message;
   try {
     const result = await call('updateNow', { account: view.account });
-    message = result?.error || '已触发本轮增量，后续进度见两份数据的读取状态。';
+    message = result?.error || result?.message || '别人回我已读完；我回别人已初始化时，约 1–2 分钟后开始读取。';
   } catch {
     message = '未能确认更新结果，请查看数据状态。';
   } finally {

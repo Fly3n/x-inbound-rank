@@ -172,9 +172,11 @@ async function pull(account, cursor, api = 'rest') {
     return { kind: 'error', message: `解析失败：${why}。X 的返回结构可能已变更，需要更新解析层` };
   }
 
+  const readAt = now();
   const added = await putEvents(account, parsed.events);
   await record('page_saved', { source: 'mentions', entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
+    cur.inLastReadAt = readAt;
     if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
     if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
   });
@@ -488,7 +490,7 @@ async function maybeIncremental(manualAccount) {
           c.nextIncAt = when;
         });
         await chrome.alarms.create(INC_ALARM, { when });
-        return;
+        return { message: '新版读取方式失效，已安排用旧接口重试。' };
       }
       await updateCursor(account, (c) => {
         c.lastAttemptAt = now();
@@ -503,7 +505,7 @@ async function maybeIncremental(manualAccount) {
         await chrome.alarms.create(INC_ALARM, { when });
         await setAlert(account, `X 暂时不可用（HTTP ${res.status}），稍后重试`);
         await record('retry_scheduled', { source: 'incremental', status: res.status, waitMs: wait });
-        return;
+        return { message: `别人回我读取失败（HTTP ${res.status}），已安排重试。` };
       }
       if (res.kind === 'rate') {
         await armInc(await updateCursor(account, (c) => {
@@ -513,11 +515,11 @@ async function maybeIncremental(manualAccount) {
           return c.nextIncAt;
         }));
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
-        return;
+        return { message: '别人回我遇到限流，已退避。' };
       }
       if (res.kind === 'error') {
         await setAlert(account, res.message);
-        return;
+        return { error: res.message };
       }
       const p = res.parsed;
       if (page === 0 && !resume) topId = p.newestId;
@@ -535,7 +537,7 @@ async function maybeIncremental(manualAccount) {
         c.nextIncAt = when;
       });
       await chrome.alarms.create(INC_ALARM, { when });
-      return;
+      return { message: '别人回我已读完一批，等待续读；随后安排我回别人。' };
     }
     const next = await updateCursor(account, (c) => {
       // 读的过程中被清空了（没有 syncedId）就不补：清空后要重新初始化才自动抓
@@ -549,6 +551,7 @@ async function maybeIncremental(manualAccount) {
       return planNextInc(c, now());
     });
     await armInc(next);
+    return { ok: true };
   } finally {
     if (account) await flushSnapshot(account, true).catch(() => {});
     busy = false;
@@ -644,9 +647,10 @@ async function syncOut() {
         await record('parse_failed', { source: 'replies' });
         return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
       }
+      const readAt = now();
       const added = await putEvents(account, p.events, OUT);
       await record('page_saved', { source: 'replies', parsed: p.events.length, added, more: !!p.bottomCursor });
-      await saveOut(account, { running: { at: now(), pages: pages + 1 } });
+      await saveOut(account, { lastReadAt: readAt, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
@@ -777,7 +781,7 @@ const handlers = {
       return { error: '当前无法更新。请先完成「别人回我」初始化，并等待正在运行的读取、最短更新间隔或退避结束。' };
     }
     const result = await maybeIncremental(account);
-    return result === false ? { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' } : { ok: true };
+    return result === false ? { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' } : result;
   },
   async getState() {
     const accounts = await kvGet(keys.accounts, {});

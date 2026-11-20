@@ -346,6 +346,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
 
   await set({ fetchEnabled: true });
+  store['cursor:me'].inLastReadAt = 1;
+  store['cursor:me'].out.lastReadAt = 1;
+  const countBeforeManual = await count();
   const scheduled = Date.now() + 45 * 60_000;
   Object.assign(store['cursor:me'], { nextIncAt: scheduled, lastAttemptAt: 0 });
   before = server.calls;
@@ -353,6 +356,11 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(server.calls, before + 1);
   assert.equal(alarms.inc.when, scheduled, '立即更新保留已有的自动更新时间');
   assert.ok(alarms.out.when > Date.now(), '安排我回别人继续更新');
+  assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
+  assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
+  assert.equal(store['cursor:me'].out.lastReadAt, 1, '排队时不会提前更新出站读取时间');
+  await listeners.alarm({ name: 'out' });
+  assert.ok(store['cursor:me'].out.lastReadAt > 1, '出站实际读取后才更新时间');
   assert.ok((await send({ type: 'updateNow', account: 'me' })).error, '连续点击仍受间隔限制');
   await set({ fetchEnabled: false });
 
