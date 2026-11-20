@@ -151,3 +151,9 @@ input[type="number"]::-webkit-inner-spin-button { appearance: none; }
 .swatches button { width: 18px; height: 18px; padding: 0; border-radius: 50%; border: 2px solid transparent; background: var(--xir-bg); }
 /* 选中的色块：外面一圈跟随文字色，深浅主题下都看得见 */
 .swatches button.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
+
+.settings-detail { margin-top: 8px; color: var(--dim); }
+.settings-detail > summary { cursor: pointer; font-weight: 500; }
+.settings-detail li + li { margin-top: 4px; }
+.init-reason { color: var(--warn-fg); font-weight: 600; font-size: 12px; }
+.init-reason:empty { display: none; }

@@ -72,9 +72,8 @@
 
     <!-- 设置页：常用的在前，说明和清空在最后、默认折叠 -->
     <section id="view-settings" hidden>
-      <section class="card">
-        <h2>数据读取 <button class="q" data-tip="tip-data" title="读取方式说明">?</button></h2>
-        <div class="tip" id="tip-data" hidden>
+      <details class="card fold" open><summary>数据读取</summary>
+        <details class="settings-detail"><summary>读取说明</summary>
           <ul>
             <li>「初始化」按初始化范围往回读一遍，从最新一条读起；本机已有的不删、不重复计数。</li>
             <li>本机数据已经覆盖所选范围时，按钮是灰的，不用再点。要读更早的，把范围调大。</li>
@@ -83,7 +82,7 @@
             <li>读取时要有一个 x.com 标签页开着，没有就顺延。</li>
             <li>本机只保留最近 3 个月的数据，更早的自动清理。</li>
           </ul>
-        </div>
+        </details>
 
         <div class="row field">
           <span>初始化范围</span>
@@ -97,68 +96,68 @@
 
         <div class="src">
           <div class="row between">
-            <span><b>别人回我</b> <button class="q" data-tip="tip-in" title="这份数据是什么">?</button></span>
+            <span><b>别人回我</b></span>
             <span class="row">
-              <button id="start" class="primary">初始化</button>
+              <span id="inReason" class="init-reason" role="status"></span>
+              <button aria-describedby="inReason" id="start" class="primary">初始化</button>
               <button id="pause" hidden>暂停</button>
               <button id="resume" hidden>继续</button>
             </span>
           </div>
-          <div class="tip" id="tip-in" hidden>
+
+          <p id="jobStatus" hidden></p>
+          <details class="settings-detail"><summary>数据详情</summary><p class="hint" id="coverage"></p>
             <ul>
               <li>算：在<b>我的帖子下</b>回复我的每一条，不分第几层（他评论我、我回他、他再回我的也算）。榜单排名和时间线标签用它。</li>
               <li>不算：他在别人帖子下（包括他自己的帖子）回我的、引用、普通 @。</li>
               <li>来源：X「通知 → 提及」的列表。打开过一次 X 的通知页后，改用 X 网页版现在用的读法（更快、额度更大）。</li>
             </ul>
-          </div>
-          <p id="jobStatus" hidden></p>
-          <p class="hint" id="coverage"></p>
+          </details>
         </div>
 
         <div class="src">
           <div class="row between">
-            <span><b>我回别人</b> <button class="q" data-tip="tip-out" title="这份数据是什么">?</button></span>
-            <button id="outSync">初始化</button>
+            <span><b>我回别人</b></span>
+            <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync">初始化</button></span>
           </div>
-          <div class="tip" id="tip-out" hidden>
+
+          <details class="settings-detail"><summary>数据详情</summary><p class="hint" id="outStatus"></p>
             <ul>
               <li>只算我<b>直接评论别人帖子</b>的那一条（第一层），记到帖子主人头上。榜单里的「我回 N」用它。</li>
               <li>不算：在他帖子下回别的评论者、回他的评论（深层回复只有一半左右认得出是谁的帖子，不算）、在我自己帖子下回别人的。</li>
               <li>来源：我自己主页「回复」栏的列表。X 给这个列表的额度小，读得慢。</li>
             </ul>
-          </div>
-          <p class="hint" id="outStatus"></p>
+          </details>
+          <p class="hint" id="outIssue" role="status" hidden></p>
           <a id="outRepliesLink" target="_blank" rel="noreferrer" hidden>打开我的回复页</a>
         </div>
 
         <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新：约每小时把两份数据各读一次</label>
         <p class="hint" id="storage"></p>
-      </section>
+      </details>
 
-      <section class="card">
-        <h2>时间线上显示什么 <button class="q" data-tip="tip-show" title="这些标签是什么">?</button></h2>
-        <div class="tip" id="tip-show" hidden>
+      <details class="card fold"><summary>时间线上显示什么</summary>
+        <details class="settings-detail"><summary>说明</summary>
           <ul>
             <li>名次标签：榜上的人，名字旁显示名次和回复次数。</li>
             <li>关系：<b>互</b> 互关；<b>粉</b> 他关注我、我没关注他。其他情况不标。</li>
             <li><b>M</b>（只在通知列表）：这条回复是在我的帖子下。不在我帖子下的不标。</li>
             <li>关掉哪个，时间线上就不再显示哪个；数据照常读。</li>
           </ul>
-        </div>
+        </details>
         <label class="line"><input type="checkbox" id="showRank"> 名次标签（名次 + 回复次数）</label>
         <label class="line"><input type="checkbox" id="showOut"> 名次标签里带上「我回他几次」</label>
         <label class="line"><input type="checkbox" id="showRel"> 关系（互 / 粉）</label>
         <label class="line"><input type="checkbox" id="showPlace"> 通知列表里在我帖子下的回复标 M</label>
-      </section>
+      </details>
 
-      <section class="card">
-        <h2>榜单口径 <button class="q" data-tip="tip-rules" title="口径说明">?</button></h2>
-        <div class="tip" id="tip-rules" hidden>
+      <details class="card fold"><summary>榜单口径</summary>
+        <details class="settings-detail"><summary>说明</summary>
           <ul>
             <li>上榜只看两个条件：榜单范围内至少回复几次、最多前几名。先看次数够不够，再取前几名。</li>
             <li>榜单和时间线标签共用。名次上限 10–500，次数 1–99，可直接输入数字。</li>
           </ul>
-        </div>
+        </details>
         <div class="row field">
           <span>最多到第</span>
           <span class="stepper" data-key="topN"><button data-dir="-1">−</button><input type="number" id="topN" min="10" max="500"><button data-dir="1">+</button></span>
@@ -169,23 +168,22 @@
           <span class="stepper" data-key="minCount"><button data-dir="-1">−</button><input type="number" id="minCount" min="1" max="99"><button data-dir="1">+</button></span>
           <span>次才上榜</span>
         </div>
-      </section>
+      </details>
 
-      <section class="card">
-        <h2>标签颜色 <button class="q" data-tip="tip-colors" title="颜色说明">?</button></h2>
-        <div class="tip" id="tip-colors" hidden>
+      <details class="card fold"><summary>标签颜色</summary>
+        <details class="settings-detail"><summary>说明</summary>
           <ul>
             <li>按榜单范围内的回复次数定颜色，从上往下先满足哪一档用哪个。</li>
             <li>最多 5 种颜色。都是实心底色，X 的深色、浅色主题下都看得清。</li>
           </ul>
-        </div>
+        </details>
         <div id="tiers"></div>
         <div class="row">
           <button id="addTier">＋ 加一档</button>
         </div>
         <p class="hint">效果预览：</p>
         <div class="row" id="preview"></div>
-      </section>
+      </details>
 
       <div class="row actions">
         <button id="reset">口径和颜色恢复默认</button>

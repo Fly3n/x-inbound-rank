@@ -240,8 +240,9 @@ async function draw() {
   const outPending = !!outPhase || out?.fullFor === 0 && out?.status !== 'error';
   const outProgress = running ? `进行中，本轮已读 ${running.pages} 页。`
     : outPhase ? `${outPhase}。` : '';
-  $('outStatus').textContent = span(s.db.out) + outProgress + outBad +
-    (outCovered && !outPending ? '已覆盖所选范围。' : '');
+  $('outStatus').textContent = span(s.db.out) + (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '');
+  $('outIssue').textContent = outBad;
+  $('outIssue').hidden = !outBad;
   const handle = g.accounts[view.account]?.handle;
   const outLink = $('outRepliesLink');
   outLink.hidden = !(isSession && out?.status === 'need_tpl' && /^[A-Za-z0-9_]{1,15}$/.test(handle || ''));
@@ -251,6 +252,8 @@ async function draw() {
     ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
     : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
   $('outLine').hidden = !$('outLine').textContent;
+  $('outReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
+    : outCovered && !outPending ? '已覆盖所选范围' : '';
   $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCovered || starting.has('outSync');
   $('outSync').textContent = outPhase || (outPending || starting.has('outSync') ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);
@@ -263,12 +266,11 @@ async function draw() {
   const job = s.job;
   const unfinished = job && job.status !== 'done';
   $('jobLine').hidden = !unfinished;
-  if (unfinished) $('jobLine').textContent = `数据还在读取，榜单会继续变。${jobText(job)}`;
+  if (unfinished) $('jobLine').textContent = `别人回我 · ${jobText(job)}`;
   if (view.open) view.detail = await fetchDetail();
   renderList();
 
   // 设置页：数据
-  const active = job && ['running', 'waiting_tab', 'paused', 'error'].includes(job.status);
   $('jobStatus').hidden = !job;
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
@@ -276,14 +278,15 @@ async function draw() {
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
   $('start').textContent = inPhase || (starting.has('start') ? '启动中' : '初始化');
-  $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || (inCovered && !active) || starting.has('start');
+  $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || inCovered || starting.has('start');
+  $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
+    : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const lb = s.cursor.lastBackfill;
   $('coverage').textContent =
     span(s.db.in) +
     (lb ? `上次初始化完成：${fmtTime(lb.finishedAt)}（最近${windowLabel(lb.rangeDays)}）。` : '') +
     (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
-    (inCovered && !active ? `已有${lb.reachedEnd ? '提及列表里能翻到的全部' : `${fmtDay(inFrom)}以来的完整`}数据，包含最近${windowLabel(rules.initDays)}，不用再初始化。` : '') +
     (s.mentionsApi === 'gql' ? '' : '当前可直接读取。你平时打开 X 通知页后，插件会自动启用新版读取方式。');
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
