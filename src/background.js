@@ -435,9 +435,9 @@ async function wakeJob(tabOnline) {
 // ---------- 增量 ----------
 
 /** 增量现在该不该跑：该跑返回 { account, cur, settings }，不该返回 null。 */
-async function incDue() {
+async function incDue(manualAccount) {
   const account = await kvGet(keys.current);
-  if (!account) return null;
+  if (!account || (manualAccount && manualAccount !== account)) return null;
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return null;
   const cur = await kvGet(keys.cursor(account), {});
@@ -446,20 +446,20 @@ async function incDue() {
   if (job && ['running', 'waiting_tab'].includes(job.status)) return null;
   if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
   const t = now();
-  if (t < (cur.nextIncAt || 0)) return null;
+  if (t < (cur.nextIncAt || 0) && (!manualAccount || cur.incResume || cur.serviceRetries || cur.rateUntil > t)) return null;
   if (!cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
   return { account, cur, settings };
 }
 
-async function maybeIncremental() {
+async function maybeIncremental(manualAccount) {
   // 正在跑的那个动作结束后会自己约下一次；到点没跑上的由兜底闹钟接上
-  if (busy || !(await incDue())) return;
-  if (busy) return;
+  if (busy || !(await incDue(manualAccount))) return false;
+  if (busy) return false;
   busy = true;
   let account = null;
   try {
-    const due = await incDue(); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
-    if (!due) return;
+    const due = await incDue(manualAccount); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
+    if (!due) return false;
     account = due.account;
     const { cur } = due;
 
@@ -479,7 +479,7 @@ async function maybeIncremental() {
     for (let page = 0; page < maxPages; page++) {
       if (page) await sleep(rand(gap));
       const res = await pull(account, cursor, api);
-      if (res.kind === 'no_tab') return; // 没有 X 标签页，等下次有页面上线再试，不记失败
+      if (res.kind === 'no_tab') return false; // 没有 X 标签页，等下次有页面上线再试
       if (res.kind === 'tpl_bad') {
         // 新接口的模板失效：一两分钟后用旧接口从最新一页重读这一段
         const when = now() + rand(PACE.restMs);
@@ -506,7 +506,12 @@ async function maybeIncremental() {
         return;
       }
       if (res.kind === 'rate') {
-        await armInc(await updateCursor(account, (c) => planNextInc(c, now()))); // 这一轮放弃，等下个周期
+        await armInc(await updateCursor(account, (c) => {
+          const next = planNextInc(c, now());
+          c.rateUntil = Math.max(next, res.resetAt || 0);
+          c.nextIncAt = c.rateUntil;
+          return c.nextIncAt;
+        }));
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
         return;
       }
@@ -537,6 +542,10 @@ async function maybeIncremental() {
       if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
       delete c.incResume;
       delete c.serviceRetries;
+      if (manualAccount && c.nextIncAt > now()) {
+        c.lastIncrementalAt = now();
+        return c.nextIncAt;
+      }
       return planNextInc(c, now());
     });
     await armInc(next);
@@ -763,6 +772,13 @@ const handlers = {
 
   // 弹窗
   getDiagnostics: () => readDiagnostics(),
+  async updateNow({ account }) {
+    if (!account || !await incDue(account) || busy) {
+      return { error: '当前无法更新。请先完成「别人回我」初始化，并等待正在运行的读取、最短更新间隔或退避结束。' };
+    }
+    const result = await maybeIncremental(account);
+    return result === false ? { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' } : { ok: true };
+  },
   async getState() {
     const accounts = await kvGet(keys.accounts, {});
     const current = await kvGet(keys.current);
@@ -824,7 +840,7 @@ const handlers = {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const h = msg && handlers[msg.type];
   if (!h) return false;
-  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData'].includes(msg.type);
+  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData', 'updateNow'].includes(msg.type);
   Promise.resolve().then(() => h(msg)).then(async (result) => {
     if (logged) await record(msg.type, { outcome: result?.error ? 'rejected' : 'accepted' });
     sendResponse(result);

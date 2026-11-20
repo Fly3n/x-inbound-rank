@@ -76,7 +76,11 @@
         <h2>数据读取 <button class="q" data-tip="tip-data" aria-label="数据读取说明">?</button></h2>
         <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段，自动更新只读取之后的新回复。榜单范围在榜单页单独设置。</p></div>
 
-        <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新两份数据</label>
+        <div class="row between">
+          <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新两份数据</label>
+          <button id="updateNow">立即更新</button>
+        </div>
+        <p class="hint" id="updateStatus" role="status"></p>
 
         <div class="row field">
           <span>初始化范围</span>

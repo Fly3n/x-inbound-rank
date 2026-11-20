@@ -268,7 +268,7 @@ async function draw() {
   renderList();
 
   // 设置页：数据
-  $('jobStatus').hidden = !job;
+  $('jobStatus').hidden = !job || job.status === 'done';
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
@@ -287,6 +287,8 @@ async function draw() {
     () => {},
   );
   $('fetchEnabled').checked = rules.fetchEnabled;
+  $('updateNow').disabled = !isSession || !rules.fetchEnabled || !s.cursor.syncedId || updatingNow;
+  $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
   for (const k of SHOW) $(k).checked = rules[k];
 
   // 设置页：口径与颜色
@@ -392,7 +394,7 @@ function download(name, lines) {
 const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
 const diagnosticNames = {
-  request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
+  updateNow: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
   retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
   pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据',
 };
@@ -475,6 +477,25 @@ async function initialize(id, type) {
   }
 }
 
+let updatingNow = false;
+$('updateNow').addEventListener('click', async () => {
+  const button = $('updateNow');
+  const status = $('updateStatus');
+  if (updatingNow || button.disabled) return;
+  updatingNow = true;
+  button.disabled = true;
+  button.textContent = '更新中…';
+  status.textContent = '';
+  try {
+    const result = await call('updateNow', { account: view.account });
+    status.textContent = result?.error || '本轮增量已触发，请查看两份数据的读取状态。';
+  } catch {
+    status.textContent = '未能确认更新结果，请查看数据状态。';
+  } finally {
+    updatingNow = false;
+    await render();
+  }
+});
 $('start').addEventListener('click', () => initialize('start', 'startBackfill'));
 $('outSync').addEventListener('click', () => initialize('outSync', 'syncOutNow'));
 $('keepExport').addEventListener('click', () => $('exportAll').click());
