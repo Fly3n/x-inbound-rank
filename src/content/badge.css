@@ -151,15 +151,22 @@
 
 .xir-sched-refresh {
   flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   padding: 0;
   border: 1px solid var(--xir-s-bd);
   border-radius: 999px;
   background: var(--xir-s-slot-bg);
-  color: var(--xir-s-fg);
-  font: 13px/22px inherit;
+  color: var(--xir-s-muted);
   cursor: pointer;
+}
+.xir-sched-refresh svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
 }
 .xir-sched-refresh:hover:not(:disabled) {
   border-color: #1d9bf0;
@@ -179,16 +186,24 @@
 
 .xir-sched-slot,
 .xir-sched-more {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--xir-s-bd);
   border-radius: 999px;
   background: var(--xir-s-slot-bg);
   color: var(--xir-s-fg);
-  font: 500 12px/26px inherit;
+  font: 500 12px/1 inherit;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.xir-sched-slot {
+  min-width: 54px;
 }
 
 .xir-sched-slot.is-hour {
@@ -227,9 +242,9 @@
 
 .xir-sched-drop {
   margin-top: 10px;
-  padding-top: 8px;
+  padding: 8px 2px 4px 0;
   border-top: 1px solid var(--xir-s-bd);
-  max-height: 220px;
+  max-height: 256px;
   overflow-y: auto;
 }
 
@@ -245,8 +260,8 @@
 }
 
 .xir-sched-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 6px;
 }
 

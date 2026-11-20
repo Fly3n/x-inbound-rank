@@ -16,8 +16,8 @@
     ampm: 'select[data-testid="scheduledDateSelectAmPm"]',
   };
 
-  const INLINE_LIMIT = 6; // 直接排列区最多展示最近 6 个半小时档，放不下的收进「更多档期」下拉
-  const DAYS_AHEAD = 7;
+  const INLINE_LIMIT = 7; // 直接排列区最多展示最近 7 个半小时档，放不下的收进「更多档期」下拉
+  const DAYS_AHEAD = 2; // 只看今天和明天
 
   let account = null;
   let enabled = true; // 设置页「发帖排期弹窗显示快捷档期」开关
@@ -191,7 +191,7 @@
     if (lastPicked) {
       const t = XIRSchedule.formatTime(lastPicked.filledTs);
       return lastPicked.ok
-        ? { text: `已填 ${t}（${lastPicked.label} 微调），请点下方确认`, tone: 'ok' }
+        ? { text: `已填 ${t}（${lastPicked.label} 微调），请点确认`, tone: 'ok' }
         : { text: `未能自动填入，请手动选 ${t}`, tone: 'warn' };
     }
     if (state.status === 'loading') return { text: '正在同步已排期列表…', tone: 'muted' };
@@ -233,7 +233,8 @@
     refresh.type = 'button';
     refresh.className = 'xir-sched-refresh';
     refresh.title = '立即刷新已排期列表';
-    refresh.textContent = '↻';
+    refresh.setAttribute('aria-label', '立即刷新已排期列表');
+    refresh.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.45-3.72l-1.55.02v1.3h3.7V1.9h-1.3l-.02 1.38A6.8 6.8 0 1 0 14.8 8h-1.3z"/></svg>';
     refresh.disabled = state.status === 'loading';
     refresh.addEventListener('click', (e) => {
       e.preventDefault();
@@ -263,19 +264,22 @@
     }
     panel.appendChild(row);
 
-    // 下拉列表：今天剩余全部 + 未来几天（共 7 天），已占置灰
+    // 下拉列表：今天横排之后剩余的档位 + 明天全天（07:00–24:00），不与上方横排重复
     if (dropOpen && hasMore) {
       const drop = document.createElement('div');
       drop.className = 'xir-sched-drop';
-      for (const group of plan.groups) {
+      for (let i = 0; i < plan.groups.length; i++) {
+        const group = plan.groups[i];
+        const slots = i === 0 ? group.slots.slice(INLINE_LIMIT) : group.slots;
+        if (!slots.length) continue;
         const sec = document.createElement('div');
         sec.className = 'xir-sched-day';
         const dayTitle = document.createElement('div');
         dayTitle.className = 'xir-sched-day-title';
-        dayTitle.textContent = group.title;
+        dayTitle.textContent = i === 0 ? `${group.title} · 其余档期` : group.title;
         const grid = document.createElement('div');
         grid.className = 'xir-sched-grid';
-        for (const slot of group.slots) grid.appendChild(makeSlotButton(slot, form, true));
+        for (const slot of slots) grid.appendChild(makeSlotButton(slot, form, true));
         sec.append(dayTitle, grid);
         drop.appendChild(sec);
       }
