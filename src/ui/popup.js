@@ -476,11 +476,16 @@ $('diagnostics').addEventListener('toggle', (e) => { if (e.target.open) showDiag
 $('refreshDiagnostics').addEventListener('click', () => showDiagnostics());
 $('exportDiagnostics').addEventListener('click', () => showDiagnostics(true));
 
+$('diagWindow').addEventListener('change', () => {
+  $('diagCustom').hidden = $('diagWindow').value !== 'custom';
+});
+
 $('diagnoseMentions').addEventListener('click', async () => {
   const button = $('diagnoseMentions');
   const status = $('diagnosisResult');
-  const from = new Date($('diagFrom').value).getTime();
-  const to = new Date($('diagTo').value).getTime();
+  const custom = $('diagWindow').value === 'custom';
+  const from = custom ? new Date($('diagFrom').value).getTime() : Date.parse('2026-11-20T17:00:00+08:00');
+  const to = custom ? new Date($('diagTo').value).getTime() : Date.parse('2026-11-20T18:00:00+08:00');
   const postId = $('diagPostId').value.trim();
   button.disabled = true;
   status.textContent = '正在限速回查，请保持弹窗和 X 页面打开。';
