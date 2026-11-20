@@ -787,8 +787,10 @@ const handlers = {
       const items = parseScheduledTweets(JSON.parse(text));
       const syncedAt = now();
       await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
+      await record('scheduled_sync', { source: 'scheduled', mode: 'tap', outcome: 'ok', count: items.length });
       return { ok: true, items, syncedAt };
-    } catch {
+    } catch (e) {
+      await record('parse_failed', { source: 'scheduled', mode: 'tap', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
       return {};
     }
   },
@@ -796,7 +798,7 @@ const handlers = {
     const account = await kvGet(keys.current);
     if (!account) return {};
     const ts = Number.isFinite(at) ? at : now();
-    if (op === 'CreateTweet' || op === 'CreateScheduledTweet') {
+    if (op === 'CreateTweet') {
       await kvSet(keys.lastPostAt(account), ts);
     }
     if (op === 'CreateScheduledTweet' || op === 'DeleteScheduledTweet') {
@@ -812,16 +814,18 @@ const handlers = {
     const lastPostAt = (await kvGet(keys.lastPostAt(account))) || 0;
     const tpl = await kvGet(keys.tplScheduled);
     if (!tpl) {
+      await record('scheduled_sync', { source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'need_tpl' });
       return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '点一下下方「已排期帖子」完成首次同步' };
     }
     // 30 秒防抖：连续开关排期弹窗不重复发请求
     if (!force && cached.syncedAt && now() - cached.syncedAt < 30_000) {
       return { items: cached.items || [], syncedAt: cached.syncedAt, lastPostAt, status: 'ok' };
     }
-    const r = await fetchViaTab({ kind: 'scheduled', tpl: tpl.url }, { mode: 'scheduled_sync', run: now(), page: 1 });
+    const r = await fetchViaTab({ kind: 'scheduled', tpl: tpl.url }, { mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 });
     if (r.error === 'no_tab') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '未连接到 X 页面，已显示上次缓存' };
     if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
       await kvRemove(keys.tplScheduled);
+      await record('scheduled_sync', { source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'tpl_expired', status: r.status || 0 });
       return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '接口参数已更新，请点一下「已排期帖子」重新连接' };
     }
     if (r.status === 429) return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '暂时被 X 限流（429），已显示上次缓存' };
@@ -830,8 +834,10 @@ const handlers = {
       const items = parseScheduledTweets(r.body);
       const syncedAt = now();
       await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
+      await record('scheduled_sync', { source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'ok', count: items.length });
       return { items, syncedAt, lastPostAt, status: 'ok' };
     } catch (e) {
+      await record('parse_failed', { source: 'scheduled', mode: force ? 'manual' : 'auto', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
       const why = e instanceof ParseError ? e.message : String(e);
       return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `排期解析失败：${why}` };
     }

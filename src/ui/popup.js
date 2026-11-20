@@ -407,11 +407,11 @@ const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
 const diagnosticNames = {
   updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
   retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
-  pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据',
+  pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据', scheduled_sync: '同步排期',
 };
 const diagnosticSources = {
   'mentions-graphql': '别人回我 · 新接口', 'mentions-rest': '别人回我 · 旧接口',
-  mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新',
+  mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新', scheduled: '发帖排期',
 };
 
 async function loadDiagnostics() {
@@ -439,7 +439,10 @@ async function showDiagnostics(exportAll = false) {
     status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
       textContent: [fmtTime(r.at), diagnosticNames[r.event] || r.event, diagnosticSources[r.source],
-        r.status ? `HTTP ${r.status}` : r.event === 'request' ? ({ no_tab: 'X 页面未连接', network: '网络请求失败', no_session: '未登录', bad_tpl: '读取参数失效' }[r.outcome] || '读取未成功') : '', r.added != null && `新增 ${r.added} 条`,
+        r.status ? `HTTP ${r.status}` : r.event === 'request' ? ({ no_tab: 'X 页面未连接', network: '网络请求失败', no_session: '未登录', bad_tpl: '读取参数失效' }[r.outcome] || '读取未成功')
+          : r.event === 'scheduled_sync' ? ({ ok: '成功', need_tpl: '等待首次连接', tpl_expired: '参数已过期' }[r.outcome] || r.outcome || '') : '',
+        r.count != null && `共 ${r.count} 条`,
+        r.added != null && `新增 ${r.added} 条`,
         r.waitMs && `${r.waitMs / 60_000} 分钟后`].filter(Boolean).join(' · '),
     })));
     if (!exportAll || !rows.length) return;
