@@ -231,8 +231,6 @@ async function draw() {
 
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
   const outBad = out?.message || '';
-  // 每份数据一行现状：本机有多少条、从哪天到哪天、上次初始化和上次更新是什么时候
-  const span = (d) => (d.count ? `本机 ${d.count} 条，${fmtDay(d.from)} – ${fmtDay(d.to)}。` : '本机还没有数据。');
   const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
   const outPhase = running ? '进行中' : out?.status === 'queued' ? '排队中'
     : out?.status === 'need_tpl' ? '等待回复页' : out?.status === 'waiting_tab' ? '等待 X 页面'
@@ -240,7 +238,6 @@ async function draw() {
   const outPending = !!outPhase || out?.fullFor === 0 && out?.status !== 'error';
   const outProgress = running ? `进行中，本轮已读 ${running.pages} 页。`
     : outPhase ? `${outPhase}。` : '';
-  $('outStatus').textContent = span(s.db.out) + (out?.lastAt ? `上次更新：${fmtTime(out.lastAt)}。` : '');
   $('outIssue').textContent = outBad;
   $('outIssue').hidden = !outBad;
   const handle = g.accounts[view.account]?.handle;
@@ -282,12 +279,8 @@ async function draw() {
   $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
-  const lb = s.cursor.lastBackfill;
-  $('coverage').textContent =
-    span(s.db.in) +
-    (lb ? `上次初始化完成：${fmtTime(lb.finishedAt)}（最近${windowLabel(lb.rangeDays)}）。` : '') +
-    (s.cursor.lastIncrementalAt ? `上次更新：${fmtTime(s.cursor.lastIncrementalAt)}。` : '') +
-    (s.mentionsApi === 'gql' ? '' : '当前可直接读取。你平时打开 X 通知页后，插件会自动启用新版读取方式。');
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, s.cursor.lastIncrementalAt);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, out?.lastAt);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -300,6 +293,19 @@ async function draw() {
   setValue($('topN'), rules.topN);
   setValue($('minCount'), rules.minCount);
   renderTiers(rules);
+}
+
+function renderDataStatus(id, data, initializedAt, days, updatedAt) {
+  const fields = [
+    ['本机条数', `${data.count} 条`],
+    ['记录日期', data.count ? `${fmtDay(data.from)} – ${fmtDay(data.to)}` : '暂无记录'],
+    ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
+    ['上次读取', updatedAt ? fmtTime(updatedAt) : '暂无记录'],
+  ];
+  $(id).replaceChildren(...fields.flatMap(([label, value]) => [
+    el('dt', { textContent: label }),
+    el('dd', { textContent: value }),
+  ]));
 }
 
 async function act(type, extra) {

@@ -76,6 +76,8 @@
         <h2>数据读取 <button class="q" data-tip="tip-data" aria-label="数据读取说明">?</button></h2>
         <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段，自动更新只读取之后的新回复。榜单范围在榜单页单独设置。</p></div>
 
+        <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新两份数据</label>
+
         <div class="row field">
           <span>初始化范围</span>
           <select id="initRange">
@@ -101,7 +103,7 @@
           <div class="tip" id="tip-in" hidden><p>统计在我帖子下直接回复我的次数，决定榜单排名。</p></div>
           <details class="settings-detail">
             <summary>数据状态</summary>
-            <p class="hint" id="coverage"></p>
+            <dl class="data-status" id="coverage"></dl>
           </details>
         </div>
 
@@ -114,18 +116,18 @@
           <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回」。</p></div>
           <details class="settings-detail">
             <summary>数据状态</summary>
-            <p class="hint" id="outStatus"></p>
+            <dl class="data-status" id="outStatus"></dl>
           </details>
           <p class="hint" id="outIssue" role="status" hidden></p>
           <a id="outRepliesLink" target="_blank" rel="noreferrer" hidden>打开我的回复页</a>
         </div>
 
-        <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新：约每小时把两份数据各读一次</label>
-        <details class="settings-detail">
-          <summary>本机存储</summary>
-          <p class="hint" id="storage"></p>
-        </details>
       </section>
+
+      <details class="card fold">
+        <summary>本机存储（两份数据合计）</summary>
+        <p class="hint" id="storage"></p>
+      </details>
 
       <section class="card">
         <h2>时间线上显示什么 <button class="q" data-tip="tip-show" aria-label="时间线上显示什么说明">?</button></h2>
