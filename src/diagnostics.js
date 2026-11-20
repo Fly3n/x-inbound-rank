@@ -9,7 +9,7 @@ export function record(event, fields) {
   const key = PREFIX + Math.floor(at / HOUR);
   writes = writes.then(async () => {
     const stored = await chrome.storage.local.get(key);
-    await chrome.storage.local.set({ [key]: [...(stored[key] || []), { at, event, ...fields }] });
+    await chrome.storage.local.set({ [key]: [...(stored[key] || []), { at, event, version: chrome.runtime.getManifest?.().version ?? null, ...fields }] });
   }).catch(() => {});
   return writes;
 }

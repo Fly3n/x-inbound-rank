@@ -439,12 +439,21 @@ async function showDiagnostics(exportAll = false) {
     status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
       textContent: [fmtTime(r.at), diagnosticNames[r.event] || r.event, diagnosticSources[r.source],
-        r.status && `HTTP ${r.status}`, r.added != null && `新增 ${r.added} 条`,
+        r.status ? `HTTP ${r.status}` : r.event === 'request' ? ({ no_tab: 'X 页面未连接', network: '网络请求失败', no_session: '未登录', bad_tpl: '读取参数失效' }[r.outcome] || '读取未成功') : '', r.added != null && `新增 ${r.added} 条`,
         r.waitMs && `${r.waitMs / 60_000} 分钟后`].filter(Boolean).join(' · '),
     })));
     if (!exportAll || !rows.length) return;
+    const report = {
+      schemaVersion: 2,
+      exportedAt: new Date().toISOString(),
+      extensionVersion: chrome.runtime.getManifest().version,
+      platform: navigator.platform,
+      browser: navigator.userAgent.match(/(?:Chrome|Chromium|Edg|Firefox|Version)\/[0-9.]+/g) || [],
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      events: rows,
+    };
     const link = el('a', {
-      href: URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' })),
+      href: URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })),
       download: 'X回复榜-诊断日志.json',
     });
     document.body.append(link);

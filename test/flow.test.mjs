@@ -147,6 +147,11 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   const expiredKey = `diagnostics:${oldHour}`;
   store[expiredKey] = [{ at: oldHour * 3_600_000, event: 'expired' }];
   const diagnostics = await send({ type: 'getDiagnostics' });
+  const failedPage = diagnostics.find((event) => event.event === 'request' && event.status === 503);
+  assert.equal(failedPage.mode, 'inbound_backfill');
+  assert.equal(failedPage.page, 2);
+  assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' &&
+    event.run === failedPage.run && event.page === failedPage.page));
   assert.equal(store[expiredKey], undefined);
   assert.ok(diagnostics.some((event) => event.event === 'request' && event.status === 503 && event.continuation));
   assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' && event.status === 503));

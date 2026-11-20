@@ -96,15 +96,17 @@ async function bindManualHandle(raw) {
 const temporaryUnavailable = (status) => [502, 503, 504].includes(status);
 const serviceWait = (attempt = 0) => Math.min(60, 5 * 2 ** attempt) * 60_000;
 
-async function fetchViaTab(req) {
+async function fetchViaTab(req, trace) {
   const started = now();
   const source = req.kind === 'out' ? 'replies' : req.tpl ? 'mentions-graphql' : 'mentions-rest';
+  let tabsTried = 0;
   const report = async (result) => {
-    await record('request', { source, status: result.status || 0, outcome: result.error || 'response', continuation: !!req.cursor, durationMs: now() - started });
+    await record('request', { ...trace, source, tabsTried, retryResetAt: result.rateResetAt ?? null, status: result.status || 0, outcome: result.error || 'response', continuation: !!req.cursor, durationMs: now() - started });
     return result;
   };
   const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
   for (const tab of tabs) {
+    tabsTried++;
     try {
       const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', ...req });
       if (r) return report(r);
@@ -139,14 +141,14 @@ const mentionsApi = async () => ((await kvGet(keys.tplMentions)) ? 'gql' : 'rest
  * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'error',message}
  * tpl_bad：新接口的模板没了或过期了（已删掉），调用方改用旧接口从最新一页重来。
  */
-async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }) {
+async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }, trace) {
   if (!(await getSettings(account)).fetchEnabled) return { kind: 'error', message: '后台抓取已关闭' };
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return { kind: 'error', message: '账号未绑定' };
 
   const tpl = api === 'gql' ? await kvGet(keys.tplMentions) : null;
   if (api === 'gql' && !tpl) return { kind: 'tpl_bad' };
-  const r = await fetchViaTab({ cursor, tpl: tpl?.url });
+  const r = await fetchViaTab({ cursor, tpl: tpl?.url }, trace);
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (tpl && (r.error === 'bad_tpl' || r.status === 400 || r.status === 404)) {
     await kvRemove(keys.tplMentions); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口
@@ -167,7 +169,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   try {
     parsed = parseMentions(r.body, me);
   } catch (e) {
-    await record('parse_failed', { source: 'mentions' });
+    await record('parse_failed', { ...trace, source: 'mentions', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
     const why = e instanceof ParseError ? e.message : String(e);
     return { kind: 'error', message: `解析失败：${why}。X 的返回结构可能已变更，需要更新解析层` };
   }
@@ -176,7 +178,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   const added = await putEvents(account, parsed.events);
   batch.read += parsed.events.length;
   batch.added += added;
-  await record('page_saved', { source: 'mentions', entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
+  await record('page_saved', { ...trace, source: 'mentions', oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
     cur.inLastReadAt = readAt;
     cur.inLastReadCounts = { ...batch };
@@ -317,7 +319,8 @@ async function stepBackfill() {
     account = cur.account;
     const job = cur.job;
 
-    const res = await pull(account, job.cursor, job.api || 'rest');
+    const trace = { mode: 'inbound_backfill', run: job.startedAt, page: job.pages + 1 };
+    const res = await pull(account, job.cursor, job.api || 'rest', undefined, trace);
     // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
     const latest = await kvGet(keys.job(account));
     if (!latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
@@ -342,7 +345,7 @@ async function stepBackfill() {
       const wait = serviceWait(job.serviceRetries);
       job.serviceRetries = (job.serviceRetries || 0) + 1;
       await scheduleJob(job, wait);
-      await record('retry_scheduled', { source: 'backfill', status: res.status, waitMs: wait });
+      await record('retry_scheduled', { ...trace, source: 'backfill', status: res.status, waitMs: wait });
     } else if (res.kind === 'rate') {
       job.status = 'paused';
       job.auto = true;
@@ -481,10 +484,12 @@ async function maybeIncremental(manualAccount) {
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let caughtUp = false;
+    const run = now();
     const batch = { read: 0, added: 0 };
     for (let page = 0; page < maxPages; page++) {
       if (page) await sleep(rand(gap));
-      const res = await pull(account, cursor, api, batch);
+      const trace = { mode: manualAccount ? 'inbound_manual' : 'inbound_auto', run, page: page + 1 };
+      const res = await pull(account, cursor, api, batch, trace);
       if (res.kind === 'no_tab') return false; // 没有 X 标签页，等下次有页面上线再试
       if (res.kind === 'tpl_bad') {
         // 新接口的模板失效：一两分钟后用旧接口从最新一页重读这一段
@@ -508,7 +513,7 @@ async function maybeIncremental(manualAccount) {
         });
         await chrome.alarms.create(INC_ALARM, { when });
         await setAlert(account, `X 暂时不可用（HTTP ${res.status}），稍后重试`);
-        await record('retry_scheduled', { source: 'incremental', status: res.status, waitMs: wait });
+        await record('retry_scheduled', { ...trace, source: 'incremental', status: res.status, waitMs: wait });
         return { message: `别人回我读取失败（HTTP ${res.status}），已安排重试。` };
       }
       if (res.kind === 'rate') {
@@ -621,11 +626,13 @@ async function syncOut(expectedAccount) {
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
     let pages = 0;
+    const run = now();
     const batch = { read: 0, added: 0 };
     for (; pages < maxPages; pages++) {
       if (pages) await sleep(rand(gap));
       if (!(await getSettings(account)).fetchEnabled) return saveOut(account, { status: 'error', message: '自动更新已关闭，读取已暂停。' });
-      const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor });
+      const trace = { mode: full ? 'outbound_backfill' : expectedAccount ? 'outbound_manual' : 'outbound_auto', run, page: pages + 1 };
+      const r = await fetchViaTab({ kind: 'out', tpl: tpl.url, cursor }, trace);
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
       if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', message: '打开或刷新一个 X 页面后自动继续。' });
       if (r.userId && me.userId && r.userId !== me.userId) return saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
@@ -635,7 +642,7 @@ async function syncOut(expectedAccount) {
         await saveOut(account, { status: 'queued', retryAt, resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, serviceRetries: (prev.serviceRetries || 0) + 1,
           message: `X 暂时不可用（HTTP ${r.status}），稍后继续读取。` });
         await chrome.alarms.create(OUT_ALARM, { when: retryAt });
-        await record('retry_scheduled', { source: 'replies', status: r.status, waitMs: wait });
+        await record('retry_scheduled', { ...trace, source: 'replies', status: r.status, waitMs: wait });
         return;
       }
       if (r.status === 429) return saveOut(account, { status: 'error', message: 'X 暂时限制了读取（429），请稍后再试。' });
@@ -649,14 +656,14 @@ async function syncOut(expectedAccount) {
       try {
         p = parseMyReplies(r.body, me);
       } catch (e) {
-        await record('parse_failed', { source: 'replies' });
+        await record('parse_failed', { ...trace, source: 'replies', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
         return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
       }
       const readAt = now();
       const added = await putEvents(account, p.events, OUT);
       batch.read += p.events.length;
       batch.added += added;
-      await record('page_saved', { source: 'replies', parsed: p.events.length, added, more: !!p.bottomCursor });
+      await record('page_saved', { ...trace, source: 'replies', oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
       await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
