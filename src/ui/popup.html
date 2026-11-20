@@ -200,6 +200,15 @@
       <details class="card fold" id="diagnostics">
         <summary>本地诊断日志</summary>
         <p class="hint">保留最近 7 天。显示最近 10 条，导出包含帖子编号和处理原因，分享前请先检查。</p>
+        <details class="settings-detail">
+          <summary>按时间回查「别人回我」</summary>
+          <p class="hint">从最新提及往前查，单次最多 20 页。时间按浏览器本地时区。</p>
+          <label class="line">开始 <input id="diagFrom" type="datetime-local"></label>
+          <label class="line">结束 <input id="diagTo" type="datetime-local"></label>
+          <label class="line">帖子编号（可选） <input id="diagPostId" inputmode="numeric" maxlength="24"></label>
+          <button id="diagnoseMentions">开始回查</button>
+          <p id="diagnosisResult" role="status"></p>
+        </details>
         <p id="diagnosticStatus" role="status"></p>
         <ul id="diagnosticRows"></ul>
         <div class="row">

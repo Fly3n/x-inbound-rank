@@ -375,6 +375,17 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, '连续点击仍受间隔限制');
   await set({ fetchEnabled: false });
 
+  await set({ fetchEnabled: true });
+  const checkpoint = store['cursor:me'].syncedId;
+  const reading = store['cursor:me'].inLastReadAt;
+  const diagnosis = await send({ type: 'diagnoseMentions', account: 'me',
+    from: Date.now() - 60_000, to: Date.now(), postId: feed[0].id_str });
+  assert.equal(diagnosis.reason, 'post_found');
+  assert.equal(diagnosis.stored, true);
+  assert.equal(store['cursor:me'].syncedId, checkpoint);
+  assert.equal(store['cursor:me'].inLastReadAt, reading);
+  await set({ fetchEnabled: false });
+
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });
   assert.equal(await count(), 0);

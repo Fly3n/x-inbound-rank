@@ -405,6 +405,7 @@ function download(name, lines) {
 const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
 const diagnosticNames = {
+  diagnostic_start: '开始回查', diagnostic_page: '回查一页', diagnostic_end: '回查结束',
   pagination_stop: '结束翻页', updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
   retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
   pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据', scheduled_sync: '同步排期',
@@ -474,6 +475,37 @@ async function showDiagnostics(exportAll = false) {
 $('diagnostics').addEventListener('toggle', (e) => { if (e.target.open) showDiagnostics(); });
 $('refreshDiagnostics').addEventListener('click', () => showDiagnostics());
 $('exportDiagnostics').addEventListener('click', () => showDiagnostics(true));
+
+$('diagnoseMentions').addEventListener('click', async () => {
+  const button = $('diagnoseMentions');
+  const status = $('diagnosisResult');
+  const from = new Date($('diagFrom').value).getTime();
+  const to = new Date($('diagTo').value).getTime();
+  const postId = $('diagPostId').value.trim();
+  button.disabled = true;
+  status.textContent = '正在限速回查，请保持弹窗和 X 页面打开。';
+  try {
+    const result = await call('diagnoseMentions', { account: view.account, from, to, postId });
+    if (!result || result.error) {
+      status.textContent = result?.error || '回查未返回结果，请重载扩展后重试。';
+      return;
+    }
+    const reasons = {
+      post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
+      page_limit: '达到 20 页上限，可能尚未覆盖时间窗', repeated_cursor: 'X 返回了重复的翻页位置',
+      no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
+      account_changed: '登录账号已切换',
+    };
+    const outcome = result.target
+      ? `；解析判定 ${result.target.reason}，本机${result.stored ? '已有' : '没有'}这条记录` : '';
+    status.textContent = `尝试 ${result.pages} 页，窗口内解析出 ${result.matches} 条。${reasons[result.reason] || `停止原因：${result.reason}`}${outcome}。可导出日志查看细节。`;
+    await showDiagnostics();
+  } catch {
+    status.textContent = '回查未能完成，可刷新日志查看已记录的页。';
+  } finally {
+    button.disabled = false;
+  }
+});
 
 // 导出榜单：当前榜上的人，一人一行
 $('exportBoard').addEventListener('click', () =>

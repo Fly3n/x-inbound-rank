@@ -141,7 +141,7 @@ const mentionsApi = async () => ((await kvGet(keys.tplMentions)) ? 'gql' : 'rest
  * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'error',message}
  * tpl_bad：新接口的模板没了或过期了（已删掉），调用方改用旧接口从最新一页重来。
  */
-async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }, trace) {
+async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }, trace, inspectOnly = false) {
   if (!(await getSettings(account)).fetchEnabled) return { kind: 'error', message: '后台抓取已关闭' };
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return { kind: 'error', message: '账号未绑定' };
@@ -151,7 +151,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   const r = await fetchViaTab({ cursor, tpl: tpl?.url }, trace);
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (tpl && (r.error === 'bad_tpl' || r.status === 400 || r.status === 404)) {
-    await kvRemove(keys.tplMentions); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口
+    if (!inspectOnly) await kvRemove(keys.tplMentions); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口
     return { kind: 'tpl_bad' };
   }
   if (r.userId && me.userId && r.userId !== me.userId) {
@@ -175,6 +175,14 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
     await record('parse_failed', { ...trace, source: 'mentions', decisions, category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
     const why = e instanceof ParseError ? e.message : String(e);
     return { kind: 'error', message: `解析失败：${why}。X 的返回结构可能已变更，需要更新解析层` };
+  }
+
+  if (inspectOnly) {
+    await record('diagnostic_page', {
+      ...trace, source: 'mentions', decisions, entries: parsed.entryIds.length,
+      oldestAt: parsed.oldestTs, more: !!parsed.bottomCursor,
+    });
+    return { kind: 'ok', parsed, decisions };
   }
 
   const readAt = now();
@@ -457,6 +465,7 @@ async function incDue(manualAccount) {
   if (job && ['running', 'waiting_tab'].includes(job.status)) return null;
   if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
   const t = now();
+  if (cur.rateUntil > t) return null;
   if (t < (cur.nextIncAt || 0) && (!manualAccount || cur.incResume || cur.serviceRetries || cur.rateUntil > t)) return null;
   if (!cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
   return { account, cur, settings };
@@ -671,7 +680,7 @@ async function syncOut(expectedAccount) {
       const added = await putEvents(account, p.events, OUT);
       batch.read += p.events.length;
       batch.added += added;
-      await record('page_saved', { ...trace, source: 'replies', oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
+      await record('page_saved', { ...trace, source: 'replies', posts: p.events.map(({ id, own, created_at }) => ({ postId: id, own: !!own, createdAt: created_at })), oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
       await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
@@ -756,6 +765,59 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+async function diagnoseMentions({ account, from, to, postId }) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to - from > DAY_MS ||
+      (postId && !/^\d{1,24}$/.test(postId))) {
+    return { error: '请选择一个不超过 24 小时的时间窗，帖子编号只填数字。' };
+  }
+  if (!account || account !== await kvGet(keys.current)) return { error: '请切换到当前登录的 X 账号。' };
+  const state = await kvGet(keys.cursor(account), {});
+  const job = await kvGet(keys.job(account));
+  if (busy || (state.rateUntil || 0) > now() || state.serviceRetries && state.nextIncAt > now() ||
+      job?.status === 'running' || job?.status === 'paused' && job.auto) {
+    return { error: '正在读取或处于退避期，请稍后回查。' };
+  }
+  busy = true;
+  const run = now();
+  try {
+    const api = await mentionsApi();
+    await record('diagnostic_start', { source: 'mentions', run, api, from, to, postId: postId || null });
+    let cursor = null;
+    let pages = 0;
+    let matches = 0;
+    let reason = 'page_limit';
+    let target = null;
+    for (let page = 1; page <= PACE.batchPages; page++) {
+      if (page > 1) await sleep(rand(PACE.pageGapMs));
+      if (account !== await kvGet(keys.current)) { reason = 'account_changed'; break; }
+      pages = page;
+      const result = await pull(account, cursor, api, undefined, { mode: 'inbound_diagnostic', run, page }, true);
+      if (result.kind !== 'ok') {
+        reason = result.kind === 'unavailable' || result.kind === 'rate' ? String(result.status || 429) : result.kind;
+        if (result.kind === 'rate' || result.kind === 'unavailable') {
+          await updateCursor(account, (c) => {
+            c.rateUntil = Math.max(c.rateUntil || 0, result.resetAt || 0, now() + PACE.backoffStartMs);
+          });
+        }
+        break;
+      }
+      const { parsed, decisions } = result;
+      matches += parsed.events.filter((event) => event.created_at >= from && event.created_at <= to).length;
+      target = postId ? decisions.find((item) => item.postId === postId) : null;
+      if (target) { reason = 'post_found'; break; }
+      if (parsed.oldestTs && parsed.oldestTs <= from) { reason = 'window_start'; break; }
+      if (!parsed.bottomCursor) { reason = 'end_of_feed'; break; }
+      if (parsed.bottomCursor === cursor) { reason = 'repeated_cursor'; break; }
+      cursor = parsed.bottomCursor;
+    }
+    const stored = postId ? (await getEvents(account)).some((event) => event.id === postId) : null;
+    await record('diagnostic_end', { source: 'mentions', run, pages, matches, reason, target, stored });
+    return { pages, matches, reason, target, stored };
+  } finally {
+    busy = false;
+  }
+}
+
 const handlers = {
   // 内容脚本
   async 'xir:hello'(msg) {
@@ -795,7 +857,7 @@ const handlers = {
       const items = parseScheduledTweets(JSON.parse(text));
       const syncedAt = now();
       await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
-      await record('scheduled_sync', { source: 'scheduled', mode: 'tap', outcome: 'ok', count: items.length });
+      await record('scheduled_sync', { source: 'scheduled', mode: 'tap', outcome: 'ok', count: items.length, scheduledTimes: items.map(({ executeAt }) => executeAt) });
       return { ok: true, items, syncedAt };
     } catch (e) {
       await record('parse_failed', { source: 'scheduled', mode: 'tap', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
@@ -842,7 +904,7 @@ const handlers = {
       const items = parseScheduledTweets(r.body);
       const syncedAt = now();
       await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
-      await record('scheduled_sync', { source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'ok', count: items.length });
+      await record('scheduled_sync', { source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'ok', count: items.length, scheduledTimes: items.map(({ executeAt }) => executeAt) });
       return { items, syncedAt, lastPostAt, status: 'ok' };
     } catch (e) {
       await record('parse_failed', { source: 'scheduled', mode: force ? 'manual' : 'auto', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
@@ -864,6 +926,7 @@ const handlers = {
 
   // 弹窗
   getDiagnostics: () => readDiagnostics(),
+  diagnoseMentions,
   async updateNowWithReceipt({ account }) {
     const startedAt = now();
     if (!account || !await incDue(account) || busy) {
