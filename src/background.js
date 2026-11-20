@@ -1,6 +1,7 @@
 // 后台调度：账号绑定、回填任务、增量更新、给界面供数。
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
+import { record, readDiagnostics } from './diagnostics.js';
 import { parseMentions, parseMyReplies, ParseError, idGt } from './x/parser.js';
 import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
@@ -92,17 +93,26 @@ async function bindManualHandle(raw) {
 
 // ---------- 抓取一页（经 x.com 标签页） ----------
 
+const temporaryUnavailable = (status) => [502, 503, 504].includes(status);
+const serviceWait = (attempt = 0) => Math.min(60, 5 * 2 ** attempt) * 60_000;
+
 async function fetchViaTab(req) {
+  const started = now();
+  const source = req.kind === 'out' ? 'replies' : req.tpl ? 'mentions-graphql' : 'mentions-rest';
+  const report = async (result) => {
+    await record('request', { source, status: result.status || 0, outcome: result.error || 'response', continuation: !!req.cursor, durationMs: now() - started });
+    return result;
+  };
   const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
   for (const tab of tabs) {
     try {
       const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', ...req });
-      if (r) return r;
+      if (r) return report(r);
     } catch {
       // 该标签页没有内容脚本（装插件前打开的、或已被休眠），换下一个
     }
   }
-  return { ok: false, error: 'no_tab' };
+  return report({ ok: false, error: 'no_tab' });
 }
 
 /** 问一圈开着的 X 页面：有没有连着插件的、是哪一版、见过哪些接口请求。没有连着的返回 null。 */
@@ -145,6 +155,7 @@ async function pull(account, cursor, api = 'rest') {
   if (r.userId && me.userId && r.userId !== me.userId) {
     return { kind: 'error', message: `当前登录的 X 账号不是 @${me.handle}，已停止，避免数据串号` };
   }
+  if (temporaryUnavailable(r.status)) return { kind: 'unavailable', status: r.status };
   if (r.status === 429) return { kind: 'rate', resetAt: r.rateResetAt };
   if (r.error === 'no_session' || r.status === 401 || r.status === 403) {
     return { kind: 'error', message: `X 登录状态无效或请求被拒（${r.status || '无会话'}），请确认已登录后重试` };
@@ -156,11 +167,13 @@ async function pull(account, cursor, api = 'rest') {
   try {
     parsed = parseMentions(r.body, me);
   } catch (e) {
+    await record('parse_failed', { source: 'mentions' });
     const why = e instanceof ParseError ? e.message : String(e);
     return { kind: 'error', message: `解析失败：${why}。X 的返回结构可能已变更，需要更新解析层` };
   }
 
   const added = await putEvents(account, parsed.events);
+  await record('page_saved', { source: 'mentions', entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
     if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
     if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
@@ -317,6 +330,14 @@ async function stepBackfill() {
     } else if (res.kind === 'no_tab') {
       job.status = 'waiting_tab';
       job.message = '没有可用的 X 标签页。打开或刷新一个 x.com 页面后自动继续';
+    } else if (res.kind === 'unavailable') {
+      job.status = 'paused';
+      job.auto = true;
+      job.message = `X 暂时不可用（HTTP ${res.status}），稍后从当前页重试`;
+      const wait = serviceWait(job.serviceRetries);
+      job.serviceRetries = (job.serviceRetries || 0) + 1;
+      await scheduleJob(job, wait);
+      await record('retry_scheduled', { source: 'backfill', status: res.status, waitMs: wait });
     } else if (res.kind === 'rate') {
       job.status = 'paused';
       job.auto = true;
@@ -336,6 +357,7 @@ async function stepBackfill() {
       job.added += res.added;
       job.message = null;
       job.backoffMs = PACE.backoffStartMs;
+      job.serviceRetries = 0;
       if (p.oldestTs) job.oldestTs = p.oldestTs;
 
       if (p.oldestTs && p.oldestTs <= job.targetTs) {
@@ -425,7 +447,7 @@ async function incDue() {
   if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
   const t = now();
   if (t < (cur.nextIncAt || 0)) return null;
-  if (!cur.incResume && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
+  if (!cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
   return { account, cur, settings };
 }
 
@@ -471,6 +493,18 @@ async function maybeIncremental() {
       await updateCursor(account, (c) => {
         c.lastAttemptAt = now();
       });
+      if (res.kind === 'unavailable') {
+        const wait = serviceWait(cur.serviceRetries);
+        const when = now() + wait;
+        await updateCursor(account, (c) => {
+          c.nextIncAt = when;
+          c.serviceRetries = (c.serviceRetries || 0) + 1;
+        });
+        await chrome.alarms.create(INC_ALARM, { when });
+        await setAlert(account, `X 暂时不可用（HTTP ${res.status}），稍后重试`);
+        await record('retry_scheduled', { source: 'incremental', status: res.status, waitMs: wait });
+        return;
+      }
       if (res.kind === 'rate') {
         await armInc(await updateCursor(account, (c) => planNextInc(c, now()))); // 这一轮放弃，等下个周期
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
@@ -502,6 +536,7 @@ async function maybeIncremental() {
       // 读的过程中被清空了（没有 syncedId）就不补：清空后要重新初始化才自动抓
       if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
       delete c.incResume;
+      delete c.serviceRetries;
       return planNextInc(c, now());
     });
     await armInc(next);
@@ -541,8 +576,9 @@ async function syncOut() {
     const cur = await kvGet(keys.cursor(account), {});
 
     const prev = cur.out || {};
-    if (prev.resume?.nextAt > now()) {
-      await chrome.alarms.create(OUT_ALARM, { when: prev.resume.nextAt });
+    const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0);
+    if (nextAt > now()) {
+      await chrome.alarms.create(OUT_ALARM, { when: nextAt });
       return;
     }
     const initDays = prev.initDays ?? settings.initDays;
@@ -561,7 +597,7 @@ async function syncOut() {
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
-    await saveOut(account, { status: 'reading', message: null, running: { at: now(), pages: 0 } });
+    await saveOut(account, { status: 'reading', retryAt: null, message: null, running: { at: now(), pages: 0 } });
     const tpl = await kvGet(keys.tpl);
     if (!tpl) return saveOut(account, { status: 'need_tpl', message: '打开 X 的「回复」栏一次，插件会自动继续。' });
     let cursor = resume?.cursor || null;
@@ -576,6 +612,15 @@ async function syncOut() {
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
       if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', message: '打开或刷新一个 X 页面后自动继续。' });
       if (r.userId && me.userId && r.userId !== me.userId) return saveOut(account, { status: 'error', message: `当前登录的 X 账号不是 @${me.handle}，没有读` });
+      if (temporaryUnavailable(r.status)) {
+        const wait = serviceWait(prev.serviceRetries);
+        const retryAt = now() + wait;
+        await saveOut(account, { status: 'queued', retryAt, resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, serviceRetries: (prev.serviceRetries || 0) + 1,
+          message: `X 暂时不可用（HTTP ${r.status}），稍后继续读取。` });
+        await chrome.alarms.create(OUT_ALARM, { when: retryAt });
+        await record('retry_scheduled', { source: 'replies', status: r.status, waitMs: wait });
+        return;
+      }
       if (r.status === 429) return saveOut(account, { status: 'error', message: 'X 暂时限制了读取（429），请稍后再试。' });
       if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
         await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
@@ -587,11 +632,13 @@ async function syncOut() {
       try {
         p = parseMyReplies(r.body, me);
       } catch (e) {
+        await record('parse_failed', { source: 'replies' });
         return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
       }
-      await putEvents(account, p.events, OUT);
+      const added = await putEvents(account, p.events, OUT);
+      await record('page_saved', { source: 'replies', parsed: p.events.length, added, more: !!p.bottomCursor });
       await saveOut(account, { running: { at: now(), pages: pages + 1 } });
-      if (pages === 0 && !resume) topId = p.newestId;
+      if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
       if (ended || p.oldestTs <= targetTs || (stopAt && !idGt(p.oldestId, stopAt))) {
@@ -605,13 +652,13 @@ async function syncOut() {
     if (!complete && rounds < PACE.outMaxRounds) {
       // 一轮没读完：记下位置，休息一批的间隔后在新的闹钟事件里接着读。读完之前接续点不动
       const nextAt = now() + rand(PACE.outRestMs);
-      await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
+      await saveOut(account, { status: 'ok', serviceRetries: 0, message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
       await chrome.alarms.create(OUT_ALARM, { when: nextAt });
       return;
     }
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
-    const done = { status: 'ok', message: null, pages, syncedId, resume: null, lastAt: now() };
+    const done = { status: 'ok', serviceRetries: 0, message: null, pages, syncedId, resume: null, lastAt: now() };
     if (!full) return saveOut(account, done);
     await saveOut(account, { ...done, coverTs: reachedTs, fullFor: initDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: initDays, initDays: null, targetTs: null });
   } catch (e) {
@@ -663,6 +710,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === INC_ALARM) return maybeIncremental();
   if (alarm.name === OUT_ALARM) return syncOut();
   if (alarm.name === TICK_ALARM) {
+    await readDiagnostics().catch(() => {});
     const account = await kvGet(keys.current);
     if (account) {
       await maybePrune(account);
@@ -714,6 +762,7 @@ const handlers = {
   },
 
   // 弹窗
+  getDiagnostics: () => readDiagnostics(),
   async getState() {
     const accounts = await kvGet(keys.accounts, {});
     const current = await kvGet(keys.current);
@@ -775,6 +824,10 @@ const handlers = {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const h = msg && handlers[msg.type];
   if (!h) return false;
-  Promise.resolve(h(msg)).then(sendResponse, (e) => sendResponse({ error: String(e?.message || e) }));
+  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData'].includes(msg.type);
+  Promise.resolve().then(() => h(msg)).then(async (result) => {
+    if (logged) await record(msg.type, { outcome: result?.error ? 'rejected' : 'accepted' });
+    sendResponse(result);
+  }, (e) => sendResponse({ error: String(e?.message || e) }));
   return true;
 });

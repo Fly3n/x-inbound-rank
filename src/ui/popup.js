@@ -391,6 +391,43 @@ function download(name, lines) {
 }
 const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
+const diagnosticNames = {
+  request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
+  retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
+  pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据',
+};
+const diagnosticSources = {
+  'mentions-graphql': '别人回我 · 新接口', 'mentions-rest': '别人回我 · 旧接口',
+  mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新',
+};
+
+async function showDiagnostics(exportAll = false) {
+  const status = $('diagnosticStatus');
+  try {
+    const rows = await call('getDiagnostics');
+    if (!Array.isArray(rows)) throw new Error();
+    status.textContent = rows.length ? `共 ${rows.length} 条` : '暂无日志';
+    $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
+      textContent: [fmtTime(r.at), diagnosticNames[r.event] || r.event, diagnosticSources[r.source],
+        r.status && `HTTP ${r.status}`, r.added != null && `新增 ${r.added} 条`,
+        r.waitMs && `${r.waitMs / 60_000} 分钟后`].filter(Boolean).join(' · '),
+    })));
+    if (!exportAll || !rows.length) return;
+    const link = el('a', {
+      href: URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' })),
+      download: 'X回复榜-诊断日志.json',
+    });
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } catch {
+    status.textContent = '日志读取失败，请刷新重试。';
+  }
+}
+
+$('diagnostics').addEventListener('toggle', (e) => { if (e.target.open) showDiagnostics(); });
+$('refreshDiagnostics').addEventListener('click', () => showDiagnostics());
+$('exportDiagnostics').addEventListener('click', () => showDiagnostics(true));
+
 // 导出榜单：当前榜上的人，一人一行
 $('exportBoard').addEventListener('click', () =>
   download(`回复榜_${view.rules.windowDays}天`, [

@@ -70,7 +70,7 @@ function respond(cursor) {
 globalThis.chrome = {
   storage: {
     local: {
-      get: async (k) => Object.fromEntries(pick(k).filter((x) => x in store).map((x) => [x, structuredClone(store[x])])),
+      get: async (k) => Object.fromEntries((k === null ? Object.keys(store) : pick(k)).filter((x) => x in store).map((x) => [x, structuredClone(store[x])])),
       set: async (o) => void Object.assign(store, structuredClone(o)),
       remove: async (k) => void pick(k).forEach((x) => delete store[x]),
     },
@@ -135,6 +135,21 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(job().nextAt - Date.now() >= 14 * 60_000, '退避至少 15 分钟');
 
   // 退避到点后续跑，第 2 页最早一条是 8 天前，超过 7 天范围 → 完成
+  const sendPage = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async () => ({ ok: false, status: 503, userId: '1' });
+  await fireJob();
+  chrome.tabs.sendMessage = sendPage;
+  assert.equal(job().status, 'paused');
+  assert.equal(job().pages, 1);
+  assert.equal(job().cursor, '3');
+  assert.ok(job().nextAt - Date.now() > 299_000);
+  const oldHour = Math.floor(Date.now() / 3_600_000) - 8 * 24;
+  const expiredKey = `diagnostics:${oldHour}`;
+  store[expiredKey] = [{ at: oldHour * 3_600_000, event: 'expired' }];
+  const diagnostics = await send({ type: 'getDiagnostics' });
+  assert.equal(store[expiredKey], undefined);
+  assert.ok(diagnostics.some((event) => event.event === 'request' && event.status === 503 && event.continuation));
+  assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' && event.status === 503));
   await fireJob();
   assert.equal(job().status, 'done');
   assert.equal(job().reachedEnd, false);

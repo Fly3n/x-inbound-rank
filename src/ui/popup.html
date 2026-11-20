@@ -191,6 +191,17 @@
         <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；关掉「自动更新」后不再向 X 发任何请求。数据只存在本机，不上传。风险自担。</p>
       </details>
 
+      <details class="card fold" id="diagnostics">
+        <summary>本地诊断日志</summary>
+        <p class="hint">保留最近 7 天。显示最近 10 条，导出可查看全部。</p>
+        <p id="diagnosticStatus" role="status"></p>
+        <ul id="diagnosticRows"></ul>
+        <div class="row">
+          <button id="refreshDiagnostics">刷新日志</button>
+          <button id="exportDiagnostics">导出日志</button>
+        </div>
+      </details>
+
       <details class="card fold">
         <summary>清空数据</summary>
         <p class="hint">清掉该账号在本机的两份回复数据和读取进度，榜单和时间线标签都会消失，不可恢复。账号绑定和设置保留。</p>
