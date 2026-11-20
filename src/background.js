@@ -139,7 +139,7 @@ const mentionsApi = async () => ((await kvGet(keys.tplMentions)) ? 'gql' : 'rest
  * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'error',message}
  * tpl_bad：新接口的模板没了或过期了（已删掉），调用方改用旧接口从最新一页重来。
  */
-async function pull(account, cursor, api = 'rest') {
+async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }) {
   if (!(await getSettings(account)).fetchEnabled) return { kind: 'error', message: '后台抓取已关闭' };
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me) return { kind: 'error', message: '账号未绑定' };
@@ -174,9 +174,12 @@ async function pull(account, cursor, api = 'rest') {
 
   const readAt = now();
   const added = await putEvents(account, parsed.events);
+  batch.read += parsed.events.length;
+  batch.added += added;
   await record('page_saved', { source: 'mentions', entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
     cur.inLastReadAt = readAt;
+    cur.inLastReadCounts = { ...batch };
     if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
     if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
   });
@@ -478,9 +481,10 @@ async function maybeIncremental(manualAccount) {
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let caughtUp = false;
+    const batch = { read: 0, added: 0 };
     for (let page = 0; page < maxPages; page++) {
       if (page) await sleep(rand(gap));
-      const res = await pull(account, cursor, api);
+      const res = await pull(account, cursor, api, batch);
       if (res.kind === 'no_tab') return false; // 没有 X 标签页，等下次有页面上线再试
       if (res.kind === 'tpl_bad') {
         // 新接口的模板失效：一两分钟后用旧接口从最新一页重读这一段
@@ -617,6 +621,7 @@ async function syncOut(expectedAccount) {
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
     let pages = 0;
+    const batch = { read: 0, added: 0 };
     for (; pages < maxPages; pages++) {
       if (pages) await sleep(rand(gap));
       if (!(await getSettings(account)).fetchEnabled) return saveOut(account, { status: 'error', message: '自动更新已关闭，读取已暂停。' });
@@ -649,8 +654,10 @@ async function syncOut(expectedAccount) {
       }
       const readAt = now();
       const added = await putEvents(account, p.events, OUT);
+      batch.read += p.events.length;
+      batch.added += added;
       await record('page_saved', { source: 'replies', parsed: p.events.length, added, more: !!p.bottomCursor });
-      await saveOut(account, { lastReadAt: readAt, running: { at: now(), pages: pages + 1 } });
+      await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了

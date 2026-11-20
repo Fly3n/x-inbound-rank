@@ -362,6 +362,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
   assert.ok(store['cursor:me'].out.lastReadAt > 1, '手动更新返回前已成功读取出站数据');
+  assert.ok(store['cursor:me'].inLastReadCounts.read > 0);
+  assert.equal(store['cursor:me'].inLastReadCounts.added, 0, '没有新记录也显示读到的条数');
+  assert.ok(store['cursor:me'].out.lastReadCounts.read > 0);
   assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, '连续点击仍受间隔限制');
   await set({ fetchEnabled: false });
 

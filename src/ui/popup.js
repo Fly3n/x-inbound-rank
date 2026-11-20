@@ -279,8 +279,11 @@ async function draw() {
   $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
-  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt);
-  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, out?.lastReadAt ?? out?.lastAt);
+  const inboundRead = readSummary(s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt, s.cursor.inLastReadCounts);
+  const outboundRead = readSummary(out?.lastReadAt ?? out?.lastAt, out?.lastReadCounts);
+  renderFields('updateSummary', [['别人回我', inboundRead], ['我回别人', outboundRead]]);
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundRead);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundRead);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -297,13 +300,21 @@ async function draw() {
   renderTiers(rules);
 }
 
-function renderDataStatus(id, data, initializedAt, days, updatedAt) {
-  const fields = [
+function readSummary(at, counts) {
+  if (!at) return '暂无读取记录';
+  return fullTime(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
+}
+
+function renderDataStatus(id, data, initializedAt, days, summary) {
+  renderFields(id, [
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtDay(data.from)} – ${fmtDay(data.to)}` : '暂无记录'],
     ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
-    ['上次读取', updatedAt ? fullTime(updatedAt) : '暂无记录'],
-  ];
+    ['上次读取', summary],
+  ]);
+}
+
+function renderFields(id, fields) {
   $(id).replaceChildren(...fields.flatMap(([label, value]) => [
     el('dt', { textContent: label }),
     el('dd', { textContent: value }),
@@ -517,7 +528,7 @@ $('updateNow').addEventListener('click', async () => {
     const result = await call('updateNowWithReceipt', { account: view.account });
     const receipt = result?.readAt;
     if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
-      message = `本次读取 · 别人回我 ${fullTime(receipt.inbound)} · 我回别人 ${fullTime(receipt.outbound)}`;
+      message = '两份数据已读取，结果见下方。';
     } else {
       message = result?.error || result?.message || '未收到本次读取时间，请重新加载扩展再试。';
     }
