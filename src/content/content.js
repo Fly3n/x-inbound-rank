@@ -104,6 +104,10 @@
   }
   XIRRel.onTpl = noteTpl;
   for (const url of XIRRel.tpls) noteTpl(url); // 这个脚本就绪之前页面已经发过的
+  XIRRel.onMentionsEvidence = ({ url, status, metadata, text }) => {
+    if (alive && !XIRFetcher.isOwn(url)) send({ type: 'xir:mentions:evidence', url, status, metadata, text });
+  };
+  for (const evidence of XIRRel.mentionsEvidence.splice(0)) XIRRel.onMentionsEvidence(evidence);
   XIRRel.onScheduledTap = (text) => { if (alive) send({ type: 'xir:scheduled:tap', text }); };
   XIRRel.onPostEvent = (ev) => { if (alive) send({ type: 'xir:postEvent', ...ev }); };
 

@@ -1,6 +1,7 @@
 // 后台调度：账号绑定、回填任务、增量更新、给界面供数。
 // 不直接碰 X 的接口与返回结构——请求经 x.com 标签页里的抓取层(fetcher.js)发出，返回交给解析层(parser.js)。
 
+import { mentionsEvidence } from './x/mentions-diagnostics.js';
 import { record, readDiagnostics } from './diagnostics.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError, idGt } from './x/parser.js';
 import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA } from './rank.js';
@@ -100,8 +101,14 @@ async function fetchViaTab(req, trace) {
   const started = now();
   const source = req.kind === 'out' ? 'replies' : req.kind === 'scheduled' ? 'scheduled' : req.tpl ? 'mentions-graphql' : 'mentions-rest';
   let tabsTried = 0;
-  const report = async (result) => {
-    await record('request', { ...trace, source, tabsTried, retryResetAt: result.rateResetAt ?? null, status: result.status || 0, outcome: result.error || 'response', continuation: !!req.cursor, durationMs: now() - started });
+  const report = async (result, tabId = null) => {
+    const durationMs = now() - started;
+    const evidence = await mentionsEvidence(result.requestUrl, result.body, result.responseMetadata).catch(() => null);
+    await record('request', {
+      ...trace, source, tabId, tabsTried, retryResetAt: result.rateResetAt ?? null,
+      status: result.status || 0, outcome: result.error || 'response',
+      continuation: !!req.cursor, durationMs, ...(evidence ? { evidence } : {}),
+    });
     return result;
   };
   const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
@@ -109,7 +116,7 @@ async function fetchViaTab(req, trace) {
     tabsTried++;
     try {
       const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', ...req });
-      if (r) return report(r);
+      if (r) return report(r, tab.id);
     } catch {
       // 该标签页没有内容脚本（装插件前打开的、或已被休眠），换下一个
     }
@@ -186,7 +193,13 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   }
 
   const readAt = now();
-  const added = await putEvents(account, parsed.events);
+  let added;
+  try {
+    added = await putEvents(account, parsed.events);
+  } catch {
+    await record('save_failed', { ...trace, source: 'mentions', decisions });
+    return { kind: 'error', message: '写入本机回复数据失败，请查看诊断日志。' };
+  }
   batch.read += parsed.events.length;
   batch.added += added;
   await record('page_saved', { ...trace, source: 'mentions', decisions, oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
@@ -850,6 +863,21 @@ const handlers = {
     if (out?.status === 'need_tpl') await chrome.alarms.create(OUT_ALARM, { when: now() + 3000 }); // busy：正在读的那一轮自己会用上
     return {};
   },
+  async 'xir:mentions:evidence'({ url, status, metadata, text }, sender) {
+    const tab = sender?.tab;
+    if (!Number.isInteger(tab?.id) || !/^https:\/\/(?:x|twitter)\.com\//.test(tab.url || '') ||
+        typeof text !== 'string' || text.length > 8_000_000) return {};
+    let body;
+    try { body = JSON.parse(text); } catch { /* 保留请求与 HTTP 信息 */ }
+    const evidence = await mentionsEvidence(url, body, metadata).catch(() => null);
+    if (evidence?.request.timeline === 'Mentions') {
+      await record('web_mentions_response', {
+        source: 'mentions-graphql', tabId: tab.id,
+        status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0, evidence,
+      });
+    }
+    return {};
+  },
   async 'xir:scheduled:tap'({ text }) {
     const account = await kvGet(keys.current);
     if (!account || typeof text !== 'string') return {};
@@ -1012,7 +1040,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const h = msg && handlers[msg.type];
   if (!h) return false;
   const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData', 'updateNowWithReceipt'].includes(msg.type);
-  Promise.resolve().then(() => h(msg)).then(async (result) => {
+  Promise.resolve().then(() => h(msg, _sender)).then(async (result) => {
     if (logged) await record(msg.type, { outcome: result?.error ? 'rejected' : 'accepted' });
     sendResponse(result);
   }, (e) => sendResponse({ error: String(e?.message || e) }));

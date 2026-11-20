@@ -23,17 +23,30 @@
       const msg = { xirOp: `${op}${upper === 'GET' ? '' : '(POST)'}` };
       if (TPL_OP.test(op)) msg.xirTpl = new URL(url, location.href).href;
       window.postMessage(msg, location.origin);
-      return { op, upper };
+      const urlObject = op === 'NotificationsTimeline' && upper === 'GET' ? new URL(url, location.href) : null;
+      const mentionsUrl = urlObject?.origin === location.origin &&
+        JSON.parse(urlObject.searchParams.get('variables') || '{}')?.timeline_type === 'Mentions'
+        ? urlObject.href : null;
+      return { op, upper, mentionsUrl };
     } catch {
       return null;
     }
   };
   const MAX = 8_000_000; // 太大的返回不转
 
-  const post = (text, meta) => {
+  const post = (text, meta, readHeader, status) => {
     try {
       if (typeof text === 'string' && text.length < MAX && text[0] === '{') {
-        window.postMessage({ xirTap: text, ...(meta?.op ? { xirTapOp: meta.op } : {}) }, location.origin);
+        const mentions = meta?.mentionsUrl ? {
+          xirMentionsEvidence: {
+            url: meta.mentionsUrl, status,
+            metadata: {
+              date: readHeader('date'), age: readHeader('age'),
+              cache: readHeader('x-cache'), cloudflareCache: readHeader('cf-cache-status'),
+            },
+          },
+        } : {};
+        window.postMessage({ xirTap: text, ...(meta?.op ? { xirTapOp: meta.op } : {}), ...mentions }, location.origin);
       }
       if (meta && meta.upper === 'POST' && POST_OP.test(meta.op)) {
         window.postMessage({ xirPostEvent: { op: meta.op, at: Date.now() } }, location.origin);
@@ -50,8 +63,9 @@
       if (API.test(String(url))) {
         this.addEventListener('load', () => {
           try {
-            if (this.responseType === '' || this.responseType === 'text') post(this.responseText, meta);
-            else if (this.responseType === 'json') post(JSON.stringify(this.response), meta);
+            const header = (name) => this.getResponseHeader(name);
+            if (this.responseType === '' || this.responseType === 'text') post(this.responseText, meta, header, this.status);
+            else if (this.responseType === 'json') post(JSON.stringify(this.response), meta, header, this.status);
           } catch {
             // 忽略
           }
@@ -70,7 +84,7 @@
       const url = typeof input === 'string' ? input : input?.url;
       const meta = note(String(url), init?.method || input?.method);
       if (API.test(String(url))) {
-        p.then((res) => res.clone().text().then((text) => post(text, meta))).catch(() => {});
+        p.then((res) => res.clone().text().then((text) => post(text, meta, (name) => res.headers.get(name), res.status))).catch(() => {});
       }
     } catch {
       // 忽略

@@ -53,10 +53,11 @@ const XIRFetcher = (() => {
   const own = new Set(); // 我们自己发出的请求地址，内容脚本据此不把它们当成 X 页面的请求
 
   /** 用当前会话发一个只读 GET。返回 { ok, status, body, rateResetAt, userId, error }，不抛异常。 */
-  async function get(url, extraHeaders = {}) {
+  async function get(url, extraHeaders = {}, diagnose = false) {
     const userId = sessionUserId();
     const csrf = cookie('ct0');
-    if (!csrf) return { ok: false, status: 0, userId, error: 'no_session' };
+    const request = diagnose ? { requestUrl: url } : {};
+    if (!csrf) return { ...request, ok: false, status: 0, userId, error: 'no_session' };
 
     own.add(url);
     let res;
@@ -74,13 +75,22 @@ const XIRFetcher = (() => {
         },
       });
     } catch (e) {
-      return { ok: false, status: 0, userId, error: 'network', detail: String(e) };
+      return { ...request, ok: false, status: 0, userId, error: 'network', detail: String(e) };
     }
 
     const reset = Number(res.headers.get('x-rate-limit-reset'));
-    const out = { ok: res.ok, status: res.status, userId, rateResetAt: reset ? reset * 1000 : null };
-    const text = await res.text();
+    const out = { ...request, ok: res.ok, status: res.status, userId, rateResetAt: reset ? reset * 1000 : null };
+    if (diagnose) {
+      out.responseMetadata = {
+        date: res.headers.get('date'),
+        age: res.headers.get('age'),
+        cache: res.headers.get('x-cache'),
+        cloudflareCache: res.headers.get('cf-cache-status'),
+      };
+    }
+    let text = '';
     try {
+      text = await res.text();
       out.body = JSON.parse(text);
     } catch {
       out.ok = false;
@@ -113,11 +123,11 @@ const XIRFetcher = (() => {
     if (tpl) {
       const url = fromTpl(tpl, NOTIF_RE, { timeline_type: 'Mentions', count: NOTIF_PAGE }, cursor);
       if (!url) return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
-      return get(url, { 'content-type': 'application/json' });
+      return get(url, { 'content-type': 'application/json' }, true);
     }
     const qs = new URLSearchParams(PARAMS);
     if (cursor) qs.set('cursor', cursor);
-    return get(`${location.origin}${ENDPOINT}?${qs}`);
+    return get(`${location.origin}${ENDPOINT}?${qs}`, {}, true);
   }
 
   // ---- 我自己的回复列表（个人主页「回复」栏背后的 GraphQL 接口）----

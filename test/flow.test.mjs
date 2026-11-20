@@ -64,7 +64,8 @@ function respond(cursor) {
   const entries = page.map((t) => ({ entryId: `tweet-${t.id_str}`, content: { item: { content: { tweet: { id: t.id_str } } } } }));
   if (page.length) entries.push({ entryId: 'cursor-bottom', content: { operation: { cursor: { value: String(start + 3), cursorType: 'Bottom' } } } });
   const tweets = Object.fromEntries([...page, otherRoot].map((t) => [t.id_str, t]));
-  return { ok: true, status: 200, userId: '1', rateResetAt: null, body: { globalObjects: page.length ? { tweets, users } : {}, timeline: { id: 't', instructions: [{ addEntries: { entries } }] } } };
+  return { ok: true, status: 200, userId: '1', rateResetAt: null,
+    requestUrl: 'https://x.com/i/api/2/notifications/mentions.json?count=20', responseMetadata: { age: '0' }, body: { globalObjects: page.length ? { tweets, users } : {}, timeline: { id: 't', instructions: [{ addEntries: { entries } }] } } };
 }
 
 globalThis.chrome = {
@@ -96,7 +97,7 @@ globalThis.chrome = {
 
 await import('../src/background.js');
 
-const send = (msg) => new Promise((resolve) => listeners.message(msg, {}, resolve));
+const send = (msg, sender = {}) => new Promise((resolve) => listeners.message(msg, sender, resolve));
 const job = () => store['job:me'];
 async function until(cond, what) {
   for (let i = 0; i < 400; i++) {
@@ -118,6 +119,33 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(await send({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
   assert.deepEqual(store['snap:me'].users, {}, '页面上线时重算快照');
+
+  // 网页提及留独立的脱敏证据，包括正式解析器尚不支持的包装结构。
+  const nativeUrl = new URL('https://x.com/i/api/graphql/exampleQuery/NotificationsTimeline');
+  nativeUrl.searchParams.set('variables', JSON.stringify({ timeline_type: 'Mentions', count: 20, cursor: 'hidden-cursor', userId: 'hidden-account' }));
+  nativeUrl.searchParams.set('features', JSON.stringify({ sample_flag: true }));
+  nativeUrl.searchParams.set('secret', 'hidden-parameter');
+  const nativeBody = { data: { instructions: [{ type: 'TimelineAddEntries', entries: [{
+    content: { entryType: 'TimelineFutureModule', items: [
+      { itemContent: { tweet_results: { result: { rest_id: '700123', legacy: { full_text: 'hidden-body' } } } } },
+      { __typename: 'User', legacy: { id_str: '800456' } },
+    ] },
+  }] }] } };
+  const nativePayload = { type: 'xir:mentions:evidence', url: nativeUrl.href, status: 200,
+    metadata: { age: '120', cache: 'HIT internal-node' }, text: JSON.stringify(nativeBody) };
+  await send(nativePayload, { tab: { id: 4, url: 'https://x.com/notifications/mentions' } });
+  const evidence = (await send({ type: 'getDiagnostics' })).find((event) => event.event === 'web_mentions_response');
+  assert.equal(evidence.tabId, 4);
+  assert.equal(evidence.evidence.request.count, 20);
+  assert.equal(evidence.evidence.request.hasCursor, true);
+  assert.match(evidence.evidence.request.featureHash, /^[0-9a-f]{16}$/);
+  assert.deepEqual(evidence.evidence.response.postIds, ['700123']);
+  assert.ok(evidence.evidence.response.timelineShapes.includes('TimelineFutureModule'));
+  assert.equal(evidence.evidence.response.ageSeconds, 120);
+  assert.deepEqual(evidence.evidence.response.cache, ['HIT']);
+  assert.doesNotMatch(JSON.stringify(evidence), /hidden-|internal-node/);
+  assert.equal(await count(), 0, '网页证据不入库');
+  assert.equal(server.calls, 0, '网页证据不发新请求');
 
   // 回填，默认窗口 7 天：第 1 页
   assert.deepEqual(await send({ type: 'startBackfill', account: 'me' }), { ok: true });
@@ -154,6 +182,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     event.run === failedPage.run && event.page === failedPage.page));
   assert.ok(diagnostics.some((event) => event.event === 'page_saved' &&
     event.decisions?.some((item) => item.postId === '1000' && item.reason === 'accepted_own_root')));
+  assert.ok(diagnostics.some((event) => event.event === 'request' &&
+    event.evidence?.request.api === 'rest' && event.evidence.response.postIds.includes('1000')));
   assert.equal(store[expiredKey], undefined);
   assert.ok(diagnostics.some((event) => event.event === 'request' && event.status === 503 && event.continuation));
   assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' && event.status === 503));
