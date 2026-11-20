@@ -206,6 +206,7 @@
           <label class="line">开始 <input id="diagFrom" type="datetime-local"></label>
           <label class="line">结束 <input id="diagTo" type="datetime-local"></label>
           <label class="line">帖子编号（可选） <input id="diagPostId" inputmode="numeric" maxlength="24"></label>
+          <label class="line">读取来源 <select id="diagSource"><option value="auto">默认接口</option><option value="rest">旧接口（对照）</option></select></label>
           <button id="diagnoseMentions">开始回查</button>
           <p id="diagnosisResult" role="status"></p>
         </details>

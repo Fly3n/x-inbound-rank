@@ -485,14 +485,14 @@ $('diagnoseMentions').addEventListener('click', async () => {
   button.disabled = true;
   status.textContent = '正在限速回查，请保持弹窗和 X 页面打开。';
   try {
-    const result = await call('diagnoseMentions', { account: view.account, from, to, postId });
+    const result = await call('diagnoseMentions', { account: view.account, from, to, postId, source: $('diagSource').value });
     if (!result || result.error) {
       status.textContent = result?.error || '回查未返回结果，请重载扩展后重试。';
       return;
     }
     const reasons = {
       post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
-      page_limit: '达到 20 页上限，可能尚未覆盖时间窗', repeated_cursor: 'X 返回了重复的翻页位置',
+      page_limit: '已查 20 页，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
       no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
       account_changed: '登录账号已切换',
     };

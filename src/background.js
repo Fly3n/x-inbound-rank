@@ -765,7 +765,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-async function diagnoseMentions({ account, from, to, postId }) {
+async function diagnoseMentions({ account, from, to, postId, source }) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to - from > DAY_MS ||
       (postId && !/^\d{1,24}$/.test(postId))) {
     return { error: '请选择一个不超过 24 小时的时间窗，帖子编号只填数字。' };
@@ -780,7 +780,7 @@ async function diagnoseMentions({ account, from, to, postId }) {
   busy = true;
   const run = now();
   try {
-    const api = await mentionsApi();
+    const api = source === 'rest' ? 'rest' : await mentionsApi();
     await record('diagnostic_start', { source: 'mentions', run, api, from, to, postId: postId || null });
     let cursor = null;
     let pages = 0;
@@ -805,7 +805,7 @@ async function diagnoseMentions({ account, from, to, postId }) {
       matches += parsed.events.filter((event) => event.created_at >= from && event.created_at <= to).length;
       target = postId ? decisions.find((item) => item.postId === postId) : null;
       if (target) { reason = 'post_found'; break; }
-      if (parsed.oldestTs && parsed.oldestTs <= from) { reason = 'window_start'; break; }
+      // 提及列表可能混排，旧帖出现在第一页不能证明后续页没有目标。
       if (!parsed.bottomCursor) { reason = 'end_of_feed'; break; }
       if (parsed.bottomCursor === cursor) { reason = 'repeated_cursor'; break; }
       cursor = parsed.bottomCursor;

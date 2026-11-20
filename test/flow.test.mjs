@@ -378,8 +378,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await set({ fetchEnabled: true });
   const checkpoint = store['cursor:me'].syncedId;
   const reading = store['cursor:me'].inLastReadAt;
+  const originalDate = feed[2].created_at;
+  feed[2].created_at = new Date(Date.now() - DAY).toUTCString();
   const diagnosis = await send({ type: 'diagnoseMentions', account: 'me',
-    from: Date.now() - 60_000, to: Date.now(), postId: feed[0].id_str });
+    from: Date.now() - 60_000, to: Date.now(), postId: feed[3].id_str });
+  feed[2].created_at = originalDate;
+  assert.equal(diagnosis.pages, 2);
   assert.equal(diagnosis.reason, 'post_found');
   assert.equal(diagnosis.stored, true);
   assert.equal(store['cursor:me'].syncedId, checkpoint);
