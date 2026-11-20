@@ -405,7 +405,7 @@ function download(name, lines) {
 const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
 const diagnosticNames = {
-  updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
+  pagination_stop: '结束翻页', updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
   retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
   pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据', scheduled_sync: '同步排期',
 };
@@ -447,7 +447,7 @@ async function showDiagnostics(exportAll = false) {
     })));
     if (!exportAll || !rows.length) return;
     const report = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       exportedAt: new Date().toISOString(),
       extensionVersion: chrome.runtime.getManifest().version,
       platform: navigator.platform,

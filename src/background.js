@@ -166,10 +166,13 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   if (!r.ok) return { kind: 'error', message: `X 接口返回异常（HTTP ${r.status}），接口可能已变更，需要更新抓取层` };
 
   let parsed;
+  const decisions = [];
   try {
-    parsed = parseMentions(r.body, me);
+    parsed = parseMentions(r.body, me, (id, reason) => {
+      decisions.push({ postId: typeof id === 'string' && /^\d{1,24}$/.test(id) ? id : null, reason });
+    });
   } catch (e) {
-    await record('parse_failed', { ...trace, source: 'mentions', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
+    await record('parse_failed', { ...trace, source: 'mentions', decisions, category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
     const why = e instanceof ParseError ? e.message : String(e);
     return { kind: 'error', message: `解析失败：${why}。X 的返回结构可能已变更，需要更新解析层` };
   }
@@ -178,7 +181,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   const added = await putEvents(account, parsed.events);
   batch.read += parsed.events.length;
   batch.added += added;
-  await record('page_saved', { ...trace, source: 'mentions', oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
+  await record('page_saved', { ...trace, source: 'mentions', decisions, oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
     cur.inLastReadAt = readAt;
     cur.inLastReadCounts = { ...batch };
@@ -532,7 +535,12 @@ async function maybeIncremental(manualAccount) {
       }
       const p = res.parsed;
       if (page === 0 && !resume) topId = p.newestId;
-      if (!p.entryIds.length || !idGt(p.oldestId, stopAt) || !p.bottomCursor || p.oldestTs <= floorTs) {
+      const stopReason = !p.entryIds.length ? 'empty_page'
+        : !idGt(p.oldestId, stopAt) ? 'reached_checkpoint'
+        : !p.bottomCursor ? 'no_next_page'
+        : p.oldestTs <= floorTs ? 'retention_boundary' : null;
+      if (stopReason) {
+        await record('pagination_stop', { ...trace, source: 'mentions', reason: stopReason, checkpoint: stopAt });
         caughtUp = true;
         break;
       }

@@ -55,7 +55,7 @@ function fromRest(body) {
 }
 
 /** GraphQL：每个条目自带帖子和作者，这里换成和 REST 一样的形状（帖子表、用户表、条目里的帖子 ID）。 */
-function fromGraphql(body) {
+function fromGraphql(body, inspect) {
   let instructions = null;
   walk(body.data, (n) => {
     if (!instructions && Array.isArray(n.instructions)) instructions = n.instructions;
@@ -79,6 +79,7 @@ function fromGraphql(body) {
       if (t?.__typename === 'TweetWithVisibilityResults') t = t.tweet;
       const l = t?.legacy;
       if (!l || typeof l.id_str !== 'string') {
+        inspect?.(t?.rest_id, 'missing_post_payload');
         blank++;
         continue;
       }
@@ -108,8 +109,8 @@ function fromGraphql(body) {
  *   bottomCursor: string|null
  * }}
  */
-export function parseMentions(body, me) {
-  const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body) : fromRest(body);
+export function parseMentions(body, me, inspect) {
+  const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body, inspect) : fromRest(body);
   const myHandle = me.handle.toLowerCase();
   const isMe = (userId, screenName) =>
     (me.userId && userId === me.userId) || (screenName && screenName.toLowerCase() === myHandle);
@@ -123,6 +124,7 @@ export function parseMentions(body, me) {
   for (const id of new Set(entryIds)) {
     const t = tweets[id];
     if (!t) {
+      inspect?.(id, 'missing_post_payload');
       missing++;
       continue;
     }
@@ -134,10 +136,16 @@ export function parseMentions(body, me) {
     }
 
     const author = users[t.user_id_str];
-    if (!author || isMe(t.user_id_str, author.screen_name)) continue;
+    if (!author || isMe(t.user_id_str, author.screen_name)) {
+      inspect?.(id, author ? 'own_reply' : 'missing_author');
+      continue;
+    }
 
     // 只收「直接回复我某条帖子/评论」的。引用、普通提及、回复别人时顺带 @ 我的，都不计
-    if (!t.in_reply_to_status_id_str || !isMe(t.in_reply_to_user_id_str, t.in_reply_to_screen_name)) continue;
+    if (!t.in_reply_to_status_id_str || !isMe(t.in_reply_to_user_id_str, t.in_reply_to_screen_name)) {
+      inspect?.(id, t.in_reply_to_status_id_str ? 'reply_target_not_me' : 'not_reply');
+      continue;
+    }
 
     // 这串对话是不是从我的帖子开始的：只有「我的帖子下」的回复才上榜，
     // 我去别人帖子下评论、对方回我的不算。conversation_id_str 是对话根帖的 ID。
@@ -148,6 +156,7 @@ export function parseMentions(body, me) {
     if (conv === t.in_reply_to_status_id_str) rootMine = true; // 直接回的就是根帖，而被回的人是我
     else if (root) rootMine = isMe(root.user_id_str, users[root.user_id_str]?.screen_name) || false;
 
+    inspect?.(id, rootMine === true ? 'accepted_own_root' : rootMine === false ? 'accepted_other_root' : 'accepted_unknown_root');
     events.push({
       id,
       actor_id: t.user_id_str,

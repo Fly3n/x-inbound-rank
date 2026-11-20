@@ -152,6 +152,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(failedPage.page, 2);
   assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' &&
     event.run === failedPage.run && event.page === failedPage.page));
+  assert.ok(diagnostics.some((event) => event.event === 'page_saved' &&
+    event.decisions?.some((item) => item.postId === '1000' && item.reason === 'accepted_own_root')));
   assert.equal(store[expiredKey], undefined);
   assert.ok(diagnostics.some((event) => event.event === 'request' && event.status === 503 && event.continuation));
   assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' && event.status === 503));
