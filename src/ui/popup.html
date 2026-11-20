@@ -15,13 +15,9 @@
 
   <div id="banners"></div>
 
-  <!-- 识别不到账号时手动绑定 -->
-  <section id="bind" hidden>
-    <p>没能自动识别当前登录的 X 账号。请先打开或刷新一个 x.com 页面；仍识别不到就手动填写：</p>
-    <div class="row">
-      <input id="bindHandle" placeholder="@handle" maxlength="16">
-      <button id="bindBtn">绑定</button>
-    </div>
+  <section class="card" id="bind" hidden>
+    <p id="bindStatus" role="status"></p>
+    <button id="bindBtn" class="primary" hidden>为此账号开启</button>
   </section>
 
   <!-- 说明一律做成小问号：<button class="q" data-tip="某个 id">，点了展开/收起那个 .tip -->
@@ -231,6 +227,11 @@
         <p class="hint">清掉该账号在本机的两份回复数据和读取进度，榜单和时间线标签都会消失，不可恢复。账号绑定和设置保留。</p>
         <button id="clear" class="danger">清空该账号的数据</button>
       </details>
+      <section class="card">
+        <h2>账号</h2>
+        <button id="disableAccount">关闭此账号的 X 友</button>
+        <p class="hint">暂停此账号的功能和更新，保留本机数据。</p>
+      </section>
     </section>
   </main>
 

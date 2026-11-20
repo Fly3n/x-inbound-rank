@@ -33,44 +33,43 @@
     return m ? m[1] : null;
   }
 
-  async function hello(retries = 20) {
-    let handle = detectHandle();
-    for (let i = 0; !handle && i < retries; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      handle = detectHandle();
-    }
-    const userId = XIRFetcher.sessionUserId();
-    if (!handle && !userId) return; // 未登录
-    const res = await send({ type: 'xir:hello', handle, userId });
-    if (res?.account) await useAccount(res.account);
+  let currentSession = null;
+  function sendForSession(msg) {
+    const session = XIRRel.session();
+    return session ? send({ ...msg, userId: session.userId, activation: session.activation }) : Promise.resolve(null);
   }
 
-  async function useAccount(next) {
-    account = next;
-    const key = `snap:${account}`;
-    useSnap((await chrome.storage.local.get(key))[key]);
+  async function useSession(next) {
+    currentSession = next;
+    lastTpl = {};
+    reported = null;
+    account = next?.account || null;
+    asking = new Set();
+    clearTimeout(askTimer);
+    askTimer = null;
+    useSnap(null);
+    if (!next) return;
+    const key = `snap:${next.account}`;
+    const stored = await chrome.storage.local.get(key);
+    if (XIRRel.session() !== next) return;
+    useSnap(stored[key]);
+    sendForSession({ type: 'xir:hello', handle: detectHandle() });
+    for (const url of XIRRel.tpls) noteTpl(url);
+    for (const evidence of XIRRel.mentionsEvidence.splice(0)) XIRRel.onMentionsEvidence(evidence);
   }
 
   function useSnap(snap) {
     users = snap?.users || {};
     places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
     windowDays = snap?.windowDays || 7;
-    show = { rank: true, out: true, rel: true, place: true, ...snap?.show };
+    show = snap ? { rank: true, out: true, rel: true, place: true, ...snap.show } : {};
     hideTip(); // 数据变了，开着的提示可能已经过时
     rescan();
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.current) {
-      // 手动绑定账号、或换号登录后由后台更新
-      if (changes.current.newValue) useAccount(changes.current.newValue);
-      else {
-        account = null;
-        useSnap(null);
-      }
-    }
-    if (account && changes[`snap:${account}`]) useSnap(changes[`snap:${account}`].newValue);
+    if (XIRRel.session() && account && changes[`snap:${account}`]) useSnap(changes[`snap:${account}`].newValue);
   });
 
   // ---------- 代后台抓取 ----------
@@ -78,38 +77,42 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // 后台问：这个页面连着插件吗、是哪一版、见过哪些接口请求（认不出「回复」列表时拿来诊断）
     if (msg?.type === 'xir:ping') {
-      sendResponse({ ok: true, version: chrome.runtime.getManifest().version, ops: [...XIRRel.ops] });
+      sendResponse({ ok: true, version: chrome.runtime.getManifest().version, userId: XIRFetcher.sessionUserId(), handle: detectHandle() });
       return false;
     }
     if (msg?.type !== 'xir:fetch') return false;
+    const session = XIRRel.session();
+    if (!session || session.userId !== msg.userId || session.activation !== msg.activation) {
+      sendResponse({ ok: false, error: 'no_session' });
+      return false;
+    }
     const run = msg.kind === 'out'
       ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor)
       : msg.kind === 'scheduled'
         ? XIRFetcher.fetchScheduled(msg.tpl)
         : XIRFetcher.fetchMentions(msg.cursor, msg.tpl);
-    run.then(sendResponse);
+    run.then((result) => sendResponse(XIRRel.session() === session && result.userId === session.userId
+      ? result : { ok: false, error: 'no_session' }), () => sendResponse({ ok: false, error: 'no_session' }));
     return true;
   });
 
   // ---------- 记下 X 自己读「回复」栏、读通知的请求地址 ----------
   // 这两个接口的参数随 X 发版变化。tap.js 看到 X 页面自己发的这两种请求，把地址报过来（不含请求头和返回内容），
   // 这里交给后台存成模板，读的时候照着发。浏览器的资源计时记录在 x.com 上是空的（2026-11-19 实测），不能靠它。
-  const lastTpl = {};
+  let lastTpl = {};
   function noteTpl(url) {
     if (!alive || XIRFetcher.isOwn(url)) return;
     const kind = XIRFetcher.tplKind(url);
     if (!kind || lastTpl[kind] === url) return;
     lastTpl[kind] = url;
-    send({ type: 'xir:tpl', url, kind });
+    sendForSession({ type: 'xir:tpl', url, kind });
   }
   XIRRel.onTpl = noteTpl;
-  for (const url of XIRRel.tpls) noteTpl(url); // 这个脚本就绪之前页面已经发过的
   XIRRel.onMentionsEvidence = ({ url, status, metadata, text }) => {
-    if (alive && !XIRFetcher.isOwn(url)) send({ type: 'xir:mentions:evidence', url, status, metadata, text });
+    if (alive && !XIRFetcher.isOwn(url)) sendForSession({ type: 'xir:mentions:evidence', url, status, metadata, text });
   };
-  for (const evidence of XIRRel.mentionsEvidence.splice(0)) XIRRel.onMentionsEvidence(evidence);
-  XIRRel.onScheduledTap = (text) => { if (alive) send({ type: 'xir:scheduled:tap', text }); };
-  XIRRel.onPostEvent = (ev) => { if (alive) send({ type: 'xir:postEvent', ...ev }); };
+  XIRRel.onScheduledTap = (text) => { if (alive) sendForSession({ type: 'xir:scheduled:tap', text }); };
+  XIRRel.onPostEvent = (ev) => { if (alive) sendForSession({ type: 'xir:postEvent', ...ev }); };
 
   // ---------- 内联标签 ----------
 
@@ -183,7 +186,9 @@
     askTimer = null;
     const ids = [...asking];
     asking = new Set();
-    send({ type: 'xir:where', ids }).then((res) => {
+    const session = currentSession;
+    sendForSession({ type: 'xir:where', ids }).then((res) => {
+      if (!session || XIRRel.session() !== session) return;
       for (const id of ids) places.set(id, res?.places?.[id] ?? null);
       if (ids.some((id) => places.get(id))) rescan();
     });
@@ -228,7 +233,7 @@
 
   // 一行里的顺序：名次标签、关系、帖子归属
   function markRel(nameEl, handle) {
-    const other = handle && handle !== account;
+    const other = handle && handle !== (detectHandle() || currentSession?.handle)?.toLowerCase();
     const place = other && show.place ? placeFor(nameEl) : null;
     const rel = other && show.rel ? XIRRel.rel.get(handle) : null;
     const placeEl = chip(nameEl, 'xir-place', PLACE[place], place, PLACE_TIP[place], null);
@@ -259,7 +264,7 @@
 
   let scheduled = false;
   function scheduleScan() {
-    if (scheduled || !alive) return;
+    if (scheduled || !alive || !XIRRel.session()) return;
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
@@ -279,15 +284,17 @@
   // 页面上有帖子却一个用户名节点都找不到，说明 X 改了结构，告诉后台在界面上提示。
   let reported = null;
   setInterval(() => {
-    if (!alive || document.hidden) return;
+    if (!alive || document.hidden || !XIRRel.session()) return;
     const tweets = document.querySelectorAll(SEL.tweet).length;
     if (!tweets) return;
     const broken = document.querySelectorAll(`${SEL.tweet} ${SEL.userName}`).length === 0;
     if (broken !== reported) {
       reported = broken;
-      send({ type: 'xir:dom', broken });
+      sendForSession({ type: 'xir:dom', broken });
     }
   }, 15000);
 
-  hello();
+  const session = XIRRel.session();
+  XIRRel.onSession(useSession);
+  useSession(session);
 })();

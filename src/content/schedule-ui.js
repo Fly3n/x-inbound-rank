@@ -1,6 +1,6 @@
 // X 原生排期弹窗辅助界面：在排期日期/时间选择器上方嵌入快捷半小时档期条 + 「更多档期」下拉列表。
 // 只负责展示档期占用状态、点击后将带随机浮动的时间填入 X 原生表单，绝不代点确认或发布。
-/* global XIRSchedule */
+/* global XIRSchedule, XIRRel */
 
 (() => {
   if (typeof XIRSchedule === 'undefined') return;
@@ -20,7 +20,7 @@
   const DAYS_AHEAD = 2; // 只看今天和明天
 
   let account = null;
-  let enabled = true; // 设置页「发帖排期弹窗显示快捷档期」开关
+  let enabled = false; // 设置页「发帖排期弹窗显示快捷档期」开关
   let alive = true;
   let state = { items: [], syncedAt: 0, lastPostAt: 0, status: 'idle', message: '' };
   let activeDialog = null;
@@ -177,6 +177,7 @@
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (XIRRel.session()?.account !== account || !enabled) return;
         const filledTs = XIRSchedule.pickJitteredTime(slot.ts, { nowTs: Date.now(), scheduled: state.items });
         const ok = fillNativeForm(form, filledTs);
         lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };
@@ -288,10 +289,13 @@
   }
 
   async function syncScheduled(force, form) {
-    if (!alive) return;
+    const session = XIRRel.session();
+    if (!alive || !session || session.account !== account) return;
+    const dialog = activeDialog;
     state.status = 'loading';
     renderPanel(form);
-    const res = await send({ type: 'xir:scheduled:sync', force: !!force });
+    const res = await send({ type: 'xir:scheduled:sync', userId: session.userId, activation: session.activation, force: !!force });
+    if (XIRRel.session() !== session || activeDialog !== dialog) return;
     if (!res) {
       state.status = 'error';
       state.message = '扩展连接已断开，请刷新页面';
@@ -316,7 +320,7 @@
   }
 
   function scanDialogs() {
-    if (!alive || !enabled) {
+    if (!alive || !enabled || XIRRel.session()?.account !== account) {
       if (panel) unmount();
       return;
     }
@@ -348,8 +352,10 @@
 
   async function loadLocalCache() {
     if (!account) return;
+    const session = XIRRel.session();
     const keys = [`scheduled:${account}`, `lastPostAt:${account}`];
     const r = await chrome.storage.local.get(keys);
+    if (XIRRel.session() !== session) return;
     const cached = r[keys[0]];
     if (cached) {
       state.items = Array.isArray(cached.items) ? cached.items : [];
@@ -358,27 +364,22 @@
     state.lastPostAt = r[keys[1]] || 0;
   }
 
-  async function initAccount() {
-    const r = await chrome.storage.local.get('current');
-    account = r.current || null;
-    if (account) {
-      const snapKey = `snap:${account}`;
-      const sr = await chrome.storage.local.get(snapKey);
-      enabled = sr[snapKey]?.show?.schedule !== false;
-      await loadLocalCache();
-    }
+  async function useSession(session) {
+    unmount();
+    account = session?.account || null;
+    enabled = false;
+    state = { items: [], syncedAt: 0, lastPostAt: 0, status: 'idle', message: '' };
+    if (!account) return;
+    const snapKey = `snap:${account}`;
+    const stored = await chrome.storage.local.get(snapKey);
+    if (XIRRel.session() !== session) return;
+    enabled = stored[snapKey]?.show?.schedule !== false;
+    await loadLocalCache();
     scanDialogs();
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local') return;
-    if (changes.current) {
-      account = changes.current.newValue || null;
-      state = { items: [], syncedAt: 0, lastPostAt: 0, status: 'idle', message: '' };
-      if (account) loadLocalCache().then(scanDialogs);
-      else unmount();
-      return;
-    }
+    if (area !== 'local' || XIRRel.session()?.account !== account) return;
     if (account && changes[`snap:${account}`]) {
       const next = changes[`snap:${account}`].newValue?.show?.schedule !== false;
       if (next !== enabled) {
@@ -408,7 +409,7 @@
 
   let pending = false;
   const scheduleScan = () => {
-    if (pending || !alive) return;
+    if (pending || !alive || !XIRRel.session()) return;
     pending = true;
     requestAnimationFrame(() => {
       pending = false;
@@ -420,5 +421,7 @@
     if (!onlyOurs) scheduleScan();
   }).observe(document.body, { childList: true, subtree: true });
 
-  initAccount();
+  const session = XIRRel.session();
+  XIRRel.onSession(useSession);
+  useSession(session);
 })();

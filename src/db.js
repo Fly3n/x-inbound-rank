@@ -140,20 +140,18 @@ export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 export const DEFAULT_SETTINGS = { fetchEnabled: true, ...DEFAULT_RULES };
 
 export const keys = {
-  accounts: 'accounts', // { [handle]: { handle, userId, seenAt } }
-  current: 'current', // 当前 X 会话登录的 handle
-  pendingUserId: 'pendingUserId', // 识别不到 handle 时，等用户手动填
+  accounts: 'accounts', // { [dataKey]: { handle, userId, enabled, activation } }
   settings: (a) => `settings:${a}`,
   cursor: (a) => `cursor:${a}`, // { newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt, out }
-  tpl: 'tpl:replies', // { url, at }：X 页面自己读「回复」栏时的请求地址，读我的回复列表时照着它发
-  tplMentions: 'tpl:mentions', // { url, at }：X 页面自己读通知时的请求地址，有它就用新接口读提及
-  tplScheduled: 'tpl:scheduled', // { url, at }：X 页面自己读「已排期帖子」时的请求地址
+  tpl: (a) => `tpl:replies:${a}`, // { url, at }：X 页面自己读「回复」栏时的请求地址，读我的回复列表时照着它发
+  tplMentions: (a) => `tpl:mentions:${a}`, // { url, at }：X 页面自己读通知时的请求地址，有它就用新接口读提及
+  tplScheduled: (a) => `tpl:scheduled:${a}`, // { url, at }：X 页面自己读「已排期帖子」时的请求地址
   scheduled: (a) => `scheduled:${a}`, // { items: [{ id, executeAt, text }], syncedAt, error }
   lastPostAt: (a) => `lastPostAt:${a}`, // 最近一次发帖或新建排期的时间戳，用于顺延首个可用档
   job: (a) => `job:${a}`, // 回填任务状态
   snap: (a) => `snap:${a}`, // 内联标签快照
   alert: (a) => `alert:${a}`, // 最近一次抓取/解析错误
-  domWarning: 'domWarning',
+  domWarning: (a) => `domWarning:${a}`,
 };
 
 /** 读出来的设置总是合法的：缺的补默认，越界的夹回范围。 */

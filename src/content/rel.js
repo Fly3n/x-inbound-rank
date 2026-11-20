@@ -101,9 +101,48 @@ const XIRRel = (() => {
     if (changed) api.onChange?.();
   }
 
-  if (typeof window !== 'undefined' && window.addEventListener) {
+  // 开关与登录会话共同决定本页是否工作。切换时清掉上一账号留在页面里的信息。
+  let accounts = {};
+  let session = null;
+  const listeners = new Set();
+  api.onSession = (fn) => listeners.add(fn);
+  api.session = () => {
+    const userId = globalThis.XIRFetcher?.sessionUserId();
+    const matches = userId ? Object.entries(accounts).filter(([, a]) => a.enabled && a.userId === userId) : [];
+    const [account, entry] = matches.length === 1 ? matches[0] : [];
+    if (session?.account === account && session?.activation === entry?.activation) return session;
+    session = account ? { account, userId, activation: entry.activation, handle: entry.handle } : null;
+    rel.clear();
+    tweets.clear();
+    ops.clear();
+    api.tpls.length = 0;
+    api.mentionsEvidence.length = 0;
+    window.postMessage({ xirSetSession: true, session: session && { userId, activation: session.activation } }, location.origin);
+    for (const fn of listeners) fn(session);
+    return session;
+  };
+
+  if (typeof window !== 'undefined' && window.addEventListener && typeof chrome !== 'undefined') {
+    let registryChanged = false;
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.accounts) return;
+      registryChanged = true;
+      accounts = changes.accounts.newValue || {};
+      api.session();
+    });
+    chrome.storage.local.get('accounts').then((stored) => {
+      if (registryChanged) return;
+      accounts = stored.accounts || {};
+      api.session();
+    }).catch(() => {});
+    // cookieStore 不是每个 Chrome 都支持；轮询也覆盖 X 在同一个页面内切换账号的情况。
+    window.cookieStore?.addEventListener('change', () => api.session());
+    setInterval(() => api.session(), 1_000);
+
     window.addEventListener('message', (e) => {
-      if (e.source !== window || e.origin !== location.origin) return;
+      if (e.source !== window || e.origin !== location.origin || !e.data?.xirSession) return;
+      const current = api.session();
+      if (!current || e.data.xirSession.userId !== current.userId || e.data.xirSession.activation !== current.activation) return;
       if (typeof e.data?.xirOp === 'string' && e.data.xirOp.length < 80) {
         ops.delete(e.data.xirOp);
         ops.add(e.data.xirOp);

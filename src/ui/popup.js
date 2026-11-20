@@ -174,25 +174,41 @@ function render() {
 async function draw() {
   const g = await call('getState');
   const handles = Object.keys(g.accounts);
-  if (!view.account || !g.accounts[view.account]) view.account = g.current || handles[0] || null;
+  const inactivePage = !!g.active && !g.active.account;
+  if (view.selected === undefined || (view.selected ? !g.accounts[view.selected] : !inactivePage)) {
+    view.selected = g.active?.account || (inactivePage ? null : handles[0] || null);
+  }
+  if (view.account !== view.selected) {
+    $('updateStatus').textContent = '';
+    $('diagnosticStatus').textContent = '';
+    $('diagnosticRows').replaceChildren();
+    $('diagnosisResult').textContent = '';
+  }
+  view.account = view.selected;
+  view.activationUserId = inactivePage ? g.active.userId : null;
 
   const items = [];
-  // 插件刷新或更新后，之前打开的 x.com 页面里还是旧脚本，连不上后台：读取和新功能都不生效，要刷新页面
-  const ver = chrome.runtime.getManifest().version;
-  if (g.current && (!g.page || (g.page.versions.length && !g.page.versions.includes(ver)))) items.push(['warn', '开着的 x.com 页面还没连上这一版插件：请刷新 x.com 页面（没开就打开一个）。']);
-  if (g.domWarning) items.push(['warn', 'X 页面结构可能变了：时间线里找不到用户名位置，内联标签暂时无法显示，需要更新插件。']);
-
-  $('bind').hidden = !!g.current;
+  $('bind').hidden = !!view.account;
+  $('bindBtn').hidden = !inactivePage;
+  $('bindStatus').textContent = inactivePage
+    ? `${g.active.handle ? '@' + g.active.handle : '当前 X 账号'}尚未开启 X 友。`
+    : '请打开或刷新一个已登录的 X 页面，再为该账号开启 X 友。';
   $('main').hidden = !view.account;
-  $('account').hidden = handles.length < 2;
-  $('account').replaceChildren(...handles.map((h) => el('option', { value: h, textContent: `@${g.accounts[h].handle}`, selected: h === view.account })));
+  const accountOptions = handles.map((h) => el('option', {
+    value: h, textContent: g.accounts[h].handle ? `@${g.accounts[h].handle}` : 'X 账号', selected: h === view.account,
+  }));
+  if (inactivePage) accountOptions.unshift(el('option', { value: '', selected: !view.account, textContent: g.active.handle ? `@${g.active.handle}（未开启）` : '当前账号（未开启）' }));
+  $('account').hidden = accountOptions.length < 2;
+  $('account').replaceChildren(...accountOptions);
 
   if (!view.account) return banners(items);
 
   const s = await call('getAccountState', { account: view.account });
+  if (s.error) return banners([['warn', s.error]]);
   const rules = s.settings;
-  const isSession = view.account === g.current;
-  if (!isSession) items.push(['warn', `@${g.accounts[view.account].handle} 不是当前登录 X 的账号，这里只能查看它已有的数据。`]);
+  const isSession = g.online.includes(view.account);
+  if (!isSession) items.push(['warn', '此账号没有可用的 X 页面。重新连上后，定时更新会继续。']);
+  if (s.domWarning) items.push(['warn', 'X 页面结构可能变了，暂时无法显示时间线标签。']);
   if (s.alert) items.push(['err', `${fmtTime(s.alert.at)} ${s.alert.message}`]);
   banners(items);
 
@@ -241,6 +257,7 @@ async function draw() {
   $('outIssue').textContent = outBad;
   $('outIssue').hidden = !outBad;
   const handle = g.accounts[view.account]?.handle;
+  view.handle = handle;
   const outLink = $('outRepliesLink');
   outLink.hidden = !(isSession && out?.status === 'need_tpl' && /^[A-Za-z0-9_]{1,15}$/.test(handle || ''));
   if (!outLink.hidden) outLink.href = `https://x.com/${handle}/with_replies`;
@@ -249,7 +266,7 @@ async function draw() {
     ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
     : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
   $('outLine').hidden = !$('outLine').textContent;
-  $('outReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
+  $('outReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
     : outCovered && !outPending ? '已覆盖所选范围' : '';
   $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCovered || starting.has('outSync');
   $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
@@ -276,7 +293,7 @@ async function draw() {
     : job?.status === 'paused' ? '已暂停' : '';
   $('start').textContent = starting.has('start') ? '启动中' : inPhase || '初始化';
   $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || inCovered || starting.has('start');
-  $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
+  $('inReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const inboundRead = readSummary(s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt, s.cursor.inLastReadCounts);
@@ -396,7 +413,7 @@ function download(name, lines) {
   const d = new Date();
   const a = el('a', {
     href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
-    download: `${name}_${view.account}_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
+    download: `${name}_${view.handle || 'X'}_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
   });
   a.click();
   URL.revokeObjectURL(a.href);
@@ -416,11 +433,11 @@ const diagnosticSources = {
   mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新', scheduled: '发帖排期',
 };
 
-async function loadDiagnostics() {
+async function loadDiagnostics(account) {
   let timer;
   try {
     return await Promise.race([
-      call('getDiagnostics'),
+      call('getDiagnostics', { account }),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('读取超时')), 8000); }),
     ]);
   } finally {
@@ -429,6 +446,7 @@ async function loadDiagnostics() {
 }
 
 async function showDiagnostics(exportAll = false) {
+  const { account } = view;
   const status = $('diagnosticStatus');
   const refresh = $('refreshDiagnostics');
   const exportButton = $('exportDiagnostics');
@@ -436,7 +454,8 @@ async function showDiagnostics(exportAll = false) {
   refresh.disabled = exportButton.disabled = true;
   status.textContent = '正在读取日志…';
   try {
-    const rows = await loadDiagnostics();
+    const rows = await loadDiagnostics(account);
+    if (view.account !== account) return;
     if (!Array.isArray(rows)) throw new Error();
     status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
@@ -467,7 +486,7 @@ async function showDiagnostics(exportAll = false) {
     setTimeout(() => URL.revokeObjectURL(link.href), 5000);
     status.textContent = `已发起下载，共 ${rows.length} 条日志。`;
   } catch {
-    status.textContent = '日志读取失败。请确认扩展已重新加载，然后重试。';
+    if (view.account === account) status.textContent = '日志读取失败。请确认扩展已重新加载，然后重试。';
   } finally {
     refresh.disabled = exportButton.disabled = false;
   }
@@ -500,7 +519,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
       post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
       page_limit: '已查 20 页，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
       no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
-      account_changed: '登录账号已切换',
+      account_disabled: '此账号已关闭插件',
     };
     const outcome = result.target
       ? `；解析判定 ${result.target.reason}，本机${result.stored ? '已有' : '没有'}这条记录` : '';
@@ -523,7 +542,9 @@ $('exportBoard').addEventListener('click', () =>
 
 // 导出全量数据：本机存的每一条回复，一条一行，两份数据放在同一张表里用「类型」区分
 $('exportAll').addEventListener('click', async () => {
-  const { inbound, out: outAll } = await call('exportAll', { account: view.account });
+  const { account } = view;
+  const { inbound, out: outAll } = await call('exportAll', { account });
+  if (view.account !== account || !Array.isArray(inbound) || !Array.isArray(outAll)) return;
   const counted = new Set(underMyPosts(inbound, outAll).map((e) => e.id)); // 计入回复榜的（在我帖子下回我的）
   const out = outAll.filter((o) => !o.own); // 我在自己帖子下的回复只用来认对话，不导出
   const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
@@ -541,7 +562,7 @@ $('exportAll').addEventListener('click', async () => {
   download('全量数据', [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入统计', '内容摘要', '链接'], ...rows.map((r) => r.line)]);
 });
 
-$('account').addEventListener('change', (e) => { view.account = e.target.value; view.tab = null; view.open = null; render(); });
+$('account').addEventListener('change', (e) => { view.selected = e.target.value || null; view.tab = null; view.open = null; render(); });
 const starting = new Set();
 async function initialize(id, type) {
   const button = $(id);
@@ -563,6 +584,7 @@ async function initialize(id, type) {
 let updatingNow = false;
 $('updateNow').addEventListener('click', async () => {
   const button = $('updateNow');
+  const { account } = view;
   const status = $('updateStatus');
   if (updatingNow || button.disabled) return;
   updatingNow = true;
@@ -575,7 +597,7 @@ $('updateNow').addEventListener('click', async () => {
   let message;
   try {
     const startedAt = Date.now();
-    const result = await call('updateNowWithReceipt', { account: view.account });
+    const result = await call('updateNowWithReceipt', { account });
     const receipt = result?.readAt;
     if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
       message = '两份数据已读取，结果见下方。';
@@ -586,7 +608,7 @@ $('updateNow').addEventListener('click', async () => {
     message = '未能确认更新结果，请重新加载扩展再试。';
   } finally {
     await visible;
-    status.textContent = message;
+    if (view.account === account) status.textContent = message;
     button.removeAttribute('aria-busy');
     updatingNow = false;
     await render();
@@ -601,20 +623,32 @@ const SHOW = ['showRank', 'showOut', 'showRel', 'showPlace', 'showSchedule']; //
 for (const k of SHOW) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
 $('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
-  if (confirm(`清空 @${view.account} 在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
+  if (confirm(`清空此账号在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });
 $('bindBtn').addEventListener('click', async () => {
-  const r = await call('setManualHandle', { handle: $('bindHandle').value });
-  if (r?.error) alert(r.error);
-  view.account = null;
-  render();
+  const button = $('bindBtn');
+  button.disabled = true;
+  try {
+    const result = await call('setAccountEnabled', { enabled: true, userId: view.activationUserId });
+    if (result.error) return alert(result.error);
+    Object.assign(view, { selected: result.account, tab: null, open: null });
+    await render();
+  } finally {
+    button.disabled = false;
+  }
+});
+$('disableAccount').addEventListener('click', async () => {
+  const result = await call('setAccountEnabled', { enabled: false, account: view.account });
+  if (result.error) return alert(result.error);
+  Object.assign(view, { selected: undefined, tab: null, open: null });
+  await render();
 });
 
 $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
 // 任务状态、快照变化时自动刷新。读取过程中一页要写好几次存储，攒 200 毫秒再画；
 // 只看和界面有关的键（tplTry 这类后台自用的不管）
-const WATCH = /^(accounts|current|pendingUserId|domWarning|tpl:(replies|mentions)|(settings|cursor|job|snap|alert):)/;
+const WATCH = /^(accounts|tpl:(replies|mentions)|(domWarning|settings|cursor|job|snap|alert):)/;
 let redrawTimer = null;
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !Object.keys(changes).some((k) => WATCH.test(k))) return;

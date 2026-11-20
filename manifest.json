@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "X 友",
   "description": "谁最常在我的 X 帖子下回复我：给回复者排名，并在时间线用户名旁标出名次和次数。数据只存本机。",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms"],
@@ -25,12 +25,12 @@
     },
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["src/content/rel.js"],
+      "js": ["src/x/fetcher.js", "src/content/rel.js"],
       "run_at": "document_start"
     },
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["src/x/fetcher.js", "src/content/schedule.js", "src/content/content.js", "src/content/schedule-ui.js"],
+      "js": ["src/content/schedule.js", "src/content/content.js", "src/content/schedule-ui.js"],
       "css": ["src/content/badge.css"],
       "run_at": "document_idle"
     }

@@ -40,7 +40,8 @@ const XIRFetcher = (() => {
 
   function cookie(name) {
     const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : null;
+    try { return m ? decodeURIComponent(m[1]) : null; }
+    catch { return null; }
   }
 
   /** 当前会话的用户 ID（twid cookie 形如 u=123456），读不到返回 null。 */
@@ -176,3 +177,5 @@ const XIRFetcher = (() => {
 
   return { fetchMentions, fetchMyReplies, fetchScheduled, sessionUserId, tplKind, isOwn: (url) => own.has(url) };
 })();
+
+if (typeof globalThis !== 'undefined') globalThis.XIRFetcher = XIRFetcher;

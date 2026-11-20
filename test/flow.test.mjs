@@ -8,8 +8,17 @@ const DAY = 86400000;
 // 后台页与页之间要等好几秒（真实节奏）；测试里把一秒以上的等待都快进成立刻，只验证流程
 const realSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 ? 0 : ms, ...args);
-const store = {};
+// 模拟升级：已有任务的账号继续启用，仅被识别过的账号保持关闭。
+const store = {
+  accounts: { me: { handle: 'Me', userId: '1' }, seen: { handle: 'Seen', userId: '3' } },
+  'job:me': { status: 'done', startedAt: 1 },
+  current: 'me',
+};
 const alarms = {};
+const version = 'test-version';
+const tab = (id) => ({ id, url: 'https://x.com/home' });
+const sessions = new Map([[1, { userId: '1', handle: 'Me' }], [4, { userId: '1', handle: 'Me' }]]);
+let activeTab = 1;
 const listeners = {};
 const hook = (name) => ({ addListener: (fn) => (listeners[name] = fn) });
 const pick = (k) => (Array.isArray(k) ? k : [k]);
@@ -77,27 +86,36 @@ globalThis.chrome = {
     },
   },
   alarms: {
-    create: async (name, opts) => void (alarms[name] = opts),
+    create: async (name, opts) => void (alarms[name] = { ...opts, scheduledTime: opts.when }),
     get: async (name) => alarms[name],
     clear: async (name) => delete alarms[name],
     onAlarm: hook('alarm'),
   },
-  runtime: { onInstalled: hook('installed'), onStartup: hook('startup'), onMessage: hook('message') },
+  runtime: { getManifest: () => ({ version }), onInstalled: hook('installed'), onStartup: hook('startup'), onMessage: hook('message') },
   tabs: {
-    // 后台自己开「回复」栏取请求地址：server.tplOnOpen 有值时，开出来的页面会报上这条地址；没值就当开不了
-    create: async ({ url }) => {
-      server.opened.push(url);
-      if (!server.tplOnOpen) throw new Error('no window');
-      await listeners.message({ type: 'xir:tpl', url: server.tplOnOpen }, {}, () => {});
-      return { id: 9 };
+    query: async ({ active } = {}) => (active ? [tab(activeTab)] : [...sessions.keys()].map(tab)),
+    sendMessage: async (id, msg) => {
+      const session = sessions.get(id);
+      if (msg.type === 'xir:ping') return session ? { ok: true, version, ...session } : null;
+      if (session?.userId !== msg.userId) throw new Error('向错误的标签页发出了请求');
+      if (msg.kind === 'out') return { ...respondOut(msg), userId: session.userId };
+      server.mentionTpl = msg.tpl;
+      return { ...respond(msg.cursor), userId: session.userId };
     },
-    remove: async (id) => void server.closed.push(id),
-    query: async () => [{ id: 1 }], sendMessage: async (_id, msg) => (msg.kind === 'out' ? respondOut(msg) : ((server.mentionTpl = msg.tpl), respond(msg.cursor))) },
+  },
 };
 
 await import('../src/background.js');
 
 const send = (msg, sender = {}) => new Promise((resolve) => listeners.message(msg, sender, resolve));
+const pageSend = (msg, id = 1, userId = sessions.get(id)?.userId) => send({ userId,
+  activation: Object.values(store.accounts).find((entry) => entry.enabled && entry.userId === userId)?.activation,
+  ...msg }, { tab: tab(id), frameId: 0 });
+const fire = async (kind, account = 'me') => {
+  const name = `${kind}:${account}`;
+  delete alarms[name];
+  return listeners.alarm({ name });
+};
 const job = () => store['job:me'];
 async function until(cond, what) {
   for (let i = 0; i < 400; i++) {
@@ -109,16 +127,18 @@ async function until(cond, what) {
 /** 模拟「到点了」：把任务的下次时间拨到过去，再触发闹钟。 */
 async function fireJob() {
   store['job:me'].nextAt = 0;
-  await listeners.alarm({ name: 'job' });
+  await fire('job');
 }
 const count = async () => (await send({ type: 'getAccountState', account: 'me' })).db.in.count;
 const boardRows = async () => (await send({ type: 'getBoard', account: 'me' })).rows;
 const setWindow = (days) => send({ type: 'setSettings', account: 'me', patch: { windowDays: days } });
 
 test('后台全流程', { timeout: 60_000 }, async () => {
-  assert.deepEqual(await send({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
+  await listeners.installed();
+  assert.deepEqual(await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
-  assert.deepEqual(store['snap:me'].users, {}, '页面上线时重算快照');
+  assert.equal(store.accounts.me.enabled, true);
+  assert.equal(store.accounts.seen.enabled, false);
 
   // 网页提及留独立的脱敏证据，包括正式解析器尚不支持的包装结构。
   const nativeUrl = new URL('https://x.com/i/api/graphql/exampleQuery/NotificationsTimeline');
@@ -133,8 +153,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   }] }] } };
   const nativePayload = { type: 'xir:mentions:evidence', url: nativeUrl.href, status: 200,
     metadata: { age: '120', cache: 'HIT internal-node' }, text: JSON.stringify(nativeBody) };
-  await send(nativePayload, { tab: { id: 4, url: 'https://x.com/notifications/mentions' } });
-  const evidence = (await send({ type: 'getDiagnostics' })).find((event) => event.event === 'web_mentions_response');
+  await pageSend(nativePayload, 4);
+  const evidence = (await send({ type: 'getDiagnostics', account: 'me' })).find((event) => event.event === 'web_mentions_response');
   assert.equal(evidence.tabId, 4);
   assert.equal(evidence.evidence.request.count, 20);
   assert.equal(evidence.evidence.request.hasCursor, true);
@@ -164,7 +184,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 退避到点后续跑，第 2 页最早一条是 8 天前，超过 7 天范围 → 完成
   const sendPage = chrome.tabs.sendMessage;
-  chrome.tabs.sendMessage = async () => ({ ok: false, status: 503, userId: '1' });
+  chrome.tabs.sendMessage = async (id, msg) => msg.type === 'xir:ping' ? sendPage(id, msg) : { ok: false, status: 503, userId: '1' };
   await fireJob();
   chrome.tabs.sendMessage = sendPage;
   assert.equal(job().status, 'paused');
@@ -174,7 +194,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   const oldHour = Math.floor(Date.now() / 3_600_000) - 8 * 24;
   const expiredKey = `diagnostics:${oldHour}`;
   store[expiredKey] = [{ at: oldHour * 3_600_000, event: 'expired' }];
-  const diagnostics = await send({ type: 'getDiagnostics' });
+  const diagnostics = await send({ type: 'getDiagnostics', account: 'me' });
   const failedPage = diagnostics.find((event) => event.event === 'request' && event.status === 503);
   assert.equal(failedPage.mode, 'inbound_backfill');
   assert.equal(failedPage.page, 2);
@@ -198,8 +218,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(store['snap:me'].users.fan, { rank: 1, count: 4, color: 'gray', last: store['snap:me'].users.fan.last });
 
   // 我回他多少次：第一次也要手动点「初始化」，到点的闹钟不会自己开始读
-  assert.ok(alarms.out.when - Date.now() >= 59_000, '回填完成后照常约好闹钟');
-  await listeners.alarm({ name: 'out' });
+  assert.ok(alarms['out:me'].when - Date.now() >= 59_000, '回填完成后照常约好闹钟');
+  await fire('out');
   assert.equal(store['cursor:me'].out, undefined, '没点过初始化，不自动读');
   assert.deepEqual([server.outCalls, server.opened], [0, []]);
   // 点了：还没见过 X 自己的那条请求时读不了，只提示
@@ -207,19 +227,19 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await until(() => store['cursor:me'].out?.status === 'need_tpl' && !store['cursor:me'].out.running, '没有请求地址');
   assert.equal(server.outCalls, 0);
   assert.deepEqual(server.opened, [], '等待用户打开回复页，插件不打开标签页');
-  await listeners.alarm({ name: 'out' });
+  await fire('out');
   assert.equal(server.opened.length, 0, '后台重试不打开标签页');
   assert.equal((await boardRows())[0].replied, 0);
   // 页面上出现了那条请求：记下地址，马上补读。7 天窗口读到 9 天前那条为止（2 页）
-  delete alarms.out;
-  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
-  assert.ok(alarms.out, '拿到地址后约好补读');
-  await listeners.alarm({ name: 'out' });
+  delete alarms['out:me'];
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  assert.ok(alarms['out:me'], '拿到地址后约好补读');
+  await fire('out');
   assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 2]);
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
   assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
   // 没有新回复时只读 1 页
-  await listeners.alarm({ name: 'out' });
+  await fire('out');
   assert.equal(server.outCalls, 3);
 
   // 榜单范围切到半个月：榜单和标签快照立刻按新范围重算，不发请求
@@ -247,7 +267,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   // 改了初始化范围也不会自己去读：闹钟到点只读新来的（1 页）。榜单按半个月算，本机已有的 9 天前那条也算上
   await set({ initDays: 15 });
   let outBefore = server.outCalls;
-  await listeners.alarm({ name: 'out' });
+  await fire('out');
   assert.equal(server.outCalls - outBefore, 1);
   assert.equal((await boardRows())[0].replied, 3);
   assert.equal(store['cursor:me'].out.lastFullDays, 7, '还是上次初始化的范围');
@@ -261,16 +281,16 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual([server.outCalls - outBefore, store['cursor:me'].out.fullFor], [3, 15], '手动初始化我回别人');
   // X 换了接口参数（404）：丢掉旧地址，约好下一轮；下一轮自己开「回复」栏取到新地址，接着读，取完把标签页关掉
   const realSend = chrome.tabs.sendMessage;
-  chrome.tabs.sendMessage = async () => ({ ok: false, status: 404, userId: '1' });
-  await listeners.alarm({ name: 'out' });
+  chrome.tabs.sendMessage = async (id, msg) => msg.type === 'xir:ping' ? realSend(id, msg) : { ok: false, status: 404, userId: '1' };
+  await fire('out');
   chrome.tabs.sendMessage = realSend;
   assert.equal(store['cursor:me'].out.status, 'need_tpl');
-  assert.equal(store['tpl:replies'], undefined);
+  assert.equal(store['tpl:replies:me'], undefined);
   assert.equal((await boardRows())[0].replied, 4, '已有的数还在');
-  delete alarms.out;
-  await send({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
-  assert.ok(alarms.out, '页面提供新地址后安排续读');
-  await listeners.alarm({ name: 'out' });
+  delete alarms['out:me'];
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
+  assert.ok(alarms['out:me'], '页面提供新地址后安排续读');
+  await fire('out');
   assert.deepEqual([store['cursor:me'].out.status, server.opened, server.outUrls.at(-1).includes('QID2')], ['ok', [], true]);
 
   assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
@@ -298,45 +318,45 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   // 下一次随机定在 50–70 分钟后，并约好闹钟
   const gap = store['cursor:me'].nextIncAt - Date.now();
   assert.ok(gap > 49 * 60_000 && gap < 70 * 60_000);
-  assert.equal(alarms.inc.when, store['cursor:me'].nextIncAt);
+  assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
   // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时只读 1 页
   store['cursor:me'].nextIncAt = 0;
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   assert.equal(server.calls - before, 1);
 
   // 打开过 X 的通知页：记下它读通知的请求，下一轮起用新接口读提及；新接口参数过期（404）就删掉、改回旧接口
   assert.equal(server.mentionTpl, undefined, '没记下之前用旧接口');
   const NT = 'https://x.com/i/api/graphql/NQ/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22All%22%7D';
-  await send({ type: 'xir:tpl', url: NT, kind: 'mentions' });
-  assert.equal(store['tpl:replies'].url.includes('QID2'), true, '两种模板分开存');
+  await pageSend({ type: 'xir:tpl', url: NT, kind: 'mentions' });
+  assert.equal(store['tpl:replies:me'].url.includes('QID2'), true, '两种模板分开存');
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   assert.equal(server.mentionTpl, NT);
   assert.equal((await send({ type: 'getAccountState', account: 'me' })).mentionsApi, 'gql');
   const realSend2 = chrome.tabs.sendMessage;
-  chrome.tabs.sendMessage = async (_id, msg) => (msg.tpl ? { ok: false, status: 404, userId: '1' } : realSend2(_id, msg));
+  chrome.tabs.sendMessage = async (_id, msg) => (msg.type === 'xir:fetch' && msg.tpl ? { ok: false, status: 404, userId: '1' } : realSend2(_id, msg));
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   chrome.tabs.sendMessage = realSend2;
-  assert.equal(store['tpl:mentions'], undefined, '过期的模板删掉');
+  assert.equal(store['tpl:mentions:me'], undefined, '过期的模板删掉');
   assert.ok(store['cursor:me'].nextIncAt - Date.now() < 3 * 60_000, '一两分钟后用旧接口重读');
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   assert.equal(server.mentionTpl, undefined);
 
   // 两个触发几乎同时到（比如浏览器重启时两个 x.com 标签页同时上线）：只跑一轮
   store['cursor:me'].nextIncAt = 0;
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
-  await Promise.all([listeners.alarm({ name: 'inc' }), listeners.alarm({ name: 'inc' })]);
+  await Promise.all([fire('inc'), fire('inc')]);
   assert.equal(server.calls - before, 1, '同时到的两个触发只跑一轮');
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.color;
-  await send({ type: 'xir:hello', handle: 'Me', userId: '1' });
+  await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
   assert.equal(store['snap:me'].users.fan.color, 'orange');
 
   // 没到间隔不抓
@@ -369,14 +389,14 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   for (let i = 0; i < 130; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(3000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   before = server.calls;
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   assert.equal(server.calls - before, 40, '一轮最多 40 页');
   assert.equal(store['cursor:me'].syncedId, '2006', '没接上之前接续点不动');
   assert.ok(store['cursor:me'].incResume, '记下读到哪了');
-  const rest = alarms.inc.when - Date.now();
+  const rest = alarms['inc:me'].when - Date.now();
   assert.ok(rest >= 59_000 && rest <= 120_000, '休息一两分钟接着读');
   store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
-  await listeners.alarm({ name: 'inc' });
+  await fire('inc');
   assert.equal(server.calls - before, 44);
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
   assert.equal(await count(), 15 + 130, '一条不丢');
@@ -395,7 +415,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     outbound: store['cursor:me'].out.lastReadAt,
   } });
   assert.equal(server.calls, before + 1);
-  assert.equal(alarms.inc.when, scheduled, '立即更新保留已有的自动更新时间');
+  assert.equal(alarms['inc:me'].when, scheduled, '立即更新保留已有的自动更新时间');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
   assert.ok(store['cursor:me'].out.lastReadAt > 1, '手动更新返回前已成功读取出站数据');
@@ -444,4 +464,82 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await putEvents('me', [old('5', 100)]);
   await listeners.alarm({ name: 'tick' });
   assert.equal(await count(), 4, '24 小时内不重复清');
+});
+
+test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000 }, async () => {
+  sessions.set(9, { userId: '9', handle: 'New' });
+  activeTab = 9;
+  assert.deepEqual((await send({ type: 'getState' })).active, { userId: '9', handle: 'New', account: null });
+  assert.deepEqual(await pageSend({ type: 'xir:hello' }, 9), { account: null });
+  const scheduled = (id) => ({ data: { scheduled_tweet_list: [{ id, execute_at: Date.now() + 60_000 }] } });
+  const native = (id) => ({ type: 'xir:scheduled:tap', text: JSON.stringify(scheduled(id)) });
+  await pageSend(native('disabled'), 9);
+  assert.match((await send({ type: 'startBackfill', account: 'uid-9' })).error, /尚未开启/);
+  assert.equal(store['scheduled:uid-9'], undefined);
+
+  assert.match((await send({ type: 'setAccountEnabled', enabled: true, userId: '8' })).error, /重试/);
+  assert.deepEqual(await send({ type: 'setAccountEnabled', enabled: true, userId: '9' }), { ok: true, account: 'uid-9' });
+  assert.deepEqual(await pageSend({ type: 'xir:hello' }, 9), { account: 'uid-9' });
+  await pageSend(native('first'), 1);
+  await pageSend(native('second'), 9);
+  assert.equal(store['scheduled:me'].items[0].id, 'first');
+  assert.equal(store['scheduled:uid-9'].items[0].id, 'second');
+  await pageSend(native('wrong-identity'), 9, '1');
+  assert.equal(store['scheduled:me'].items[0].id, 'first');
+  assert.equal(store['scheduled:uid-9'].items[0].id, 'second');
+
+  const newest = feed[0].id_str;
+  for (const account of ['me', 'uid-9']) {
+    store[`settings:${account}`] = { fetchEnabled: true };
+    store[`cursor:${account}`] = { syncedId: newest, nextIncAt: 0 };
+  }
+  await listeners.startup();
+  assert.ok(alarms['inc:me']);
+  assert.ok(alarms['inc:uid-9']);
+  const originalSend = chrome.tabs.sendMessage;
+  const requested = [];
+  let mismatch = false;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type !== 'xir:fetch') return originalSend(id, msg);
+    requested.push([id, msg.userId, msg.kind]);
+    if (msg.kind === 'scheduled') {
+      if (mismatch) {
+        sessions.set(id, { userId: '8', handle: 'Changed' });
+      }
+      return { ok: true, status: 200, userId: msg.userId, body: scheduled('requested') };
+    }
+    return originalSend(id, msg);
+  };
+  try {
+    await Promise.all([fire('inc', 'me'), fire('inc', 'uid-9')]);
+    assert.equal(requested.length, 1, '同时到期时只有一份请求占用读取锁');
+    const waiting = requested[0][1] === '1' ? 'uid-9' : 'me';
+    assert.ok(alarms[`inc:${waiting}`], '未拿到锁的账号保留自己的闹钟');
+    await fire('inc', waiting);
+    assert.deepEqual(requested.map(([id, uid]) => [id, uid]).sort(), [[1, '1'], [9, '9']]);
+    assert.ok(store['cursor:me'].inLastReadAt);
+    assert.ok(store['cursor:uid-9'].inLastReadAt);
+
+    const tpl = { type: 'xir:tpl', kind: 'scheduled', url: 'https://x.com/i/api/graphql/QID/FetchScheduledTweets' };
+    await pageSend(tpl, 9);
+    assert.equal(store['tpl:scheduled:me'], undefined);
+    assert.equal((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).items[0].id, 'requested');
+    mismatch = true;
+    const drift = await pageSend({ type: 'xir:scheduled:sync', force: true }, 9);
+    assert.equal(drift.status, 'error', '请求返回前标签页换号，拒绝使用响应');
+    assert.deepEqual((await send({ type: 'getState' })).online, ['me']);
+    assert.equal(store['scheduled:uid-9'].items[0].id, 'requested');
+
+    await send({ type: 'setAccountEnabled', enabled: false, account: 'uid-9' });
+    assert.equal(alarms['inc:uid-9'], undefined);
+    assert.ok(alarms['inc:me'], '关闭另一账号不影响旧账号任务');
+    const before = requested.length;
+    await fire('inc', 'uid-9');
+    assert.equal(requested.length, before);
+    assert.ok(store['cursor:uid-9'].inLastReadAt, '关闭账号保留已读进度');
+    const logs = await send({ type: 'getDiagnostics', account: 'me' });
+    assert.equal(logs.some((r) => r.tabId === 9), false);
+  } finally {
+    chrome.tabs.sendMessage = originalSend;
+  }
 });
