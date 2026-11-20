@@ -50,7 +50,7 @@ button, select, input {
 }
 button { cursor: pointer; }
 button:disabled { opacity: 0.5; cursor: default; }
-button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+button.primary:not(:disabled) { color: #fff; background: var(--accent); border-color: var(--accent); }
 button.danger { color: var(--err-fg); }
 
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -252,7 +252,7 @@ async function draw() {
   $('outReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
     : outCovered && !outPending ? '已覆盖所选范围' : '';
   $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCovered || starting.has('outSync');
-  $('outSync').textContent = outPhase || (outPending || starting.has('outSync') ? '排队中' : '初始化');
+  $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);
   $('initRange').value = String(rules.initDays);
   $('exportBoard').disabled = !rows.length;
@@ -274,7 +274,7 @@ async function draw() {
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
-  $('start').textContent = inPhase || (starting.has('start') ? '启动中' : '初始化');
+  $('start').textContent = starting.has('start') ? '启动中' : inPhase || '初始化';
   $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || inCovered || starting.has('start');
   $('inReason').textContent = !isSession ? '切换到当前登录账号' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
@@ -485,13 +485,20 @@ $('updateNow').addEventListener('click', async () => {
   updatingNow = true;
   button.disabled = true;
   button.textContent = '更新中…';
-  status.textContent = '';
+  button.setAttribute('aria-busy', 'true');
+  status.textContent = '正在处理这次更新…';
+  // 极快的返回也留出时间显示按钮状态。
+  const visible = new Promise((resolve) => setTimeout(resolve, 600));
+  let message;
   try {
     const result = await call('updateNow', { account: view.account });
-    status.textContent = result?.error || '本轮增量已触发，请查看两份数据的读取状态。';
+    message = result?.error || '已触发本轮增量，后续进度见两份数据的读取状态。';
   } catch {
-    status.textContent = '未能确认更新结果，请查看数据状态。';
+    message = '未能确认更新结果，请查看数据状态。';
   } finally {
+    await visible;
+    status.textContent = message;
+    button.removeAttribute('aria-busy');
     updatingNow = false;
     await render();
   }
