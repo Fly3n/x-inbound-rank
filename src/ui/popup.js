@@ -10,6 +10,7 @@ const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cy
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtReadTime = (ts) => { const d = new Date(ts); return `${fmtDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const windowLabel = (days) => ({ 15: '半个月', 30: '一个月', 60: ' 2 个月', 90: ' 3 个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
@@ -319,7 +320,7 @@ async function draw() {
   $('resume').disabled = !isSession || !rules.fetchEnabled;
   const inboundRead = readSummary(s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt, s.cursor.inLastReadCounts);
   const outboundRead = readSummary(out?.lastReadAt ?? out?.lastAt, out?.lastReadCounts);
-  renderFields('updateSummary', [['别人回我', inboundRead], ['我回别人', outboundRead]]);
+  renderFields('updateSummary', [['别人回我：', inboundRead], ['我回别人：', outboundRead]]);
   renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundRead);
   renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundRead);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
@@ -340,7 +341,7 @@ async function draw() {
 
 function readSummary(at, counts) {
   if (!at) return '暂无读取记录';
-  return fullTime(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
+  return fmtReadTime(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
 }
 
 function renderDataStatus(id, data, initializedAt, days, summary) {
