@@ -23,9 +23,9 @@ const PACE = {
   slowPages: 20, // 一次要读很多页时（增量读满 40 页后的补读）：按回填的页间隔，一个闹钟事件最多读这么多页（约 4 分钟）
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
   // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），比提及的 180 次小得多，单独定节奏：
-  // 一个闹钟事件最多读 5 页，读不完休息 4–6 分钟再接着读，约每 15 分钟 13 页，是额度的四分之一左右
+  // 一个闹钟事件最多读 5 页，读不完休息 3–5 分钟再接着读，回填平均约每 15 分钟 16 页
   outPages: 5,
-  outRestMs: [240_000, 360_000],
+  outRestMs: [180_000, 300_000],
   outMaxRounds: 120, // 我的回复：一次读不完时最多接着读几轮（120 × 5 页 = 600 页，和回填单次上限一样），再多就到此为止
 };
 
@@ -603,7 +603,7 @@ async function syncOut() {
     }
     const rounds = (resume?.rounds || 0) + 1;
     if (!complete && rounds < PACE.outMaxRounds) {
-      // 一轮没读完：记下位置，过一两分钟在新的闹钟事件里接着读。读完之前接续点不动
+      // 一轮没读完：记下位置，休息一批的间隔后在新的闹钟事件里接着读。读完之前接续点不动
       const nextAt = now() + rand(PACE.outRestMs);
       await saveOut(account, { status: 'ok', message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
       await chrome.alarms.create(OUT_ALARM, { when: nextAt });
