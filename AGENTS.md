@@ -12,10 +12,10 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - 榜单和标签只有两个条件：窗口内回复至少 `minCount` 次；最多前 `topN` 名。两个值用户可调（2026-11-13 负责人定）：`topN` 默认 100、范围 10–500、界面每次加减 50；`minCount` 默认 2、范围 1–99、每次加减 1。不足名次上限就有多少显示多少。
 - 时间线标签显示「名次图标 + 名次、回复图标 + 次数」。颜色按**回复次数**分档，不按名次（名次靠后的往往都只有两三次，负责人要的是一眼判断值不值得回）。默认：≥20 次红、10–19 次橙、5–9 次蓝、其余灰（负责人 2026-11-13 按一周的量定），各个统计范围共用。用户可改每档的门槛和颜色、加档删档，最多 4 个门槛档加 1 个兜底色共 5 种；可选 8 色（`rank.js` 的 `COLORS`，色值在 `badge.css` 的 `[data-xir-c]`，弹窗通过引入同一份 CSS 共用）。颜色都是实心底色配固定字色，不随 X 的主题变。
 - 规则的默认值、范围和合法化都在 `rank.js`（`DEFAULT_RULES`、`LIMITS`、`cleanRules`）；设置读出时总会过一遍 `cleanRules`，所以别处不用再校验。「恢复默认」只恢复 `topN`、`minCount`、`tiers`、`baseColor`。
-- 设置页的排布（2026-11-14 负责人定）：用户要操作的在前，说明在后。「数据读取」里先是初始化范围，然后两份数据分开各占一块，按钮都叫「初始化」（别人回我：`startBackfill`；我回别人：`syncOutNow`，强制按初始化范围重新读一遍）。本机数据已经覆盖所选初始化范围时按钮置灰并说明（弹窗按 `cursor.lastBackfill` / `cursor.out.lastFullAt` 往回推覆盖起点，之后靠增量连续），第一次必须手动点，`syncOut` 非手动触发时没初始化过就直接返回，每块下面一行现状（本机条数、起止日期、上次初始化完成的时间和范围、上次更新时间，数据来自 `getAccountState` 的 `db` 和 `cursor`）；顶部读取摘要的「别人回我」「我回别人」标签后带冒号，时间只显示月份、不显示日时分和年份，尽量保持单行（`popup.js` 的 `fmtReadMonth`）；「风险说明」「清空数据」在最后、默认折叠。
+- 设置页的排布（2026-11-14 负责人定）：用户要操作的在前，说明在后。「数据读取」里先是初始化范围，然后两份数据分开各占一块，按钮都叫「初始化」（别人回我：`startBackfill`；我回别人：`syncOutNow`，强制按初始化范围重新读一遍）。本机数据已经覆盖所选初始化范围时按钮置灰并说明（别人回我按 `cursor.lastBackfill` 推算；我回别人按 `cursor.out.coverTs` / `reachedEnd` 判断，不再用 `lastFullAt` 推算），第一次必须手动点，`syncOut` 非手动触发时没初始化过就直接返回，每块下面一行现状（本机条数、起止日期、上次初始化完成的时间和范围、上次更新时间，数据来自 `getAccountState` 的 `db` 和 `cursor`）；顶部读取摘要的「别人回我」「我回别人」标签后带冒号，时间显示「月/日 时:分」、不显示年份；数据状态里的「上次初始化」「上次读取」精确到秒；都用紧凑格式保持单行（`popup.js` 的 `fmtTime` / `fmtExactTime`）；「风险说明」「清空数据」在最后、默认折叠。
 - 说明文字一律做成小问号（2026-11-14 负责人定）：`<button class="q" data-tip="某个 id">?</button>` 加一个 `<div class="tip" id="同一个 id" hidden>`，点了展开或收起，`popup.js` 里一个事件委托处理。内容写成简短的列表。以后加说明照这个做，不在界面上直接铺大段文字。
 - 弹窗分「榜单」「设置」两页；榜单页有搜索、小问号说明（第一条是范围内总量汇总）、导出。行上只有头像是去他主页的链接，点这一行其他地方展开两个方向的回复时间，各自按榜单口径筛选并从新到旧排列，点时间打开原文（明细只读本机数据）。导出分两种：「导出榜单」（榜上的人）和「导出全量数据」（`exportAll`，两张表的每一条，同一张 CSV 里用「类型」列区分），都在弹窗里本地生成文件。
-- 关系标签和帖子归属标签（2026-11-14 负责人定）：首页等所有有帖子的地方，用户名旁用单字标他和我的关系（只有「互」互关、「粉」他关注我而我没关注他，其他不标），对象是页面上的所有人，不限于回复过我的；通知列表里回复我的那条如果在我的帖子下，另有一个单独的「M」，不在我帖子下的不标（判断逻辑能分出「他自己的帖子」「别人的帖子」，但负责人明确不要显示）。名次标签、关系、帖子归属各有一个显示开关（设置项 `showRank` / `showRel` / `showPlace`，随快照的 `show` 下发给内容脚本）；以后时间线上再加显示项，也要配开关。插件不维护关注列表和粉丝列表，关系只取 X 页面自己的接口返回里带的：`tap.js` 跑在页面的脚本环境（`world: MAIN`、`document_start`），包住 `XMLHttpRequest` 和 `fetch`，把 `/i/api/graphql/`、`/i/api/2/` 的返回文本用 `postMessage` 转给隔离环境里的 `rel.js`，`rel.js` 解析后只放内存（各最多 8000 条），不落盘、不发请求。`tap.js` 里不放任何业务逻辑，出错全部吞掉，不能影响 X 页面。帖子归属先用页面数据判断（`XIRRel.placeOf`），判断不了的由内容脚本发 `xir:where` 问后台，后台用两张表算（`rank.js` 的 `replyPlaces`）。整条线未在真实账号上验证。
+- 关系标签和帖子归属标签（2026-11-14 负责人定）：首页等所有有帖子的地方，用户名旁用单字标他和我的关系（只有「互」互关、「粉」他关注我而我没关注他，其他不标），对象是页面上的所有人，不限于回复过我的；通知列表里回复我的那条如果在我的帖子下，另有一个单独的「M」，不在我帖子下的不标（判断逻辑能分出「他自己的帖子」「别人的帖子」，但负责人明确不要显示）。名次标签、名次标签里的「我回他几次」、关系、帖子归属、发帖快捷档期各有一个显示开关（设置项 `showRank` / `showOut` / `showRel` / `showPlace` / `showSchedule`，随快照的 `show` 下发给内容脚本和排期界面）；以后新增显示项，也要配开关。插件不维护关注列表和粉丝列表，关系只取 X 页面自己的接口返回里带的：`tap.js` 跑在页面的脚本环境（`world: MAIN`、`document_start`），包住 `XMLHttpRequest` 和 `fetch`，把 `/i/api/graphql/`、`/i/api/2/` 的返回文本用 `postMessage` 转给隔离环境里的 `rel.js`，`rel.js` 解析后只放内存（各最多 8000 条），不落盘、不发请求。`tap.js` 里不放任何业务逻辑，出错全部吞掉，不能影响 X 页面。帖子归属先用页面数据判断（`XIRRel.placeOf`），判断不了的由内容脚本发 `xir:where` 问后台，后台用两张表算（`rank.js` 的 `replyPlaces`）。关系和 M 这条旁听线尚未在真实账号上确认字段和显示效果；名次标签已在真实账号上运行。
 - 每次「初始化」都从最新一条重新往回读，不做接续翻页（负责人知情后定）。
 - 别人回我：**在我帖子下回我的都算，不分层**（2026-11-19 负责人定，取代同日上午的「只算第一级」）：`rank.js` 的 `underMyPosts`，计数和通知列表的 M 共用。根帖是不是我的：`root_mine === true`，或 `null` 但同一对话里有别的记录证明是我的（入站里 `root_mine === true` 的、或「我回别人」表里 `own` 的）。他在别人帖子下（包括他自己的帖子）回我的不算。
 - 榜单每行另带「我回 N」：同一榜单范围内**我直接评论他的帖子**几次（只算第一层，2026-11-19 负责人定；深层回复实测只有一半左右认得出根帖主人，不算）：`rank.js` 的 `countsFromMe`，条件是 `reply_to_id === conversation_id` 且不是 `own`，记在根帖作者名下。不影响排名。弹窗榜单和导出里显示；时间线名次标签里也带：第三段，纸飞机图标 + 次数，只有「我回别人」读完过一次才出现（快照里 `replied`），设置里 `showOut` 可关。
@@ -44,15 +44,21 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 
 | 文件 | 职责 | 何时改 |
 |---|---|---|
-| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头。`fetchMentions` 读提及，`fetchMyReplies(tpl, cursor)` 照模板读我的回复列表。返回 `{ ok, status, body, rateResetAt, userId, error }`，不抛异常 | X 改接口 |
-| `src/x/parser.js` | 解析层：`parseMentions` 原始 JSON → `{ events, entryIds, newestId, oldestId, oldestTs, bottomCursor }`；`parseMyReplies` → 我在别人帖子下的回复。结构不符抛 `ParseError` | X 改返回结构 |
-| `src/content/content.js` | 账号识别、代发请求、画标签、记下 X 读「回复」栏的请求地址（`xir:tpl`）。页面选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头。`fetchMentions` 读提及，`fetchMyReplies(tpl, cursor)` 照模板读我的回复列表，`fetchScheduled` 读已排期列表。返回 `{ ok, status, body, rateResetAt, userId, error }`，不抛异常 | X 改接口 |
+| `src/x/parser.js` | 解析层：`parseMentions` 原始 JSON → `{ events, entryIds, newestId, oldestId, oldestTs, bottomCursor }`；`parseMyReplies` → 我在别人帖子下的回复；`parseScheduledTweets` → 已排期列表。结构不符抛 `ParseError` | X 改返回结构 |
+| `src/x/mentions-diagnostics.js` | 提及诊断：把请求 URL 和响应裁剪成条件指纹、帖子编号和时间线结构，不保存完整地址、游标或正文 | X 改提及返回结构或排查漏收 |
+| `src/content/tap.js` | 页面脚本环境的旁听层：包住 XHR / fetch，只把相关返回文本转给 `rel.js`，不发请求、不改请求和返回，所有错误吞掉 | X 改页面请求方式 |
+| `src/content/rel.js` | 从旁听数据取关注关系、帖子归属、读取模板、提及证据和排期事件；只放内存（各最多 8000 条），不落盘、不发请求 | 改旁听字段或关系判断 |
+| `src/content/schedule.js` | 发帖排期纯逻辑：每天 07:00–24:00 半小时档、±15 分钟冲突、首个可用档、随机浮动；不依赖 DOM 和 chrome API | 改档位规则 |
+| `src/content/schedule-ui.js` | X 原生排期弹窗里的快捷档期条：找原生表单、展示占用、点击填入日期/时间，不代点确认或发布 | X 改排期弹窗结构 |
+| `src/content/content.js` | 账号识别、代发请求、画名次/关系/M 标签、记下 X 读「回复」栏和通知的请求地址（`xir:tpl`）。页面选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | 调度：回填、增量、限流退避、账号绑定、消息处理。节奏参数集中在顶部 `PACE` | 调节奏、改流程 |
 | `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`outboundCounts`（我回他几次）；榜单规则的默认值、范围、合法化 | 改统计口径、规则默认值 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 | 改数据模型 |
+| `src/diagnostics.js` | 本机诊断日志：按小时分键写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
 | `src/ui/` | 弹窗 | 改界面 |
 
-**隔离原则**：只有 `fetcher.js` 和 `parser.js` 知道 X 接口长什么样，只有 `content.js` 的 `SEL` 知道 X 页面长什么样。其他文件不得出现 X 的字段名或选择器。
+**隔离原则**：只有 `fetcher.js` 和 `parser.js`（以及专做提及诊断的 `mentions-diagnostics.js`）知道 X 接口字段，只有 `content.js` / `schedule-ui.js` 的页面选择器知道 X DOM。其他文件不得出现 X 的字段名或选择器。
 
 ## 数据模型
 
@@ -74,7 +80,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号数据键 + 
 
 表 `out`（库版本 2 加的）：我在别人帖子下的回复，主键同样是 `[account, id]`。字段：`created_at`、`reply_to_id`（回的是哪条帖子，0.10.0 加的；等于 `conversation_id` 就是直接评论根帖，「我回 N」只算这种）、`to_user_id`（直接回复的人）、`root_user_id`（对话根帖作者，`null` = 抓取时那页没带出根帖；第一级的回复一定有）、`conversation_id`、`text`。我自己帖子下的回复也入库，标 `own: true`、`root_user_id` 是我：不计数、不导出、不算进条数，只用来证明「这个对话是我的」（比如我自己的串推下别人回我）。0.11.0 起才存，之前的数据里没有，不为此重读。
 
-「我回」的同步状态在 `cursor.out`：`{ status: 'ok' | 'need_tpl' | 'error', message, syncedId, coverTs, fullFor, resume, lastAt, lastFullAt, lastFullDays, pages }`。`syncedId` 是上次读到的最新一条；`fullFor` 是最近一次完整读覆盖的初始化范围（天），手动点「初始化」时清成 0。完整读的条件：没有 `syncedId`、`fullFor === 0`、或 `schema` 旧；读到初始化范围起点。否则只读到 `syncedId` 为止。改初始化范围不触发完整读，要用户点。这个接口的额度只有 **50 次 / 15 分钟**（2026-11-19 实测），节奏单独定：不管哪种读法，单个闹钟事件最多 5 页（`PACE.outPages`；完整读和续读页间 8–15 秒，平时增量 3–6 秒）。没读完就把位置记在 `resume`（`{ cursor, topId, rounds, full, stopAt }`）里，休息 3–5 分钟（`PACE.outRestMs`）后的下一个 `out` 闹钟接着读，回填平均约每 15 分钟 16 页。读完之前 `syncedId` 不动，最多 120 轮（`PACE.outMaxRounds`，共 600 页）。完整读完记 `lastFullAt` / `lastFullDays` 和 `schema`。`schema` 是本机这份数据的版本（`rank.js` 的 `OUT_SCHEMA`，2 = 带 `reply_to_id`）：低于当前版本时视为要完整读，页面上线时 1–2 分钟后自动开始；读完之前弹窗和标签都不显示「我回 N」，不拿旧口径的数冒充。`lastAt` 是最近一次读完的时间，弹窗据此决定显不显示「我回 N」。平时由 `out` 闹钟触发：每轮增量或回填结束后 1–2 分钟，单独一个事件。接口返回 400 / 404 时认为模板过期，删掉 `tpl:replies:<账号>` 并展示「打开我的回复页」入口；拿到新模板（`xir:tpl`）后 3 秒补读。事件里的 `root_handle`（根帖主人的 @ID）只给全量导出显示用，不参与统计。
+「我回」的同步状态在 `cursor.out`：`{ status: 'ok' | 'need_tpl' | 'error', message, syncedId, coverTs, reachedEnd, attemptCoverTs, limitReached, fullFor, resume, lastAt, lastFullAt, lastFullDays, pages }`。`syncedId` 是上次读到的最新一条；`coverTs` 是完整读成功覆盖到的最早时间；`reachedEnd` 表示完整读是因为 X 的列表到底才停下，没到所选范围；`attemptCoverTs` 是最近一次完整读实际走到的最早时间（失败或中途续读也会更新，只用于如实展示进度，不能单独当作已覆盖）；`limitReached` 表示这次是因为单次页数上限停下，弹窗据此在错误后补一句实际最早读到哪天。`fullFor` 是最近一次完整读请求的初始化范围（天），手动点「初始化」时清成 0。完整读的条件：没有 `syncedId`、`fullFor === 0`、或本机这份数据的格式版本 `schema` 低于 `OUT_SCHEMA`；读到初始化范围起点。否则只读到 `syncedId` 为止。改初始化范围不触发完整读，要用户点。这个接口的额度只有 **50 次 / 15 分钟**（2026-11-19 实测），节奏单独定：不管哪种读法，单个闹钟事件最多 5 页（`PACE.outPages`；完整读和续读页间 8–15 秒，平时增量 3–6 秒）。没读完就把位置记在 `resume`（`{ cursor, topId, rounds, full, stopAt }`）里，休息 3–5 分钟（`PACE.outRestMs`）后的下一个 `out` 闹钟接着读，回填平均约每 15 分钟 16 页。读完之前 `syncedId` 不动，最多 120 轮（`PACE.outMaxRounds`，共 600 页）；达到上限时状态记为 `error`、`limitReached: true`、清掉 `resume`，`lastFullAt` / `lastFullDays` 保持上一次成功初始化的值，不能把失败写成完成；`fullFor` 置为本次范围，避免自动更新立刻重跑完整读；自动闹钟看到 `limitReached` 会直接返回，继续完整读要用户再点「初始化」，点「立即更新」只做增量。只有在读到目标时间或列表底部时，完整读才记 `coverTs` / `reachedEnd` / `lastFullAt` / `lastFullDays` 和 `schema`。`schema` 只是本机数据格式的升级标记（`rank.js` 的 `OUT_SCHEMA`，2 = 带 `reply_to_id`），不是两套产品效果：低于当前版本时后台自动补读，补完之前弹窗和标签都不显示「我回 N」。`lastAt` 是最近一次读完的时间，弹窗据此决定显不显示「我回 N」。平时由 `out` 闹钟触发：每轮增量或回填结束后 1–2 分钟，单独一个事件。接口返回 400 / 404 时认为模板过期，删掉 `tpl:replies:<账号>` 并展示「打开我的回复页」入口；拿到新模板（`xir:tpl`）后 3 秒补读。事件里的 `root_handle`（根帖主人的 @ID）只给全量导出显示用，不参与统计。
 
 **保留期**：两张表都只留最近 90 天（`rank.js` 的 `KEEP_DAYS`，和最长的榜单范围一致，2026-11-19 负责人定），兜底闹钟里每天最多清一次；清掉过数据就记 `cursor.prunedAt`。弹窗：最早的数据存满 80 天（`WARN_DAYS`）且还没清过时，榜单上方红字提示并给导出按钮；清过之后改成一行小字（数据每天滚动清，不一直挂红字）。设置页显示条数和 `navigator.storage.estimate()` 的占用。不清的话库会无限增长，而每次重算快照都要把该账号的事件全读一遍。量级参考：一条约 300–500 字节，一周 1 万条回复时 90 天约 13 万条、约 50 MB，全读一遍在几百毫秒。
 
@@ -82,7 +88,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号数据键 + 
 
 | 键 | 内容 |
 |---|---|
-| `accounts` | `{ [dataKey]: { handle, userId, enabled, activation } }`；`activation` 区分开启前后的请求 |
+| `accounts` | `{ [dataKey]: { handle, userId, enabled, activation } }`；`userId` 是 X 的数字用户 ID，唯一且不随改名变化；`handle` 是可变的 @名，只作显示和兜底，页面识别不到时可以为空，解析必须以 `userId` 为准；`activation` 区分开启前后的请求 |
 | `settings:<账号>` | `{ fetchEnabled, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }`，见 `rank.js` 的 `DEFAULT_RULES` |
 | `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：X 页面自己读「回复」栏、读通知的请求地址，照着它发 |
 | `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastAttemptAt, lastBackfill, lastPruneAt }`。`nextIncAt` 是下一次增量最早什么时候跑。`syncedId` 是增量的接续点：从它往更早到回填终点是连续完整的。回填完成时设为该次回填的起点；增量正常结束或读满上限时前移到本轮最新一条，出错中断时不动、下次重读这一段（靠主键去重） |
@@ -90,6 +96,7 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号数据键 + 
 | `snap:<账号>` | 标签快照 `{ at, windowDays, users: { handle小写: { rank, count, color, last } } }`，内容就是回复榜；改任何设置、有 X 页面上线时都立刻重算。抓取过程中节流：最多每 30 秒重算一次，一轮结束或任务停下时补一次（`background.js` 的 `flushSnapshot`）；算出来和存着的一样就不写，免得各页面白白重画 |
 | `alert:<账号>` | 最近一次抓取或解析错误，下次成功后清除 |
 | `domWarning:<账号>` | 内容脚本发现页面结构对不上时置位 |
+| `diagnostics:<小时>` | 本机读取诊断事件，保留最近 7 天、全量不抽样；`diagnostics.js` 负责读写和过期清理 |
 
 ## 回填任务状态机
 
@@ -113,15 +120,15 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号数据键 + 
 | 增量被限流 | 放弃本轮，等下个周期 | |
 | 并发 | 全局 `busy` 锁，同一时刻只有一个抓取动作。写法：先不占锁查该不该跑 → `if (busy) return; busy = true;`（中间不能有 `await`）→ 占住后再确认一遍；回填被占时约一个 1 分钟后的 `job` 闹钟再来 | `cursor:<账号>` 有多处读改写，一律走 `updateCursor`（排队），不要直接 `kvSet` |
 | 首次抓取 | 必须用户手动点「初始化」；没初始化过的账号不自动抓 | |
-| 总开关 | `fetchEnabled` 关闭后 `pull()` 直接拒绝，正在跑的任务被暂停 | |
+| 总开关 | `fetchEnabled` 关闭后 `pull()` 直接拒绝，正在跑的两份回复数据任务被暂停 | 排期同步不走 `pull()`，不受这个开关控制，由打开排期弹窗按需触发 |
 | 串号保护 | 请求只发给同一账号的页面，返回时身份不符则丢弃 | 找不到可用的同账号页面就等待 |
 | 只读 | 全程只有 GET，没有任何写接口 | |
 
 实测依据：该接口响应头显示额度为 **180 次 / 15 分钟**（2026-11-13）。最初的节奏是每页 40–80 秒、每 6 页休息 10–20 分钟（约每小时 18 页），负责人反馈一周可能有上千到上万条回复、太慢，2026-11-13 调到现值（约 55 次 / 15 分钟）。额度只是硬限流，X 的行为风控不公开；这个节奏尚未在真实账号上长时间跑过，要再调快先小步试，被限流过就往回调。
 
-页大小 `count` 固定 20（与网页版一致）。调大它能成倍提速，但服务端是否接受更大的值未验证，且与网页版行为不一致，暂不动。
+页大小：旧提及 REST 接口和「我的回复」列表用 20，X 网页版的提及 GraphQL 用 40（2026-11-19 实测）。都在 `fetcher.js` 里集中定义；再调大前先实测服务端是否接受。
 
-## 实测状态与已知未知（2026-11-13）
+## 实测状态与已知未知（更新到 2026-11-21）
 
 已确认（用一个提及列表为空的小号）：
 
@@ -132,13 +139,15 @@ IndexedDB 库 `xir`，表 `events`，主键 `[account, id]`（账号数据键 + 
 
 **「我回」这条线的实测（2026-11-19，小号；看的是两个公开账号的「回复」栏，和读我自己的是同一个接口）**：① 登录后读「回复」栏发的是 `GET /i/api/graphql/<id>/UserRepliesTimeline?variables=…&features=…`（名字变了，`REPLIES_RE` 认得）；② 资源计时记录在 x.com 上是空的，模板只能靠 `tap.js` 截到；③ 照模板重发**不需要** `x-client-transaction-id`，返回 200；④ 返回结构和 `parseMyReplies` 的假设一致（`legacy` 带 `in_reply_to_*`、`conversation_id_str`；条目是对话模块，带出我回的那条，但**不一定带出根帖**）；⑤ 额度 50 次 / 15 分钟。深层回复能不能认出根帖主人：两个账号共 63 条深层，根帖在页里的 29 条；根帖不在、但同一页有别的帖子直接回根帖、从而能推出主人的 29 条（现在的 `parseMyReplies` 还没用这一招）；认不出的 5 条。只看在别人帖子下的深层，认不出的约一半。开头那串 @ 里总包含根帖主人，但位置不固定，不能单靠它认。
 
-**未确认**（没有真实回复数据，第一次在有回复的账号上运行时才见分晓）：
+**已确认的运行现状**：2026-11-14 起已在负责人的真实账号上运行，提及读取、榜单和名次标签能用；负责人不做逐条人工核对，以体验反馈为准。解析器认的 `in_reply_to_*`、`conversation_id_str` 和时间线条目引用形态已经在真实返回上跑通；任何一项不符仍会抛 `ParseError`，不会产生错误数据。
 
-1. 回复条目是否带 `in_reply_to_user_id_str` / `in_reply_to_screen_name` / `in_reply_to_status_id_str` / `conversation_id_str`，以及时间线条目是否以 `{ tweet: { id } }` 引用帖子。任何一项不符，解析层会抛 `ParseError`，弹窗显示错误，不会产生错误数据。
-2. 提及列表能往回翻多深。
-3. 连续回填是否触发行为风控。
-4. 内容脚本里的标签注入（`[data-testid="User-Name"]`）在真实时间线上的显示效果。
-5. 2026-11-14 起已在负责人的真实账号上运行（读取、榜单、名次标签能用）。负责人不做逐条人工核对，以体验反馈为准；现状见 `REQUIREMENTS.md` 第三节。
+**未确认 / 待实测**：
+
+1. 提及列表在真实账号的数据量下能往回翻多深；翻不到所选范围时界面会如实显示最早拿到哪天。
+2. 长时间连续回填、增量是否会触发额度之外的行为风控。额度头和现有节奏只能证明不撞硬限流，不能证明 X 的行为风控边界。
+3. 关系/M 的旁听字段（`relationship_perspectives.following / followed_by`、旧结构里的 `following / followed_by`、帖子归属结构）尚未在真实账号上确认；不符时只是不显示标签，不影响榜单。
+4. 发帖排期快捷档期在真实 X 排期弹窗里的选择器兼容、日期联动和填入效果，需要按实际使用反馈调整；填入失败时界面会提示手动选时间。
+5. X 改版后的页面结构和接口变化。读不了时弹窗报错，不静默兜底。
 
 **提及的新接口实测（2026-11-19，小号）**：X 网页版读「提及」用 GraphQL `NotificationsTimeline`（查询 ID 当时仍是 `XANkUc-HLIcCl8q85rGC2A`，变量 `{ timeline_type: "Mentions", count, cursor }`，另带一长串 `features`）。额度 **1500 次 / 15 分钟**（旧 REST 接口 180 次）；网页版自己翻页用 `count: 40`；照模板重发不需要 `x-client-transaction-id`，`count: 40` 返回 200。返回在 `data.viewer_v2.user_results.result.notification_timeline.timeline.instructions`，条目是 `TimelineTimelineItem`，`clientEventInfo.element` 标明类型（回复我的是 `user_replied_to_your_tweet`），帖子在 `itemContent.tweet_results.result`，`legacy` 字段和「回复」栏的一样，游标在 `TimelineTimelineCursor`（`Top` / `Bottom`）。旧 REST 接口当天也还能用（200，180 次）。
 
@@ -178,8 +187,9 @@ npm test
 
 - `test/logic.test.mjs`：榜单、口径过滤、规则合法化、颜色分档、解析分类与边界。
 - `test/flow.test.mjs`：用假的 chrome API 和假接口跑后台全流程（回填、429 退避与续跑、去重、增量、关开关、清空）。
+- `test/session.test.mjs`：账号会话切换和页面缓存隔离。
 
-两者的假数据都是按「预期的接口形态」写的，能证明逻辑自洽，**不能证明 X 真实返回长这样**。`fake-indexeddb` 只是测试依赖，插件本身零依赖、无需构建。
+这些测试的假数据都是按「预期的接口形态」写的，能证明逻辑自洽，**不能证明 X 真实返回长这样**。`fake-indexeddb` 只是测试依赖，插件本身零依赖、无需构建。
 
 弹窗没有自动测试。改弹窗后可以临时做一个预览页来看：把 `src/ui/popup.html` 复制一份，在前面插一段模块脚本，用内存里的假数据实现 `chrome.runtime.sendMessage`（`getState`、`getAccountState`、`getBoard`、`setSettings`）和 `chrome.storage.onChanged`，用本地静态服务器打开。预览页用完删掉，不进仓库。
 
