@@ -375,6 +375,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   // 点开某人：返回他在窗口内的回复
   const detail = await send({ type: 'getReplies', account: 'me', actorId: '2' });
   assert.equal(detail.total, 14);
+  assert.equal(detail.outbound.total, (await boardRows()).find((row) => row.actor_id === '2').replied);
+  assert.equal(detail.outbound.items[0].id, '9005');
+  assert.ok(detail.outbound.items[0].created_at);
   assert.equal(await send({ type: 'getReplies', account: 'me', actorId: '3' }).then((d) => d.total), 0, '别人帖子下的不算');
 
   // 数据现状和全量导出：两份数据各自的条数和起止时间

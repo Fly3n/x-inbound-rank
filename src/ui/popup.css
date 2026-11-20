@@ -127,10 +127,16 @@ button.danger { color: var(--err-fg); }
 #list .person { cursor: pointer; }
 #list .person:hover { background: var(--card); }
 #list .detail { display: block; padding: 6px 4px 8px 36px; background: var(--card); }
-#list .reply { display: flex; gap: 8px; padding: 3px 0; color: inherit; text-decoration: none; font-size: 12px; }
-#list .reply:hover .text { text-decoration: underline; }
-#list .reply .time { flex-shrink: 0; color: var(--dim); font-variant-numeric: tabular-nums; }
-#list .reply .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .reply-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+#list .reply-column + .reply-column { padding-inline-start: 12px; border-inline-start: 1px solid var(--line); }
+#list .reply-heading { font-weight: 600; margin-bottom: 2px; }
+#list .reply { display: block; width: fit-content; padding: 2px 0; color: var(--fg); font-size: 12px; font-variant-numeric: tabular-nums; text-decoration: underline; white-space: nowrap; }
+#list .reply:hover { color: var(--dim); }
 #list .empty { justify-content: center; color: var(--dim); border: 0; padding: 18px 0; }
 
 /* 设置页 */

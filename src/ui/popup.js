@@ -48,21 +48,38 @@ function jobText(job) {
 
 // ---------- 榜单页 ----------
 
-const fetchDetail = () => call('getReplies', { account: view.account, actorId: view.open });
+async function loadDetail() {
+  const { account, open: actorId } = view;
+  if (!actorId) return;
+  const detail = await call('getReplies', { account, actorId }).catch(() => ({ error: true }));
+  if (view.account === account && view.open === actorId) view.detail = detail;
+}
+
+function replyColumn(label, data, ready = true) {
+  const heading = ready ? `${label} · ${data.total} 次` : label;
+  return el('div', { className: 'reply-column' }, [
+    el('div', { className: 'reply-heading', textContent: heading }),
+    ...data.items.map((it) => el('a', {
+      className: 'reply',
+      href: `https://x.com/i/status/${it.id}`,
+      target: '_blank',
+      rel: 'noreferrer',
+      textContent: fmtTime(it.created_at),
+      title: `${label} · ${fullTime(it.created_at)}`,
+    })),
+    ...(!data.items.length ? [el('p', { className: 'hint', textContent: ready ? '暂无记录' : '尚未读取' })] : []),
+    ...(data.total > data.items.length ? [el('p', { className: 'hint', textContent: `仅显示最近 ${data.items.length} 条` })] : []),
+  ]);
+}
 
 /** 点开某个人后，他那一行下面展开的回复列表。每条点了跳到 X 上的那条回复。 */
 function detailRow() {
   const d = view.detail;
   if (!d) return el('li', { className: 'detail hint', textContent: '读取中…' });
-  const more = d.total > d.items.length ? `，这里显示最近 ${d.items.length} 条` : '';
-  return el('li', { className: 'detail' }, [
-    el('div', { className: 'hint', textContent: `榜单范围内在我的帖子下回复我 ${d.total} 次${more}：` }),
-    ...d.items.map((it) =>
-      el('a', { className: 'reply', href: `https://x.com/i/status/${it.id}`, target: '_blank', rel: 'noreferrer' }, [
-        el('span', { className: 'time', textContent: fmtTime(it.created_at) }),
-        el('span', { className: 'text', textContent: it.text || '（没存内容，点开看原文）' }),
-      ]),
-    ),
+  if (d.error) return el('li', { className: 'detail hint', textContent: '读取明细失败，收起后再试。' });
+  return el('li', { className: 'detail reply-columns' }, [
+    replyColumn('他回我', d),
+    replyColumn('我回他', d.outbound, view.outReady || d.outbound.total > 0),
   ]);
 }
 
@@ -78,7 +95,7 @@ function renderList() {
   $('list').replaceChildren(
     ...(rows.length
       ? rows.flatMap((r) => [
-          el('li', { className: 'person', title: '点开看他回复了哪几条', dataset: { actor: r.actor_id } }, [
+          el('li', { className: 'person', title: '点开看双方的回复记录', dataset: { actor: r.actor_id } }, [
             el('span', { className: 'rank', textContent: r.rank }),
             // 只有头像是去他主页的链接，这一行其他地方点了都是展开回复列表
             el('a', { className: 'avatar', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', title: `打开 @${r.handle} 的主页` }, [
@@ -203,6 +220,11 @@ async function draw() {
 
   if (!view.account) return banners(items);
 
+  const { handle, userId } = g.accounts[view.account];
+  const disableAccount = $('disableAccount');
+  disableAccount.textContent = `关闭 ${handle ? `@${handle}` : `用户 ID ${userId}`} 的 X 友`;
+  disableAccount.dataset.account = view.account;
+
   const s = await call('getAccountState', { account: view.account });
   if (s.error) return banners([['warn', s.error]]);
   const rules = s.settings;
@@ -256,7 +278,6 @@ async function draw() {
     : outPhase ? `${outPhase}。` : '';
   $('outIssue').textContent = outBad;
   $('outIssue').hidden = !outBad;
-  const handle = g.accounts[view.account]?.handle;
   view.handle = handle;
   const outLink = $('outRepliesLink');
   outLink.hidden = !(isSession && out?.status === 'need_tpl' && /^[A-Za-z0-9_]{1,15}$/.test(handle || ''));
@@ -281,7 +302,7 @@ async function draw() {
   const unfinished = job && job.status !== 'done';
   $('jobLine').hidden = !unfinished;
   if (unfinished) $('jobLine').textContent = `别人回我 · ${jobText(job)}`;
-  if (view.open) view.detail = await fetchDetail();
+  await loadDetail();
   renderList();
 
   // 设置页：数据
@@ -372,7 +393,7 @@ $('list').addEventListener('click', async (e) => {
   view.detail = null;
   renderList();
   if (view.open) {
-    view.detail = await fetchDetail();
+    await loadDetail();
     renderList();
   }
 });
@@ -637,11 +658,19 @@ $('bindBtn').addEventListener('click', async () => {
     button.disabled = false;
   }
 });
-$('disableAccount').addEventListener('click', async () => {
-  const result = await call('setAccountEnabled', { enabled: false, account: view.account });
-  if (result.error) return alert(result.error);
-  Object.assign(view, { selected: undefined, tab: null, open: null });
-  await render();
+$('disableAccount').addEventListener('click', async (e) => {
+  const button = e.currentTarget;
+  const { account } = button.dataset;
+  if (!account) return;
+  button.disabled = true;
+  try {
+    const result = await call('setAccountEnabled', { enabled: false, account });
+    if (result.error) return alert(result.error);
+    if (view.selected === account) Object.assign(view, { selected: undefined, tab: null, open: null });
+    await render();
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('version').textContent = `v${chrome.runtime.getManifest().version}`;

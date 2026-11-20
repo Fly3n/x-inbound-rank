@@ -113,12 +113,14 @@ export function replyPlaces(events, out, ids) {
   );
 }
 
+const inOutboundWindow = (e, since, now) => e.created_at >= since && e.created_at <= now && countsFromMe(e);
+
 /** 窗口内我直接评论了谁的帖子几次（口径见 countsFromMe）。返回 Map<帖子主人 user_id, 次数>。 */
 export function outboundCounts(out, windowDays, now = Date.now()) {
   const since = now - windowDays * DAY_MS;
   const counts = new Map();
   for (const e of out) {
-    if (e.created_at < since || e.created_at > now || !countsFromMe(e)) continue;
+    if (!inOutboundWindow(e, since, now)) continue;
     counts.set(e.root_user_id, (counts.get(e.root_user_id) || 0) + 1);
   }
   return counts;
@@ -165,13 +167,22 @@ export function ranking(events, rules, now = Date.now(), out = []) {
   };
 }
 
-/** 某个人在窗口内计入榜单的回复（就是他那一行的次数由哪几条组成），新的在前。total 是总数，items 最多 limit 条。 */
+/** 某个人在窗口内计入两种次数的回复，按时间倒序，每栏最多 limit 条。 */
 export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50, out = []) {
   const since = now - rules.windowDays * DAY_MS;
   const mine = underMyPosts(events, out)
     .filter((e) => e.actor_id === actorId && e.created_at >= since && e.created_at <= now)
     .sort((a, b) => b.created_at - a.created_at);
-  return { total: mine.length, items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })) };
+  const sent = out.filter((e) => e.root_user_id === actorId && inOutboundWindow(e, since, now))
+    .sort((a, b) => b.created_at - a.created_at);
+  return {
+    total: mine.length,
+    items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })),
+    outbound: {
+      total: sent.length,
+      items: sent.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at })),
+    },
+  };
 }
 
 /**

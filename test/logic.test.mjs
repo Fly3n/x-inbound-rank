@@ -70,6 +70,21 @@ test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
   assert.equal(repliesOf(events, 'a', rules(), NOW, 1).items.length, 1);
 });
 
+test('点开某人：我回他的时间和原帖 ID 对应榜单次数', () => {
+  const out = (id, days, patch = {}) => ({
+    id, created_at: NOW - days * DAY_MS, conversation_id: 'root', reply_to_id: 'root', root_user_id: 'a', ...patch,
+  });
+  const sent = [
+    out('older', 7), out('newer', 1), out('after-now', -1), out('out-of-range', 8),
+    out('deep', 1, { reply_to_id: 'comment' }), out('mine', 1, { own: true }),
+    out('another-author', 1, { root_user_id: 'b' }),
+  ];
+  const { outbound } = repliesOf([], 'a', rules(), NOW, 1, sent);
+  assert.equal(outbound.total, outboundCounts(sent, 7, NOW).get('a'));
+  assert.deepEqual(outbound, { total: 2, items: [{ id: 'newer', created_at: NOW - DAY_MS }] });
+  assert.deepEqual(repliesOf([], 'a', rules(), NOW, 50, sent).outbound.items.map(({ id }) => id), ['newer', 'older']);
+});
+
 test('标签快照：就是榜上的人，键为小写 handle', () => {
   const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW, [], false);
   assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
