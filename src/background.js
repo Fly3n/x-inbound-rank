@@ -776,7 +776,8 @@ const handlers = {
 
   // 弹窗
   getDiagnostics: () => readDiagnostics(),
-  async updateNow({ account }) {
+  async updateNowWithReceipt({ account }) {
+    const startedAt = now();
     if (!account || !await incDue(account) || busy) {
       return { error: '当前无法更新。请先完成「别人回我」初始化，并等待正在运行的读取、最短更新间隔或退避结束。' };
     }
@@ -792,7 +793,10 @@ const handlers = {
     const after = (await kvGet(keys.cursor(account), {})).out;
     if (after?.message) return { message: `别人回我已读完；我回别人：${after.message}` };
     if (after?.resume) return { message: '别人回我已读完；我回别人还有数据等待续读。' };
-    if (after?.lastReadAt > (before.lastReadAt || 0)) return { ok: true };
+    if (after?.lastReadAt >= startedAt && after.lastReadAt > (before.lastReadAt || 0)) {
+      const { inLastReadAt } = await kvGet(keys.cursor(account), {});
+      if (inLastReadAt >= startedAt) return { ok: true, readAt: { inbound: inLastReadAt, outbound: after.lastReadAt } };
+    }
     return { message: '别人回我已读完；我回别人暂未读取，请查看数据状态。' };
   },
   async getState() {
@@ -856,7 +860,7 @@ const handlers = {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const h = msg && handlers[msg.type];
   if (!h) return false;
-  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData', 'updateNow'].includes(msg.type);
+  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData', 'updateNowWithReceipt'].includes(msg.type);
   Promise.resolve().then(() => h(msg)).then(async (result) => {
     if (logged) await record(msg.type, { outcome: result?.error ? 'rejected' : 'accepted' });
     sendResponse(result);

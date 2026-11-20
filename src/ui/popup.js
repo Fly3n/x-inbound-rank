@@ -394,7 +394,7 @@ function download(name, lines) {
 const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
 const diagnosticNames = {
-  updateNow: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
+  updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
   retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
   pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据',
 };
@@ -402,6 +402,18 @@ const diagnosticSources = {
   'mentions-graphql': '别人回我 · 新接口', 'mentions-rest': '别人回我 · 旧接口',
   mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新',
 };
+
+async function loadDiagnostics() {
+  let timer;
+  try {
+    return await Promise.race([
+      call('getDiagnostics'),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('读取超时')), 8000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function showDiagnostics(exportAll = false) {
   const status = $('diagnosticStatus');
@@ -411,7 +423,7 @@ async function showDiagnostics(exportAll = false) {
   refresh.disabled = exportButton.disabled = true;
   status.textContent = '正在读取日志…';
   try {
-    const rows = await call('getDiagnostics');
+    const rows = await loadDiagnostics();
     if (!Array.isArray(rows)) throw new Error();
     status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
@@ -501,10 +513,16 @@ $('updateNow').addEventListener('click', async () => {
   const visible = new Promise((resolve) => setTimeout(resolve, 600));
   let message;
   try {
-    const result = await call('updateNow', { account: view.account });
-    message = result?.error || result?.message || '两份数据均已读取，可在数据状态查看时间。';
+    const startedAt = Date.now();
+    const result = await call('updateNowWithReceipt', { account: view.account });
+    const receipt = result?.readAt;
+    if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
+      message = `本次读取 · 别人回我 ${fullTime(receipt.inbound)} · 我回别人 ${fullTime(receipt.outbound)}`;
+    } else {
+      message = result?.error || result?.message || '未收到本次读取时间，请重新加载扩展再试。';
+    }
   } catch {
-    message = '未能确认更新结果，请查看数据状态。';
+    message = '未能确认更新结果，请重新加载扩展再试。';
   } finally {
     await visible;
     status.textContent = message;

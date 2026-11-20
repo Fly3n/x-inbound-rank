@@ -352,13 +352,17 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   const scheduled = Date.now() + 45 * 60_000;
   Object.assign(store['cursor:me'], { nextIncAt: scheduled, lastAttemptAt: 0 });
   before = server.calls;
-  assert.deepEqual(await send({ type: 'updateNow', account: 'me' }), { ok: true });
+  const receipt = await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.deepEqual(receipt, { ok: true, readAt: {
+    inbound: store['cursor:me'].inLastReadAt,
+    outbound: store['cursor:me'].out.lastReadAt,
+  } });
   assert.equal(server.calls, before + 1);
   assert.equal(alarms.inc.when, scheduled, '立即更新保留已有的自动更新时间');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
   assert.ok(store['cursor:me'].out.lastReadAt > 1, '手动更新返回前已成功读取出站数据');
-  assert.ok((await send({ type: 'updateNow', account: 'me' })).error, '连续点击仍受间隔限制');
+  assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, '连续点击仍受间隔限制');
   await set({ fetchEnabled: false });
 
   // 清空：榜单、快照、游标都没了，设置保留
