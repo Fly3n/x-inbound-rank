@@ -10,7 +10,7 @@ const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cy
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fmtReadTime = (ts) => { const d = new Date(ts); return `${fmtDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtReadMonth = (ts) => `${new Date(ts).getMonth() + 1} 月`;
 const windowLabel = (days) => ({ 15: '半个月', 30: '一个月', 60: ' 2 个月', 90: ' 3 个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
@@ -341,7 +341,7 @@ async function draw() {
 
 function readSummary(at, counts) {
   if (!at) return '暂无读取记录';
-  return fmtReadTime(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
+  return fmtReadMonth(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
 }
 
 function renderDataStatus(id, data, initializedAt, days, summary) {
