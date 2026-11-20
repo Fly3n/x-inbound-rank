@@ -227,9 +227,9 @@ function planNextInc(cur, from) {
 }
 
 /** 约好下一次增量（专门一个闹钟，不等 30 分钟一次的兜底闹钟），以及别人的回复读完后接着读我自己的。 */
-async function armInc(nextIncAt) {
+async function armInc(nextIncAt, scheduleOut = true) {
   await chrome.alarms.create(INC_ALARM, { when: Math.max(nextIncAt, now() + 1000) });
-  await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
+  if (scheduleOut) await chrome.alarms.create(OUT_ALARM, { when: now() + rand(PACE.outDelayMs) });
 }
 
 // ---------- 回填 ----------
@@ -550,7 +550,7 @@ async function maybeIncremental(manualAccount) {
       }
       return planNextInc(c, now());
     });
-    await armInc(next);
+    await armInc(next, !manualAccount);
     return { ok: true };
   } finally {
     if (account) await flushSnapshot(account, true).catch(() => {});
@@ -570,9 +570,9 @@ const saveOut = (account, patch) =>
   });
 
 /** 读取已排队的初始化，或更新已经初始化过的账号。 */
-async function syncOut() {
+async function syncOut(expectedAccount) {
   const account = await kvGet(keys.current);
-  if (!account) return;
+  if (!account || (expectedAccount && account !== expectedAccount)) return;
   const settings = await getSettings(account);
   if (!settings.fetchEnabled) return;
   const me = (await kvGet(keys.accounts, {}))[account];
@@ -781,7 +781,19 @@ const handlers = {
       return { error: '当前无法更新。请先完成「别人回我」初始化，并等待正在运行的读取、最短更新间隔或退避结束。' };
     }
     const result = await maybeIncremental(account);
-    return result === false ? { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' } : result;
+    if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
+    if (!result?.ok) return result;
+
+    const before = (await kvGet(keys.cursor(account), {})).out;
+    if (!before?.lastAt && !before?.syncedId) {
+      return { message: '别人回我已读完；请先初始化「我回别人」。' };
+    }
+    await syncOut(account);
+    const after = (await kvGet(keys.cursor(account), {})).out;
+    if (after?.message) return { message: `别人回我已读完；我回别人：${after.message}` };
+    if (after?.resume) return { message: '别人回我已读完；我回别人还有数据等待续读。' };
+    if (after?.lastReadAt > (before.lastReadAt || 0)) return { ok: true };
+    return { message: '别人回我已读完；我回别人暂未读取，请查看数据状态。' };
   },
   async getState() {
     const accounts = await kvGet(keys.accounts, {});

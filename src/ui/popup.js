@@ -405,10 +405,15 @@ const diagnosticSources = {
 
 async function showDiagnostics(exportAll = false) {
   const status = $('diagnosticStatus');
+  const refresh = $('refreshDiagnostics');
+  const exportButton = $('exportDiagnostics');
+  if (refresh.disabled) return;
+  refresh.disabled = exportButton.disabled = true;
+  status.textContent = '正在读取日志…';
   try {
     const rows = await call('getDiagnostics');
     if (!Array.isArray(rows)) throw new Error();
-    status.textContent = rows.length ? `共 ${rows.length} 条` : '暂无日志';
+    status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
       textContent: [fmtTime(r.at), diagnosticNames[r.event] || r.event, diagnosticSources[r.source],
         r.status && `HTTP ${r.status}`, r.added != null && `新增 ${r.added} 条`,
@@ -419,10 +424,15 @@ async function showDiagnostics(exportAll = false) {
       href: URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' })),
       download: 'X回复榜-诊断日志.json',
     });
+    document.body.append(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+    status.textContent = `已发起下载，共 ${rows.length} 条日志。`;
   } catch {
-    status.textContent = '日志读取失败，请刷新重试。';
+    status.textContent = '日志读取失败。请确认扩展已重新加载，然后重试。';
+  } finally {
+    refresh.disabled = exportButton.disabled = false;
   }
 }
 
@@ -492,7 +502,7 @@ $('updateNow').addEventListener('click', async () => {
   let message;
   try {
     const result = await call('updateNow', { account: view.account });
-    message = result?.error || result?.message || '别人回我已读完；我回别人已初始化时，约 1–2 分钟后开始读取。';
+    message = result?.error || result?.message || '两份数据均已读取，可在数据状态查看时间。';
   } catch {
     message = '未能确认更新结果，请查看数据状态。';
   } finally {
