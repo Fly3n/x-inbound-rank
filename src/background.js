@@ -683,6 +683,8 @@ async function syncOut(account, manual = false) {
     const cur = await kvGet(keys.cursor(account), {});
 
     const prev = cur.out || {};
+    // 达到单次上限后已经明确报错停下：自动闹钟不要继续烧额度，等用户手动点初始化或立即更新再试
+    if (!manual && prev.status === 'error' && prev.limitReached) return;
     const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0);
     if (nextAt > now()) {
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
@@ -704,13 +706,14 @@ async function syncOut(account, manual = false) {
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
-    await saveOut(account, { status: 'reading', retryAt: null, message: null, running: { at: now(), pages: 0 } });
+    await saveOut(account, { status: 'reading', retryAt: null, message: null, limitReached: null, attemptCoverTs: null, running: { at: now(), pages: 0 } });
     const tpl = await kvGet(keys.tpl(account));
     if (!tpl) return saveOut(account, { status: 'need_tpl', message: '打开 X 的「回复」栏一次，插件会自动继续。' });
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
+    let reachedEnd = false; // 本次完整读是因为列表到底才停下
     let pages = 0;
     const run = now();
     const batch = { read: 0, added: 0 };
@@ -764,23 +767,53 @@ async function syncOut(account, manual = false) {
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
       if (ended || p.oldestTs <= targetTs || (stopAt && !idGt(p.oldestId, stopAt))) {
         complete = true;
+        reachedEnd = ended;
         pages++;
         break;
       }
       cursor = p.bottomCursor;
     }
     const rounds = (resume?.rounds || 0) + 1;
+    if (!complete && rounds >= PACE.outMaxRounds) {
+      const message = full
+        ? '本次初始化达到单次页数上限，仍未读到所选范围。可重新初始化或缩小范围。'
+        : '本次读取达到单次页数上限，仍未接上上次进度。稍后可再点「立即更新」。';
+      await saveOut(account, {
+        status: 'error', retryAt: null, running: null, resume: null, pages,
+        message, limitReached: true, attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
+        ...(full ? {
+          coverTs: reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null,
+          reachedEnd: false,
+          fullFor: initDays, // 本次完整读没有完成，下次自动运行只做增量，等用户再点初始化
+          initDays: null,
+          targetTs: null,
+        } : {}),
+      });
+      return;
+    }
     if (!complete && rounds < PACE.outMaxRounds) {
       // 一轮没读完：记下位置，休息一批的间隔后在新的闹钟事件里接着读。读完之前接续点不动
       const nextAt = now() + rand(PACE.outRestMs);
-      await saveOut(account, { status: 'ok', serviceRetries: 0, message: null, pages, ...(full ? { coverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
+      await saveOut(account, { status: 'ok', serviceRetries: 0, message: null, pages, limitReached: null, ...(full ? { attemptCoverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
       return;
     }
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
     const done = { status: 'ok', serviceRetries: 0, message: null, pages, syncedId, resume: null, lastAt: now() };
-    await saveOut(account, full ? { ...done, coverTs: reachedTs, fullFor: initDays, schema: OUT_SCHEMA, lastFullAt: now(), lastFullDays: initDays, initDays: null, targetTs: null } : done);
+    await saveOut(account, full ? {
+      ...done,
+      coverTs: reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null,
+      attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
+      reachedEnd,
+      limitReached: null,
+      fullFor: initDays,
+      schema: OUT_SCHEMA,
+      lastFullAt: now(),
+      lastFullDays: initDays,
+      initDays: null,
+      targetTs: null,
+    } : done);
     const latest = await kvGet(keys.cursor(account), {});
     if (!latest.syncedId && await enabledAccount(account)) {
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + rand(PACE.incIntervalMs) });
@@ -847,7 +880,7 @@ async function recoverAlarms(account) {
   }
   if (cur.syncedId) await ensure(INC_ALARM, cur.nextIncAt || 0);
   // 已开始的出站初始化独立续跑，即使入站还没完成首次初始化。
-  if (out && (out.fullFor === 0 || out.lastAt || out.syncedId) && out.status !== 'need_tpl') {
+  if (out && !out.limitReached && (out.fullFor === 0 || out.lastAt || out.syncedId) && out.status !== 'need_tpl') {
     const retryAt = Math.max(out.resume?.nextAt || 0, out.retryAt || 0);
     const pending = out.fullFor === 0 || out.resume || ['queued', 'waiting_tab', 'reading'].includes(out.status);
     const routine = Math.max(

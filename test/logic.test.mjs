@@ -81,7 +81,7 @@ test('点开某人：我回他的时间和原帖 ID 对应榜单次数', () => {
   ];
   const { outbound } = repliesOf([], 'a', rules(), NOW, 1, sent);
   assert.equal(outbound.total, outboundCounts(sent, 7, NOW).get('a'));
-  assert.deepEqual(outbound, { total: 2, items: [{ id: 'newer', created_at: NOW - DAY_MS }] });
+  assert.deepEqual(outbound, { total: 2, items: [{ id: 'newer', created_at: NOW - DAY_MS, text: '' }] });
   assert.deepEqual(repliesOf([], 'a', rules(), NOW, 50, sent).outbound.items.map(({ id }) => id), ['newer', 'older']);
 });
 
@@ -283,6 +283,17 @@ test('解析我的回复：结构不对或 X 报错就抛错', () => {
   assert.throws(() => parseMyReplies({ errors: [{ message: 'features cannot be null' }] }, me), /features cannot be null/);
   assert.throws(() => parseMyReplies(gql([{ entryId: 'tweet-1', content: { something: 'new' } }]), me), ParseError);
   assert.deepEqual(parseMyReplies({ data: { x: { instructions: [] } } }, me).events, [], '空列表不算错');
+});
+
+test('解析：账号没有 handle 时只用用户 ID 也能工作', () => {
+  const noHandle = { userId: '1', handle: null };
+  const mentions = body(
+    [tweet('300', '2', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100', conversation_id_str: '100' })],
+    ['300'],
+  );
+  assert.equal(parseMentions(mentions, noHandle).events.length, 1);
+  const replies = gql([thread(gt('100', '2'), gt('900', '1', re('100', '2', '100')))]);
+  assert.equal(parseMyReplies(replies, noHandle).events.length, 1);
 });
 
 test('关系：从 X 的返回里挑出每个人和我的关注关系，新旧两种结构都认', () => {

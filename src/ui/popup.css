@@ -26,7 +26,7 @@
 
 * { box-sizing: border-box; }
 body {
-  width: 380px;
+  width: 440px;
   margin: 0;
   padding: 12px;
   color: var(--fg);
@@ -164,5 +164,5 @@ input[type="number"]::-webkit-inner-spin-button { appearance: none; }
 .init-reason { color: var(--warn-fg); font-weight: 600; font-size: 12px; }
 .init-reason:empty { display: none; }
 
-.data-status { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; }
-.data-status dd { margin: 0; color: var(--fg); }
+.data-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 8px 0 0; font-size: 12px; }
+.data-status dd { margin: 0; color: var(--fg); white-space: nowrap; }

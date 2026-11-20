@@ -180,7 +180,7 @@ export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50, 
     items: mine.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })),
     outbound: {
       total: sent.length,
-      items: sent.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at })),
+      items: sent.slice(0, limit).map((e) => ({ id: e.id, created_at: e.created_at, text: e.text || '' })),
     },
   };
 }

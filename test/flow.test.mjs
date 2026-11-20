@@ -236,6 +236,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(alarms['out:me'], '拿到地址后约好补读');
   await fire('out');
   assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 2]);
+  assert.equal(store['cursor:me'].out.reachedEnd, false, '读到 7 天范围，不是列表到底');
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
   assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
   // 没有新回复时只读 1 页
@@ -447,6 +448,52 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(diagnosis.stored, true);
   assert.equal(store['cursor:me'].syncedId, checkpoint);
   assert.equal(store['cursor:me'].inLastReadAt, reading);
+  await set({ fetchEnabled: false });
+
+  // 初始化范围比 X 能提供的回复还长：读到列表底部要如实记下，不能当成已覆盖所选范围
+  await set({ fetchEnabled: true, initDays: 30 });
+  outBefore = server.outCalls;
+  await send({ type: 'syncOutNow', account: 'me' });
+  const reachedBottom = () => store['cursor:me'].out?.lastFullDays === 30 && store['cursor:me'].out?.status === 'ok';
+  for (let i = 0; i < 10 && !reachedBottom(); i++) await until(reachedBottom, '读到回复列表底部').catch(() => {});
+  assert.ok(reachedBottom());
+  assert.ok(server.outCalls > outBefore);
+  assert.equal(store['cursor:me'].out.reachedEnd, true);
+  assert.ok(store['cursor:me'].out.coverTs <= Date.now() - 20 * DAY + 60_000, '记下实际读到的最早时间');
+
+  // 单次读取达到轮数上限：不能把失败写成「初始化完成」，但要留下实际读到的最早时间
+  const savedOutState = structuredClone(store['cursor:me'].out);
+  const savedFeed = outFeed.splice(0, outFeed.length,
+    ...Array.from({ length: 12 }, (_, i) => mine(String(9005 - (i % 6)), 1 + i, '2')));
+  store['cursor:me'].out = {
+    ...savedOutState,
+    status: 'ok', message: null, limitReached: null, attemptCoverTs: null,
+    fullFor: 0, initDays: 30, targetTs: Date.now() - 40 * DAY,
+    resume: { cursor: '0', topId: null, rounds: 119, full: true, stopAt: null, nextAt: 0 },
+  };
+  try {
+    await fire('out');
+    const afterLimit = store['cursor:me'].out;
+    assert.equal(afterLimit.status, 'error');
+    assert.equal(afterLimit.limitReached, true);
+    assert.equal(afterLimit.lastFullAt, savedOutState.lastFullAt, '失败不改上次初始化完成时间');
+    assert.equal(afterLimit.lastFullDays, savedOutState.lastFullDays, '失败不改上次初始化范围');
+    assert.equal(afterLimit.coverTs, savedOutState.coverTs, '失败不拿这次的部分进度冒充完整覆盖');
+    assert.ok(afterLimit.attemptCoverTs >= Date.now() - 11 * DAY, '记下这次实际读到的最早时间');
+    assert.equal(afterLimit.syncedId, savedOutState.syncedId, '没读完时接续点不动');
+    const callsAtLimit = server.outCalls;
+    await fire('out');
+    assert.equal(server.outCalls, callsAtLimit, '达到上限后自动闹钟不再继续读');
+    assert.equal(store['cursor:me'].out.status, 'error');
+    delete alarms['out:me'];
+    await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+    assert.equal(alarms['out:me'], undefined, '达到上限后页面上线也不再安排自动读取');
+  } finally {
+    outFeed.splice(0, outFeed.length, ...savedFeed);
+    store['cursor:me'].out = savedOutState;
+  }
+
+  await set({ initDays: 7 });
   await set({ fetchEnabled: false });
 
   // 清空：榜单、快照、游标都没了，设置保留

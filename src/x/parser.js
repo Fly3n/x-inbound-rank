@@ -111,9 +111,9 @@ function fromGraphql(body, inspect) {
  */
 export function parseMentions(body, me, inspect) {
   const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body, inspect) : fromRest(body);
-  const myHandle = me.handle.toLowerCase();
+  const myHandle = (me.handle || '').toLowerCase();
   const isMe = (userId, screenName) =>
-    (me.userId && userId === me.userId) || (screenName && screenName.toLowerCase() === myHandle);
+    (me.userId && userId === me.userId) || (!!myHandle && screenName && screenName.toLowerCase() === myHandle);
 
   const events = [];
   let newestId = null;
@@ -212,9 +212,9 @@ export function parseMyReplies(body, me) {
     throw new ParseError(err ? `X 返回错误：${String(err).slice(0, 200)}` : '返回里找不到时间线（instructions）');
   }
 
-  const myHandle = me.handle.toLowerCase();
+  const myHandle = (me.handle || '').toLowerCase();
   const isMe = (userId, screenName) =>
-    (me.userId && userId === me.userId) || (!me.userId && screenName && screenName.toLowerCase() === myHandle);
+    (me.userId && userId === me.userId) || (!me.userId && !!myHandle && screenName && screenName.toLowerCase() === myHandle);
 
   const byId = new Map(); // 本页出现过的所有帖子，用来查对话根帖是谁发的
   const mine = new Map(); // 我发的

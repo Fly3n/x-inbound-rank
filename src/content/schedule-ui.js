@@ -122,7 +122,20 @@
     return true;
   }
 
-  function fillNativeForm(form, targetTs) {
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+  /** X 换月后 React 可能异步重建「日」的选项：等到目标选项出现再填，最多等 600ms。 */
+  async function setSelectWhenReady(select, candidates, timeout = 600) {
+    const start = performance.now();
+    for (;;) {
+      if (setSelectValue(select, candidates)) return true;
+      if (performance.now() - start >= timeout) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  async function fillNativeForm(form, targetTs) {
+    let current = () => (activeDialog && document.contains(activeDialog) && findScheduleForm(activeDialog)) || form;
     const d = new Date(targetTs);
     const y = d.getFullYear();
     const m = d.getMonth() + 1;
@@ -130,21 +143,27 @@
     const h24 = d.getHours();
     const min = d.getMinutes();
 
-    const okY = setSelectValue(form.year, [y]);
-    const okM = setSelectValue(form.month, [m, String(m).padStart(2, '0')]);
-    // 月份切换后 React 可能异步刷新当月天数，紧接着填日
-    const okD = setSelectValue(form.day, [day, String(day).padStart(2, '0')]);
+    let f = current();
+    const okY = setSelectValue(f.year, [y]);
+    const okM = setSelectValue(f.month, [m, String(m).padStart(2, '0')]);
+    await nextFrame();
+    f = current();
+    const okD = await setSelectWhenReady(f.day, [day, String(day).padStart(2, '0')]);
 
     let okH = false;
-    if (form.ampm) {
+    f = current();
+    if (f.ampm) {
       const isPm = h24 >= 12;
       const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-      setSelectValue(form.ampm, isPm ? ['pm', 'PM', '下午'] : ['am', 'AM', '上午']);
-      okH = setSelectValue(form.hour, [h12, String(h12).padStart(2, '0')]);
+      setSelectValue(f.ampm, isPm ? ['pm', 'PM', '下午'] : ['am', 'AM', '上午']);
+      await nextFrame();
+      f = current();
+      okH = await setSelectWhenReady(f.hour, [h12, String(h12).padStart(2, '0')]);
     } else {
-      okH = setSelectValue(form.hour, [h24, String(h24).padStart(2, '0')]);
+      okH = setSelectValue(f.hour, [h24, String(h24).padStart(2, '0')]);
     }
-    const okMin = setSelectValue(form.minute, [min, String(min).padStart(2, '0')]);
+    f = current();
+    const okMin = await setSelectWhenReady(f.minute, [min, String(min).padStart(2, '0')]);
     return okY && okM && okD && okH && okMin;
   }
 
@@ -174,15 +193,16 @@
     if (slot.occupied) {
       btn.disabled = true;
     } else {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (XIRRel.session()?.account !== account || !enabled) return;
         const filledTs = XIRSchedule.pickJitteredTime(slot.ts, { nowTs: Date.now(), scheduled: state.items });
-        const ok = fillNativeForm(form, filledTs);
+        const ok = await fillNativeForm(form, filledTs);
+        if (XIRRel.session()?.account !== account || !enabled) return;
         lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };
         if (inDropdown) dropOpen = false;
-        renderPanel(form);
+        renderPanel((activeDialog && findScheduleForm(activeDialog)) || form);
       });
     }
     return btn;

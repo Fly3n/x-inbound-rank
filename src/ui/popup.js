@@ -9,8 +9,12 @@ const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, t
 const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
+const fmtShortDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; };
 const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fmtReadMonth = (ts) => `${new Date(ts).getMonth() + 1} 月`;
+const fmtExactTime = (ts) => {
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
 const windowLabel = (days) => ({ 15: '半个月', 30: '一个月', 60: ' 2 个月', 90: ' 3 个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
@@ -60,16 +64,17 @@ function replyColumn(label, data, ready = true) {
   const heading = ready ? `${label} · ${data.total} 次` : label;
   return el('div', { className: 'reply-column' }, [
     el('div', { className: 'reply-heading', textContent: heading }),
-    ...data.items.map((it) => el('a', {
+    ...(ready ? data.items.map((it) => el('a', {
       className: 'reply',
       href: `https://x.com/i/status/${it.id}`,
       target: '_blank',
       rel: 'noreferrer',
       textContent: fmtTime(it.created_at),
-      title: `${label} · ${fullTime(it.created_at)}`,
-    })),
-    ...(!data.items.length ? [el('p', { className: 'hint', textContent: ready ? '暂无记录' : '尚未读取' })] : []),
-    ...(data.total > data.items.length ? [el('p', { className: 'hint', textContent: `仅显示最近 ${data.items.length} 条` })] : []),
+      title: [label, fullTime(it.created_at), it.text ? `摘要：${it.text}` : ''].filter(Boolean).join('\n'),
+    })) : []),
+    ...(!ready ? [el('p', { className: 'hint', textContent: '尚未读取' })]
+      : !data.items.length ? [el('p', { className: 'hint', textContent: '暂无记录' })] : []),
+    ...(ready && data.total > data.items.length ? [el('p', { className: 'hint', textContent: `仅显示最近 ${data.items.length} 条` })] : []),
   ]);
 }
 
@@ -80,7 +85,7 @@ function detailRow() {
   if (d.error) return el('li', { className: 'detail hint', textContent: '读取明细失败，收起后再试。' });
   return el('li', { className: 'detail reply-columns' }, [
     replyColumn('他回我', d),
-    replyColumn('我回他', d.outbound, view.outReady || d.outbound.total > 0),
+    replyColumn('我回他', d.outbound, view.outReady),
   ]);
 }
 
@@ -245,15 +250,16 @@ async function draw() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA || s.db.out.count > 0 });
+  const outDataReady = (out?.schema || 1) >= OUT_SCHEMA;
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && outDataReady });
   // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
   // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
   const initStart = Date.now() - rules.initDays * DAY_MS;
   const lbIn = s.cursor.lastBackfill;
   const inFrom = lbIn ? lbIn.finishedAt - lbIn.rangeDays * DAY_MS : null;
   const inCovered = !!lbIn && !!s.cursor.syncedId && (lbIn.reachedEnd || inFrom <= initStart);
-  const outFrom = out?.lastFullAt && out.lastFullDays ? out.lastFullAt - out.lastFullDays * DAY_MS : null;
-  const outCovered = !!outFrom && !!out.syncedId && out.fullFor !== 0 && (out.schema || 1) >= OUT_SCHEMA && outFrom <= initStart;
+  const outCovered = !!out && outDataReady && (out.reachedEnd || (!!out.syncedId && out.coverTs && out.coverTs <= initStart));
+  const outCoveredNow = outCovered && out.status !== 'error';
 
   // 保存期限：最早的数据存满 80 天时挂红字提示先导出；第一次清理之后数据每天滚动清，改成一行小字
   const oldest = Math.min(s.db.in.from ?? Infinity, s.db.out.from ?? Infinity);
@@ -277,7 +283,7 @@ async function draw() {
   const outPending = !!outPhase || out?.fullFor === 0 && out?.status !== 'error';
   const outProgress = running ? `进行中，本轮已读 ${running.pages} 页。`
     : outPhase ? `${outPhase}。` : '';
-  $('outIssue').textContent = outBad;
+  $('outIssue').textContent = outBad + (out?.limitReached && out?.attemptCoverTs ? ` 实际最早读到 ${fmtDay(out.attemptCoverTs)}。` : '');
   $('outIssue').hidden = !outBad;
   view.handle = handle;
   const outLink = $('outRepliesLink');
@@ -289,8 +295,10 @@ async function draw() {
     : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
   $('outLine').hidden = !$('outLine').textContent;
   $('outReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
-    : outCovered && !outPending ? '已覆盖所选范围' : '';
-  $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCovered || starting.has('outSync');
+    : outCoveredNow && !outPending
+      ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : '已读到列表底部') : '已覆盖所选范围')
+      : outDataReady && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
+  $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCoveredNow || starting.has('outSync');
   $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);
   $('initRange').value = String(rules.initDays);
@@ -318,11 +326,14 @@ async function draw() {
   $('inReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
   $('resume').disabled = !isSession || !rules.fetchEnabled;
-  const inboundRead = readSummary(s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt, s.cursor.inLastReadCounts);
-  const outboundRead = readSummary(out?.lastReadAt ?? out?.lastAt, out?.lastReadCounts);
-  renderFields('updateSummary', [['别人回我：', inboundRead], ['我回别人：', outboundRead]]);
-  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundRead);
-  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundRead);
+  const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
+  const outboundAt = out?.lastReadAt ?? out?.lastAt;
+  renderFields('updateSummary', [
+    ['别人回我：', readSummary(inboundAt, s.cursor.inLastReadCounts)],
+    ['我回别人：', readSummary(outboundAt, out?.lastReadCounts)],
+  ]);
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -339,17 +350,18 @@ async function draw() {
   renderTiers(rules);
 }
 
-function readSummary(at, counts) {
+function readSummary(at, counts, exact = false) {
   if (!at) return '暂无读取记录';
-  return fmtReadMonth(at) + (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
+  return (exact ? fmtExactTime(at) : fmtTime(at)) +
+    (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
 }
 
-function renderDataStatus(id, data, initializedAt, days, summary) {
+function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
   renderFields(id, [
     ['本机条数', `${data.count} 条`],
-    ['记录日期', data.count ? `${fmtDay(data.from)} – ${fmtDay(data.to)}` : '暂无记录'],
-    ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
-    ['上次读取', summary],
+    ['记录日期', data.count ? `${fmtShortDay(data.from)} – ${fmtShortDay(data.to)}` : '暂无记录'],
+    ['上次初始化', initializedAt ? `${fmtExactTime(initializedAt)}（${days} 天）` : '未完成'],
+    ['上次读取', readSummary(readAt, counts, true)],
   ]);
 }
 
@@ -526,8 +538,9 @@ $('diagnoseMentions').addEventListener('click', async () => {
   const button = $('diagnoseMentions');
   const status = $('diagnosisResult');
   const custom = $('diagWindow').value === 'custom';
-  const from = custom ? new Date($('diagFrom').value).getTime() : Date.parse('2026-11-20T17:00:00+08:00');
-  const to = custom ? new Date($('diagTo').value).getTime() : Date.parse('2026-11-20T18:00:00+08:00');
+  const hours = { '1h': 1, '6h': 6, '24h': 24 }[$('diagWindow').value] || 1;
+  const to = custom ? new Date($('diagTo').value).getTime() : Date.now();
+  const from = custom ? new Date($('diagFrom').value).getTime() : to - hours * 3_600_000;
   const postId = $('diagPostId').value.trim();
   button.disabled = true;
   status.textContent = '正在限速回查，请保持弹窗和 X 页面打开。';

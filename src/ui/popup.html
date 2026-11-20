@@ -53,7 +53,7 @@
           <li>排名：所选范围内，他在我的帖子下回复我几次，不分第几层。</li>
           <li>「我回 N」：同一范围内，我直接评论他的帖子几次（只算第一层）。</li>
           <li>范围可以比初始化读的长：数据是攒出来的，本机最多存 3 个月。</li>
-          <li>点头像去他的主页。点这一行其他地方，看双方回复的时间，点时间打开原文。</li>
+          <li>点头像去他的主页。点这一行其他地方，看双方回复的时间；悬停时间可看回复摘要，点击打开原文。</li>
           <li>次数小块的颜色和时间线标签一致，在设置页改。</li>
           <li>导出榜单：当前榜上的人；导出全量数据：本机存的每一条回复。</li>
         </ul>
@@ -70,7 +70,7 @@
     <section id="view-settings" hidden>
       <section class="card">
         <h2>数据读取 <button class="q" data-tip="tip-data" aria-label="数据读取说明">?</button></h2>
-        <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段，自动更新只读取之后的新回复。榜单范围在榜单页单独设置。</p></div>
+        <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段，自动更新只读取之后的新回复。这个开关只管两份回复数据，排期同步单独按需进行。榜单范围在榜单页单独设置。</p></div>
 
         <div class="row between">
           <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新两份数据（约每小时）</label>
@@ -101,7 +101,7 @@
           </div>
 
           <p id="jobStatus" hidden></p>
-          <div class="tip" id="tip-in" hidden><p>统计在我帖子下直接回复我的次数，决定榜单排名。</p></div>
+          <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
           <details class="settings-detail">
             <summary>数据状态</summary>
             <dl class="data-status" id="coverage"></dl>
@@ -114,7 +114,7 @@
             <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">初始化</button></span>
           </div>
 
-          <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回」。</p></div>
+          <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回」。列表先到底时按实际读到的时间显示，不冒充已覆盖。</p></div>
           <details class="settings-detail">
             <summary>数据状态</summary>
             <dl class="data-status" id="outStatus"></dl>
@@ -131,8 +131,8 @@
       </details>
 
       <section class="card">
-        <h2>时间线上显示什么 <button class="q" data-tip="tip-show" aria-label="时间线上显示什么说明">?</button></h2>
-        <div class="tip" id="tip-show" hidden><p>选择名字旁显示的标签。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。</p></div>
+        <h2>时间线和发帖时显示什么 <button class="q" data-tip="tip-show" aria-label="时间线和发帖时显示什么说明">?</button></h2>
+        <div class="tip" id="tip-show" hidden><p>选择名字旁显示的标签，以及排期弹窗里的快捷档期。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。排期开关不受自动更新开关影响。</p></div>
         <label class="line"><input type="checkbox" id="showRank"> 名次标签（名次 + 回复次数）</label>
         <label class="line"><input type="checkbox" id="showOut"> 名次标签里带上「我回他几次」</label>
         <label class="line"><input type="checkbox" id="showRel"> 关系（互 / 粉）</label>
@@ -190,18 +190,20 @@
 
       <details class="card fold">
         <summary>风险说明</summary>
-        <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；关掉「自动更新」后不再向 X 发任何请求。数据只存在本机，不上传。风险自担。</p>
+        <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；关掉「自动更新」后不再自动更新两份回复数据，打开排期弹窗时仍会按需读取一次已排期列表。数据只存在本机，不上传。风险自担。</p>
       </details>
 
       <details class="card fold" id="diagnostics">
         <summary>本地诊断日志</summary>
-        <p class="hint">保留最近 7 天。显示最近 10 条，导出包含帖子编号、请求条件和处理原因，分享前请先检查。</p>
+        <p class="hint">保留最近 7 天的全量日志。弹窗显示最近 10 条，导出包含帖子编号、请求条件和处理原因，分享前请先检查。</p>
         <details class="settings-detail">
           <summary>按时间回查「别人回我」</summary>
-          <p class="hint">从最新提及往前查，单次最多 20 页。自定义时间按浏览器本地时区。</p>
+          <p class="hint">从最新提及往前查，单次最多 20 页。预设按最近 1、6 或 24 小时；自定义时间按浏览器本地时区。</p>
           <label class="line">时间窗
             <select id="diagWindow">
-              <option value="incident">11 月 20 日 17:00–18:00（北京时间）</option>
+          <option value="1h">最近 1 小时</option>
+          <option value="6h">最近 6 小时</option>
+          <option value="24h">最近 24 小时</option>
               <option value="custom">自定义</option>
             </select>
           </label>
@@ -230,7 +232,7 @@
       <section class="card">
         <h2>账号</h2>
         <button id="disableAccount">关闭 X 友</button>
-        <p class="hint">暂停此账号的功能和更新，保留本机数据。</p>
+        <p class="hint">按 X 的数字用户 ID 识别账号，改 @用户名 不会改变数据归属。关闭会暂停此账号的功能和更新，保留本机数据。</p>
       </section>
     </section>
   </main>
