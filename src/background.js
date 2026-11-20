@@ -466,33 +466,40 @@ async function wakeJob(tabOnline) {
 
 // ---------- 增量 ----------
 
-/** 增量现在该不该跑：该跑返回 { account, cur, settings }，不该返回 null。 */
+/** 自动任务未到期返回 null，手动任务受阻时返回具体原因。 */
 async function incDue(manualAccount) {
+  const blocked = (error) => manualAccount ? { error } : null;
   const account = await kvGet(keys.current);
-  if (!account || (manualAccount && manualAccount !== account)) return null;
+  if (!account || (manualAccount && manualAccount !== account)) return blocked('请切换到当前登录的 X 账号。');
   const settings = await getSettings(account);
-  if (!settings.fetchEnabled) return null;
+  if (!settings.fetchEnabled) return blocked('读取已关闭，请先打开自动更新开关。');
   const cur = await kvGet(keys.cursor(account), {});
-  if (!cur.syncedId) return null; // 还没完成过初始化，不自动抓
+  if (!cur.syncedId) return blocked('请先完成「别人回我」初始化。');
   const job = await kvGet(keys.job(account));
-  if (job && ['running', 'waiting_tab'].includes(job.status)) return null;
-  if (job && job.status === 'paused' && job.auto) return null; // 限流退避中
+  if (job && ['running', 'waiting_tab'].includes(job.status)) return blocked('「别人回我」正在初始化，请等它结束。');
+  if (job?.status === 'paused' && job.auto) return blocked(job.message || '初始化正在退避，稍后自动继续。');
   const t = now();
-  if (cur.rateUntil > t) return null;
-  if (t < (cur.nextIncAt || 0) && (!manualAccount || cur.incResume || cur.serviceRetries || cur.rateUntil > t)) return null;
-  if (!cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null; // 接着上一轮补读的不受这个限制
+  const until = Math.max(cur.rateUntil || 0, cur.serviceRetries ? cur.nextIncAt || 0 : 0);
+  if (until > t) return blocked(`接口正在退避，请在 ${new Date(until).toLocaleTimeString()} 后再试。`);
+  if (t < (cur.nextIncAt || 0)) {
+    if (cur.incResume) return blocked('上一轮还有数据等待续读，插件会自动继续。');
+    if (!manualAccount) return null;
+  }
+  if (!manualAccount && !cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
   return { account, cur, settings };
 }
 
 async function maybeIncremental(manualAccount) {
-  // 正在跑的那个动作结束后会自己约下一次；到点没跑上的由兜底闹钟接上
-  if (busy || !(await incDue(manualAccount))) return false;
-  if (busy) return false;
+  const inProgress = () => manualAccount ? { error: '已有读取任务正在运行，请等这次完成。' } : false;
+  if (busy) return inProgress();
+  const eligibility = await incDue(manualAccount);
+  if (!eligibility || eligibility.error) return eligibility || false;
+  if (busy) return inProgress();
   busy = true;
   let account = null;
   try {
     const due = await incDue(manualAccount); // 占住之后再确认一遍：上面查的工夫里刚跑完一轮的话，时间已经往后推了
-    if (!due) return false;
+    if (!due || due.error) return due || false;
     account = due.account;
     const { cur } = due;
 
@@ -675,7 +682,15 @@ async function syncOut(expectedAccount) {
         await record('retry_scheduled', { ...trace, source: 'replies', status: r.status, waitMs: wait });
         return;
       }
-      if (r.status === 429) return saveOut(account, { status: 'error', message: 'X 暂时限制了读取（429），请稍后再试。' });
+      if (r.status === 429) {
+        const retryAt = Math.max(r.rateResetAt || 0, now() + PACE.backoffStartMs);
+        await saveOut(account, { status: 'queued', retryAt,
+          resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt },
+          message: `X 暂时限制了读取（429），将在 ${new Date(retryAt).toLocaleTimeString()} 后续读。` });
+        await chrome.alarms.create(OUT_ALARM, { when: retryAt });
+        await record('retry_scheduled', { ...trace, source: 'replies', status: 429, waitMs: retryAt - now() });
+        return;
+      }
       if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
         await kvRemove(keys.tpl); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
         return saveOut(account, { status: 'need_tpl', resume: null, message: 'X 的读取方式已更新。打开「回复」页后自动继续。' });
@@ -957,9 +972,7 @@ const handlers = {
   diagnoseMentions,
   async updateNowWithReceipt({ account }) {
     const startedAt = now();
-    if (!account || !await incDue(account) || busy) {
-      return { error: '当前无法更新。请先完成「别人回我」初始化，并等待正在运行的读取、最短更新间隔或退避结束。' };
-    }
+    if (!account) return { error: '请先选择已登录的 X 账号。' };
     const result = await maybeIncremental(account);
     if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
     if (!result?.ok) return result;

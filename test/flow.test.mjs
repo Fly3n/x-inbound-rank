@@ -402,7 +402,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(store['cursor:me'].inLastReadCounts.read > 0);
   assert.equal(store['cursor:me'].inLastReadCounts.added, 0, '没有新记录也显示读到的条数');
   assert.ok(store['cursor:me'].out.lastReadCounts.read > 0);
-  assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, '连续点击仍受间隔限制');
+  const beforeSecond = [server.calls, server.outCalls];
+  assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).ok, '完成后可再次立即更新');
+  assert.deepEqual([server.calls, server.outCalls], beforeSecond.map((n) => n + 1));
+  store['cursor:me'].rateUntil = Date.now() + 60_000;
+  assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /退避/);
+  assert.deepEqual([server.calls, server.outCalls], beforeSecond.map((n) => n + 1), '接口退避时不发请求');
+  delete store['cursor:me'].rateUntil;
   await set({ fetchEnabled: false });
 
   await set({ fetchEnabled: true });
