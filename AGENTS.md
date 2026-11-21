@@ -57,6 +57,7 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 | 改数据模型 |
 | `src/diagnostics.js` | 本机诊断日志：按小时分键写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
 | `src/ui/` | 弹窗 | 改界面 |
+| `src/snapshot.js` / `src/ui/snapshot.*` | 开发用只读本机快照页：把 `chrome.storage.local` 和 IndexedDB 两份数据合成 JSON；不挂弹窗入口、不发请求、不新增权限 | 改本机数据迁移或排查工具 |
 
 **隔离原则**：只有 `fetcher.js` 和 `parser.js`（以及专做提及诊断的 `mentions-diagnostics.js`）知道 X 接口字段，只有 `content.js` / `schedule-ui.js` 的页面选择器知道 X DOM。其他文件不得出现 X 的字段名或选择器。
 
@@ -188,6 +189,7 @@ npm test
 - `test/logic.test.mjs`：榜单、口径过滤、规则合法化、颜色分档、解析分类与边界。
 - `test/flow.test.mjs`：用假的 chrome API 和假接口跑后台全流程（回填、429 退避与续跑、去重、增量、关开关、清空）。
 - `test/session.test.mjs`：账号会话切换和页面缓存隔离。
+- `test/snapshot.test.mjs`：开发用本机快照的结构、文件名和摘要。
 
 这些测试的假数据都是按「预期的接口形态」写的，能证明逻辑自洽，**不能证明 X 真实返回长这样**。`fake-indexeddb` 只是测试依赖，插件本身零依赖、无需构建。
 
