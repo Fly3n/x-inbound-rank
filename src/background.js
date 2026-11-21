@@ -52,20 +52,26 @@ const now = () => Date.now();
 const ACTIVE_START_HOUR = 8;
 const ACTIVE_LAST_START_MIN = 23 * 60 + 30;
 const inActiveHours = (ts = now()) => new Date(ts).getHours() >= ACTIVE_START_HOUR;
-// 日常自动读取只放在上午，模拟起床后集中看一次；错过就等下一个上午，换成手动更新。
-const AUTO_MORNING_START_MIN = 8 * 60;
-const AUTO_MORNING_END_MIN = 11 * 60 + 30;
-const inAutoMorning = (ts = now()) => {
+// 日常自动读取放在上午和晚间，模拟人自己刷通知的两个自然时段。
+const AUTO_SLOTS = [
+  { start: 8 * 60, end: 11 * 60 + 30, scheduleEnd: 10 * 60 + 30 },
+  { start: 18 * 60, end: 22 * 60 + 30, scheduleEnd: 21 * 60 + 30 },
+];
+const inAutoSlot = (ts = now()) => {
   const d = new Date(ts);
   const minute = d.getHours() * 60 + d.getMinutes();
-  return minute >= AUTO_MORNING_START_MIN && minute < AUTO_MORNING_END_MIN;
+  return AUTO_SLOTS.some(({ start, end }) => minute >= start && minute < end);
 };
-/** 成功读完一轮后的下一次日常更新：下一个上午随机一次，不卡整点。 */
-function nextAutoMorning(ts = now()) {
+/** 成功读完一轮后的下一次日常更新：下一个上午或晚间随机一次，不卡整点。 */
+function nextAutoSlot(ts = now()) {
   const d = new Date(ts);
-  const today = new Date(d);
-  today.setHours(8, 0, 0, 0);
-  if (ts < today.getTime()) return today.getTime() + rand([0, 150 * 60_000]);
+  const minute = d.getHours() * 60 + d.getMinutes();
+  for (const slot of AUTO_SLOTS) {
+    if (minute >= slot.start) continue;
+    const base = new Date(d);
+    base.setHours(0, 0, 0, 0);
+    return base.getTime() + slot.start * 60_000 + rand([0, (slot.scheduleEnd - slot.start) * 60_000]);
+  }
   const tomorrow = new Date(d);
   tomorrow.setDate(d.getDate() + 1);
   tomorrow.setHours(8, 0, 0, 0);
@@ -421,7 +427,7 @@ const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), m
 /** 记下这一轮增量的时间，并定好下一个上午。只改 cur，在 updateCursor 里调用；返回下一次的时间，交给 armInc 约闹钟。 */
 function planNextInc(cur, from) {
   cur.lastIncrementalAt = from;
-  cur.nextIncAt = nextAutoMorning(from);
+  cur.nextIncAt = nextAutoSlot(from);
   return cur.nextIncAt;
 }
 
@@ -660,7 +666,7 @@ async function incDue(account, manual) {
   }
   const resumeManual = !!cur.incResume?.manual;
   if (!manual && !resumeManual && !settings.fetchEnabled) return null;
-  if (!manual && !resumeManual && !inAutoMorning(t)) return null;
+  if (!manual && !resumeManual && !inAutoSlot(t)) return null;
   if (!manual && !cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
   if (!manual && !(await hasVisiblePage(account))) return null;
   return { account, cur, settings };
@@ -835,7 +841,7 @@ async function syncOut(account, manual = false) {
     // 手动读取一旦开始，就允许跨分段续完；自动读取只受开关和上午窗口约束。
     const taskManual = manual || (!!prev.manualTask && pending);
     if (!taskManual && !settings.fetchEnabled) return;
-    if (!taskManual && !pending && !inAutoMorning()) return;
+    if (!taskManual && !pending && !inAutoSlot()) return;
     if (!inActiveHours()) {
       if (!manual) {
         const when = nextActiveAt();
@@ -850,7 +856,7 @@ async function syncOut(account, manual = false) {
     }
     // 达到单次上限后已经明确报错停下：自动闹钟不要继续烧额度，等用户手动点初始化或立即更新再试
     if (!manual && prev.status === 'error' && prev.limitReached) return;
-    const autoDue = prev.nextAutoAt ?? (prev.lastAt ? nextAutoMorning(prev.lastAt) : 0);
+    const autoDue = prev.nextAutoAt ?? (prev.lastAt ? nextAutoSlot(prev.lastAt) : 0);
     const recovering = pending || prev.status === 'need_tpl';
     const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0, !manual && !recovering ? autoDue : 0);
     if (nextAt > now()) {
@@ -982,7 +988,7 @@ async function syncOut(account, manual = false) {
     }
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId)) ? topId : prev.syncedId || topId;
-    const nextAutoAt = nextAutoMorning(now());
+    const nextAutoAt = nextAutoSlot(now());
     const done = { status: 'ok', serviceRetries: 0, message: null, pages, syncedId, resume: null, lastAt: now(), nextAutoAt, manualTask: false };
     await saveOut(account, full ? {
       ...done,
@@ -1065,7 +1071,7 @@ async function recoverAlarms(account) {
     await ensure(JOB_ALARM, job.nextAt || 0);
   }
   if ((autoEnabled || cur.incResume?.manual) && cur.syncedId) {
-    const nextIncAt = cur.nextIncAt > now() && inAutoMorning(cur.nextIncAt) ? cur.nextIncAt : nextAutoMorning();
+    const nextIncAt = cur.nextIncAt > now() && inAutoSlot(cur.nextIncAt) ? cur.nextIncAt : nextAutoSlot();
     await ensure(INC_ALARM, nextIncAt);
   }
   // 已开始的出站初始化独立续跑，即使入站还没完成首次初始化。
@@ -1077,7 +1083,7 @@ async function recoverAlarms(account) {
     if (pending) await ensure(OUT_ALARM, retryAt);
     else if (autoEnabled) {
       const saved = out.nextAutoAt;
-      const routine = saved > now() && inAutoMorning(saved) ? saved : nextAutoMorning();
+      const routine = saved > now() && inAutoSlot(saved) ? saved : nextAutoSlot();
       await ensure(OUT_ALARM, routine);
     }
   }

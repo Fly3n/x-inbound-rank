@@ -266,7 +266,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   // 出站每日更新只接到上次位置；下一次自动时间未到时，遗留闹钟也不会发请求
   await fire('out');
   assert.equal(server.outCalls, 3);
-  assert.ok(store['cursor:me'].out.nextAutoAt - Date.now() >= 23 * 60 * 60_000);
+  assert.ok(store['cursor:me'].out.nextAutoAt - Date.now() >= 8 * 60 * 60_000);
 
   // 榜单范围切到半个月：榜单和标签快照立刻按新范围重算，不发请求
   assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
@@ -348,9 +348,9 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(server.calls - before, 4);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
-  // 下一次定在下一个上午，并约好闹钟
+  // 下一次定在下一个自动时段，并约好闹钟
   const gap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(gap >= 23 * 60 * 60_000 && gap <= 25.5 * 60 * 60_000 + 1_000);
+  assert.ok(gap >= 8 * 60 * 60_000 && gap <= 13 * 60 * 60_000 + 1_000);
   assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
   // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时仍会做每日安全回看
@@ -432,7 +432,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     activeNow = new Date(2026, 10, 21, 12, 0, 0, 0).getTime();
     Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
     await listeners.alarm({ name: 'tick' });
-    assert.equal(server.calls, before, '自动更新只在上午窗口启动');
+    assert.equal(server.calls, before, '两个自动窗口之间不读取');
+
+    activeNow = new Date(2026, 10, 21, 19, 0, 0, 0).getTime();
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+    before = server.calls;
+    await listeners.alarm({ name: 'tick' });
+    assert.ok(server.calls > before, '晚间自动窗口会读取');
   } finally {
     hiddenTabs.delete(1);
     hiddenTabs.delete(4);
@@ -447,6 +453,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(alarms['inc:me'], undefined);
   assert.equal(alarms['out:me'], undefined);
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  before = server.calls;
   await listeners.alarm({ name: 'tick' });
   assert.equal(server.calls, before);
   assert.deepEqual(await send({ type: 'startBackfill', account: 'me' }), { ok: true }, '手动初始化不受自动更新开关影响');
@@ -502,8 +509,8 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   const firstManualCalls = server.calls - before;
   assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取');
   const nextAutoGap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(nextAutoGap >= 23 * 60 * 60_000 && nextAutoGap <= 25.5 * 60 * 60_000 + 1_000,
-    '立即更新后顺延到下一个上午');
+  assert.ok(nextAutoGap >= 8 * 60 * 60_000 && nextAutoGap <= 13 * 60 * 60_000 + 1_000,
+    '立即更新后顺延到下一个自动时段');
   assert.equal(alarms['inc:me'], undefined, '自动更新关闭时不安排自动读取');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
