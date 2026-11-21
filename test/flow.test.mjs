@@ -22,9 +22,6 @@ const sessions = new Map([[1, { userId: '1', handle: 'Me' }], [4, { userId: '1',
 const staleTabs = new Set();
 const loadingTabs = new Set();
 const reloadCalls = [];
-const windowCalls = { get: [], update: [], create: [] };
-const openWindows = new Map();
-let nextWindowId = 100;
 let activeTab = 1;
 const listeners = {};
 const hook = (name) => ({ addListener: (fn) => (listeners[name] = fn) });
@@ -105,7 +102,6 @@ globalThis.chrome = {
   },
   runtime: {
     getManifest: () => ({ version }),
-    getURL: (path) => `chrome-extension://test/${path}`,
     onInstalled: hook('installed'),
     onStartup: hook('startup'),
     onMessage: hook('message'),
@@ -125,28 +121,6 @@ globalThis.chrome = {
       server.mentionTpl = msg.tpl;
       return { ...respond(msg.cursor), userId: session.userId };
     },
-  },
-  windows: {
-    get: async (id) => {
-      windowCalls.get.push(id);
-      const win = openWindows.get(id);
-      if (!win) throw new Error('window not found');
-      return win;
-    },
-    update: async (id, patch) => {
-      windowCalls.update.push([id, patch]);
-      const win = openWindows.get(id);
-      if (!win) throw new Error('window not found');
-      Object.assign(win, patch);
-      return win;
-    },
-    create: async (opts) => {
-      windowCalls.create.push(opts);
-      const win = { id: ++nextWindowId, ...opts };
-      openWindows.set(win.id, win);
-      return win;
-    },
-    onRemoved: hook('windowRemoved'),
   },
 };
 
@@ -695,26 +669,7 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
   }
 });
 
-test('固定窗口复用，扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
-  openWindows.clear();
-  windowCalls.get.length = 0;
-  windowCalls.update.length = 0;
-  windowCalls.create.length = 0;
-  store.pinnedWindowId = 999; // 上一版留在 local 的旧 ID 不能被复用
-  const opens = await Promise.all([send({ type: 'openPinned' }), send({ type: 'openPinned' })]);
-  assert.deepEqual(opens, [{ ok: true }, { ok: true }], '同时点两次不会开出两个窗口');
-  const pinnedId = sessionStore.pinnedWindowId;
-  assert.ok(pinnedId);
-  assert.equal(windowCalls.create.length, 1);
-  assert.match(windowCalls.create[0].url, /popup\.html\?pinned=1$/);
-  assert.deepEqual(await send({ type: 'openPinned' }), { ok: true });
-  assert.equal(sessionStore.pinnedWindowId, pinnedId, '再点固定只聚焦已经打开的窗口');
-  assert.deepEqual(windowCalls.update.at(-1), [pinnedId, { focused: true, state: 'normal' }]);
-  assert.equal(windowCalls.create.length, 1);
-
-  await listeners.windowRemoved(pinnedId);
-  await until(() => sessionStore.pinnedWindowId === undefined, '关闭固定窗口后清掉记录');
-
+test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   staleTabs.add(1);
   loadingTabs.add(1);
   const before = reloadCalls.length;
@@ -731,5 +686,4 @@ test('固定窗口复用，扩展重载只刷新旧内容脚本', { timeout: 10_
   assert.deepEqual(reloadCalls.slice(before), [1], '页面加载完后只刷新旧内容脚本所在的 X 页面');
   assert.equal(staleTabs.has(1), false);
   assert.equal(sessionStore.staleTabsRetries, undefined);
-  delete store.pinnedWindowId;
 });

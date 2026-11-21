@@ -42,7 +42,6 @@ const INC_ALARM = 'inc';
 const OUT_ALARM = 'out';
 const alarmFor = (kind, account) => `${kind}:${account}`;
 const X_TABS = { url: ['https://x.com/*', 'https://twitter.com/*'] };
-const PINNED_WINDOW = 'pinnedWindowId';
 const STALE_TABS_RETRY = 'staleTabsRetries';
 const enabledAccounts = async () => Object.entries(await kvGet(keys.accounts, {})).filter(([, a]) => a.enabled && a.userId);
 const enabledAccount = async (account) => account && (await kvGet(keys.accounts, {}))[account]?.enabled === true;
@@ -183,66 +182,6 @@ function refreshStaleTabs({ retry = false } = {}) {
     .finally(() => { tabRefresh = null; });
   return tabRefresh;
 }
-
-async function pinnedWindowId() {
-  const saved = await chrome.storage.session?.get?.(PINNED_WINDOW);
-  const id = Number(saved?.[PINNED_WINDOW]);
-  return Number.isInteger(id) && id > 0 ? id : null;
-}
-
-async function setPinnedWindowId(id) {
-  if (id) await chrome.storage.session.set({ [PINNED_WINDOW]: id });
-  else await chrome.storage.session.remove(PINNED_WINDOW);
-}
-
-let pinnedChain = Promise.resolve();
-function serialPinned(fn) {
-  const run = pinnedChain.then(fn);
-  pinnedChain = run.catch(() => {});
-  return run;
-}
-
-async function openPinnedWindowUnlocked() {
-  if (!chrome.windows?.get || !chrome.windows?.create || !chrome.windows?.update) {
-    return { error: '当前 Chrome 不支持固定窗口。' };
-  }
-  if (!chrome.storage.session?.get || !chrome.storage.session?.set || !chrome.storage.session?.remove) {
-    return { error: '当前 Chrome 不支持固定窗口。' };
-  }
-  const saved = await pinnedWindowId();
-  if (saved) {
-    try {
-      await chrome.windows.get(saved);
-      await chrome.windows.update(saved, { focused: true, state: 'normal' });
-      return { ok: true };
-    } catch {
-      await setPinnedWindowId(null);
-    }
-  }
-  try {
-    const win = await chrome.windows.create({
-      url: chrome.runtime.getURL('src/ui/popup.html?pinned=1'),
-      type: 'popup',
-      width: 500,
-      height: 760,
-      focused: true,
-    });
-    if (!win?.id) return { error: '固定窗口没有成功创建，请重试。' };
-    await setPinnedWindowId(win.id);
-    return { ok: true };
-  } catch (e) {
-    return { error: `固定窗口打开失败：${String(e?.message || e)}` };
-  }
-}
-
-const openPinnedWindow = () =>
-  serialPinned(openPinnedWindowUnlocked).catch((e) => ({ error: `固定窗口打开失败：${String(e?.message || e)}` }));
-
-chrome.windows?.onRemoved?.addListener((id) => {
-  serialPinned(async () => {
-    if (await pinnedWindowId() === id) await setPinnedWindowId(null);
-  }).catch(() => {});
-});
 
 async function senderAccount(msg, sender) {
   if (!Number.isInteger(sender?.tab?.id) || (sender.frameId ?? 0) !== 0 ||
@@ -1282,7 +1221,6 @@ const handlers = {
     return { message: '别人回我已读完；我回别人暂未读取，请查看数据状态。' };
   },
   setAccountEnabled,
-  openPinned: openPinnedWindow,
   async getState() {
     const registry = await kvGet(keys.accounts, {});
     const accounts = Object.fromEntries(Object.entries(registry).filter(([, a]) => a.enabled));
