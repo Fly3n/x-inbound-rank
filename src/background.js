@@ -160,21 +160,27 @@ function accountForUser(accounts, userId) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-async function pingTab(tab) {
+async function probeTab(tab) {
   try {
     const page = await chrome.tabs.sendMessage(tab.id, { type: 'xir:ping' });
-    if (page?.ok && page.version === chrome.runtime.getManifest().version) return page;
+    if (page?.ok) return page;
   } catch {
     // 页面关闭、休眠或还没加载这版插件。
   }
   return null;
 }
+const pingTab = async (tab) => {
+  const page = await probeTab(tab);
+  return page?.version === chrome.runtime.getManifest().version ? page : null;
+};
 
 /**
  * 扩展重载/更新后，已打开页面里的旧内容脚本不会自己换新。
- * 只刷新连不上或版本对不上的 X 标签页；正常页面不动。
+ * 只刷新当前前台、连不上或版本对不上的 X 常规页面；正常页面、后台页和通知页都不主动刷新。
  */
 const isXTabUrl = (url) => /^https:\/\/(?:x|twitter)\.com\//.test(url || '');
+const isRefreshableXTabUrl = (url) =>
+  isXTabUrl(url) && !/^https:\/\/(?:x|twitter)\.com\/(?:i\/)?notifications(?:[/?#]|$)/.test(url);
 
 async function reloadStaleXirTabs() {
   if (!chrome.tabs?.query || !chrome.tabs?.get || !chrome.tabs?.reload) return { reloaded: 0, pending: 0 };
@@ -182,24 +188,31 @@ async function reloadStaleXirTabs() {
     await chrome.alarms.create(STALE_TABS_ALARM, { when: nextActiveAt() });
     return { reloaded: 0, pending: 0 };
   }
-  const tabs = await chrome.tabs.query(X_TABS).catch(() => []);
+  // 只处理当前窗口正在前台的 X 页面。后台标签页不刷新，切过去时再由 tabs.onActivated 补上；
+  // 通知页也不自动刷新，避免插件替用户动通知状态。
+  const tabs = await chrome.tabs.query({ ...X_TABS, active: true, lastFocusedWindow: true }).catch(() => []);
   let reloaded = 0;
   let pending = 0;
   for (const tab of tabs) {
     if (!tab?.id || tab.discarded) continue;
+    if (!isRefreshableXTabUrl(tab.url)) continue;
     if (tab.status === 'loading') {
       pending++;
       continue;
     }
-    if (await pingTab(tab)) continue;
+    const page = await probeTab(tab);
+    if (page?.visible === false) continue;
+    if (page?.version === chrome.runtime.getManifest().version) continue;
     // 失败可能刚好碰上页面开始导航。刷新前再查一次，避免打断已经换到新文档的页面。
     const current = await chrome.tabs.get(tab.id).catch(() => null);
-    if (!current || current.discarded || !isXTabUrl(current.url)) continue;
+    if (!current || current.discarded || !isRefreshableXTabUrl(current.url)) continue;
     if (current.status === 'loading') {
       pending++;
       continue;
     }
-    if (await pingTab(current)) continue;
+    const currentPage = await probeTab(current);
+    if (currentPage?.visible === false) continue;
+    if (currentPage?.version === chrome.runtime.getManifest().version) continue;
     try {
       await chrome.tabs.reload(tab.id);
       reloaded++;
@@ -231,6 +244,12 @@ function refreshStaleTabs({ retry = false } = {}) {
     .finally(() => { tabRefresh = null; });
   return tabRefresh;
 }
+
+const refreshActiveStaleTab = () => refreshStaleTabs({ retry: true });
+chrome.tabs?.onActivated?.addListener?.(refreshActiveStaleTab);
+chrome.tabs?.onUpdated?.addListener?.((_tabId, changeInfo) => {
+  if (changeInfo?.status === 'complete' || changeInfo?.url) return refreshActiveStaleTab();
+});
 
 async function senderAccount(msg, sender) {
   if (!Number.isInteger(sender?.tab?.id) || (sender.frameId ?? 0) !== 0 ||

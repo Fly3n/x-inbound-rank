@@ -1113,6 +1113,7 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
 });
 
 test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
+  activeTab = 1;
   staleTabs.add(1);
   loadingTabs.add(1);
   const before = reloadCalls.length;
@@ -1130,6 +1131,27 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   assert.equal(staleTabs.has(1), false);
   assert.equal(sessionStore.staleTabsRetries, undefined);
 
+  // 后台标签页不刷新；切回前台时再补刷
+  hiddenTabs.add(1);
+  staleTabs.add(1);
+  const hiddenBefore = reloadCalls.length;
+  await listeners.startup();
+  assert.equal(reloadCalls.length, hiddenBefore, '后台标签页不主动刷新');
+  assert.ok(staleTabs.has(1), '留给切回前台时处理');
+  hiddenTabs.delete(1);
+  await listeners.activated({ tabId: 1, windowId: 1 });
+  assert.deepEqual(reloadCalls.slice(hiddenBefore), [1], '切回前台后刷新旧内容脚本');
+
+  // 通知页不自动刷新，离开通知页后再补刷
+  tabUrls.set(1, 'https://x.com/notifications');
+  staleTabs.add(1);
+  const noticeBefore = reloadCalls.length;
+  await listeners.startup();
+  assert.equal(reloadCalls.length, noticeBefore, '不替用户刷新通知页');
+  tabUrls.delete(1);
+  await listeners.updated(1, { status: 'complete', url: 'https://x.com/home' });
+  assert.deepEqual(reloadCalls.slice(noticeBefore), [1], '离开通知页并导航完成后补刷');
+
   const daytime = activeNow;
   try {
     activeNow = new Date(2026, 10, 21, 2, 0, 0, 0).getTime();
@@ -1142,6 +1164,8 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   } finally {
     activeNow = daytime;
     staleTabs.delete(1);
+    hiddenTabs.delete(1);
+    tabUrls.delete(1);
     delete alarms.staleTabs;
   }
 });
