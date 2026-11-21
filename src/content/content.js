@@ -74,7 +74,13 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // 后台问：这个页面连着插件吗、是哪一版、见过哪些接口请求（认不出「回复」列表时拿来诊断）
     if (msg?.type === 'xir:ping') {
-      sendResponse({ ok: true, version: chrome.runtime.getManifest().version, userId: XIRFetcher.sessionUserId(), handle: detectHandle() });
+      sendResponse({
+        ok: true,
+        version: chrome.runtime.getManifest().version,
+        userId: XIRFetcher.sessionUserId(),
+        handle: detectHandle(),
+        visible: document.visibilityState === 'visible',
+      });
       return false;
     }
     if (msg?.type !== 'xir:fetch') return false;
@@ -91,6 +97,13 @@
     run.then((result) => sendResponse(XIRRel.session() === session && result.userId === session.userId
       ? result : { ok: false, error: 'no_session' }), () => sendResponse({ ok: false, error: 'no_session' }));
     return true;
+  });
+
+  // 切回 X 页面时只唤醒后台检查是否有到期任务；是否真正请求仍由后台的时段和可见性门控决定。
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && XIRRel.session()) {
+      sendForSession({ type: 'xir:hello', handle: detectHandle() });
+    }
   });
 
   // ---------- 记下 X 自己读「回复」栏、读通知的请求地址 ----------

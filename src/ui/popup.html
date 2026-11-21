@@ -70,10 +70,10 @@
     <section id="view-settings" hidden>
       <section class="card">
         <h2>数据读取 <button class="q" data-tip="tip-data" aria-label="数据读取说明">?</button></h2>
-        <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段，自动更新只读取之后的新回复。这个开关只管两份回复数据，排期同步单独按需进行。榜单范围在榜单页单独设置。</p></div>
+        <div class="tip" id="tip-data" hidden><p>初始化补齐所选时段。两份自动更新各自约每天一次，只在 08:00–24:00、当前 X 页面可见时读取；别人回我回看最近 52 小时，我回别人只接到上次位置。手动更新十分钟内不会重复发送请求，并会把下一次自动更新顺延到约一天后。这个开关只管两份回复数据，排期同步单独按需进行。</p></div>
 
         <div class="row between">
-          <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新两份数据（约每小时）</label>
+          <label class="line"><input type="checkbox" id="fetchEnabled"> 每天自动更新两份数据（低频）</label>
           <button id="updateNow" aria-describedby="updateStatus">立即更新</button>
         </div>
         <p class="hint" id="updateStatus" role="status"></p>
@@ -87,7 +87,7 @@
             <option value="30">最近一个月</option>
           </select>
         </div>
-        <p class="hint">点「初始化」时往回读多远。榜单看多久在榜单页单独选。</p>
+        <p class="hint">点「初始化」时往回读多远。榜单看多久在榜单页单独选。初始化会连续读取较多页，只在 X 页面可见时继续，切走就暂停；建议先用 7 天。</p>
 
         <div class="src">
           <div class="row between">
@@ -169,7 +169,8 @@
         <ul>
           <li>别人回我：读取 X 的「通知 → 提及」。日常打开通知页后可用新版读取方式。</li>
           <li>我回别人：读取我的主页「回复」栏。首次缺少读取参数时，按提示打开回复页，随后自动继续。</li>
-          <li>初始化补读历史记录。自动更新从上次进度接着读，已有记录按帖子 ID 去重。需要有已登录的 X 页面打开。</li>
+          <li>初始化补读历史记录；页面切到后台时暂停，回来后继续。所有读取只在本地时间 08:00–24:00 进行。</li>
+          <li>自动更新每天随机一次，已有记录按帖子 ID 去重。X 页面必须在前台显示；后台标签页不会发请求。</li>
         </ul>
       </details>
 
@@ -178,13 +179,15 @@
         <ul>
           <li>别人回我：在我自己的帖子下直接回复我的都算，各层都计入。</li>
           <li>我回别人：只算我直接评论对方根帖的第一层。</li>
-          <li>自动更新约每小时一次。别人回我分批读取，我回别人每批最多 5 页，未读完时休息 3–5 分钟再继续。</li>
+          <li>别人回我约每天随机检查一次，并回看最近 52 小时，接住 X 晚放出的回复；我回别人约每天随机检查一次，只接到上次位置。</li>
+          <li>别人回我初始化每页间隔 25–45 秒，每 10 页休息 3–5 分钟；入站日常/续读、我回别人和诊断每页间隔 15–27 秒。入站每个短任务最多 6 页，我回别人和诊断最多 5 页。</li>
+          <li>手动更新十分钟冷却。诊断回查单次最多 5 页。</li>
         </ul>
       </details>
 
       <details class="card fold">
         <summary>风险说明</summary>
-        <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。本插件只读、低频，不做任何点赞、关注、发帖操作；关掉「自动更新」后不再自动更新两份回复数据，打开排期弹窗时仍会按需读取一次已排期列表。数据只存在本机，不上传。风险自担。</p>
+        <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。插件按人的作息设计：只在本地时间 08:00–24:00、X 页面前台可见时请求；每天低频读取，夜间和后台标签页零自动请求。全程只读，不点赞、不关注、不发帖；数据只存在本机。风险仍无法保证为零。</p>
       </details>
 
       <details class="card fold" id="diagnostics">
@@ -192,7 +195,7 @@
         <p class="hint">保留最近 7 天的全量日志。弹窗显示最近 10 条，导出包含帖子编号、请求条件和处理原因，分享前请先检查。</p>
         <details class="settings-detail">
           <summary>按时间回查「别人回我」</summary>
-          <p class="hint">从最新提及往前查，单次最多 20 页。预设按最近 1、6 或 24 小时；自定义时间按浏览器本地时区。</p>
+          <p class="hint">从最新提及往前查，单次最多 5 页。预设按最近 1、6 或 24 小时；自定义时间按浏览器本地时区。</p>
           <label class="line">时间窗
             <select id="diagWindow">
           <option value="1h">最近 1 小时</option>

@@ -352,8 +352,9 @@ async function draw() {
 
 function readSummary(at, counts, exact = false) {
   if (!at) return '暂无读取记录';
+  const existing = counts ? Math.max(0, (counts.read || 0) - (counts.added || 0)) : 0;
   return (exact ? fmtExactTime(at) : fmtTime(at)) +
-    (counts ? ` · 读到 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
+    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条${existing ? ` · 已有 ${existing} 条` : ''}` : ' · 暂无条数');
 }
 
 function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
@@ -552,7 +553,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
     }
     const reasons = {
       post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
-      page_limit: '已查 20 页，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
+      page_limit: '已达到单次回查页数上限，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
       no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
       account_disabled: '此账号已关闭插件',
     };
