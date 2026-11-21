@@ -379,7 +379,7 @@ test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过
   assert.equal(plan.groups[1].slots[34].label, '24:00');
 });
 
-test('排期冲突与随机浮动：±15 分钟半开区间判定，浮动避开整点、过去和冲突', () => {
+test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮动避开过去和冲突', () => {
   const { buildDaySlots, pickJitteredTime } = globalThis.XIRSchedule;
   const at = (h, m) => new Date(2026, 10, 20, h, m, 0, 0).getTime();
   const scheduled = [
@@ -395,11 +395,11 @@ test('排期冲突与随机浮动：±15 分钟半开区间判定，浮动避开
   assert.deepEqual(byLabel['16:00'].items.map((x) => x.id), ['2']);
   assert.equal(byLabel['16:30'].occupied, false);
 
-  // 点击 15:00：15:22 已排，所以 +6 分钟内（最多 15:06）距离 15:22 为 16 分钟合法，且不会选 15:00 整点
+  // 点击 15:00：在前后 5–20 分钟内挑；15:22 已排，冲突候选会被过滤
   for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
     const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r });
     const diffMin = Math.round((picked - at(15, 0)) / 60_000);
-    assert.ok(diffMin !== 0 && Math.abs(diffMin) <= 6, `应浮动 1-6 分钟，实际 ${diffMin}`);
+    assert.ok(Math.abs(diffMin) >= 5 && Math.abs(diffMin) <= 20, `应浮动 5-20 分钟，实际 ${diffMin}`);
     assert.ok(Math.abs(picked - at(15, 22)) >= 15 * 60_000, '不应与 15:22 撞档');
   }
 });

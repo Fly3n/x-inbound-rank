@@ -177,7 +177,7 @@
   }
 
   function slotTooltip(slot) {
-    if (!slot.occupied) return `点击填入 ${slot.label} 附近随机时间（前后浮动 1–6 分钟）`;
+    if (!slot.occupied) return `点击填入 ${slot.label} 附近随机时间（前后浮动 5–20 分钟）`;
     return slot.items
       .map((it) => `已排 ${XIRSchedule.formatTime(it.executeAt)}${it.text ? `：${it.text}` : ''}`)
       .join('\n');
