@@ -528,4 +528,21 @@ test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮
     assert.ok(Math.abs(diffMin) >= 5 && Math.abs(diffMin) <= 20, `应浮动 5-20 分钟，实际 ${diffMin}`);
     assert.ok(Math.abs(picked - at(15, 22)) >= 15 * 60_000, '不应与 15:22 撞档');
   }
+
+  // 首尾档位浮动不能越出当天 07:00–24:00
+  const tomorrow = buildDaySlots({ nowTs: at(12, 0), dayOffset: 1 });
+  const firstSlot = tomorrow.slots[0];
+  const lastSlot = tomorrow.slots.at(-1);
+  const firstPicked = pickJitteredTime(firstSlot.ts, { nowTs: at(12, 0), dayStart: firstSlot.dayStart, random: () => 0 });
+  const lastPicked = pickJitteredTime(lastSlot.ts, { nowTs: at(12, 0), dayStart: lastSlot.dayStart, random: () => 0.999 });
+  assert.ok(firstPicked >= firstSlot.ts, '07:00 档不能向前浮动到早上 7 点前');
+  assert.ok(lastPicked <= lastSlot.ts, '24:00 档不能向后浮动到次日');
+
+  // 实际填入也要避开「现在 10 分钟」和「刚发帖 15 分钟」两个门槛
+  const boundarySlot = buildDaySlots({ nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45) }).slots.find((slot) => slot.ts === at(13, 0));
+  const boundaryPicked = pickJitteredTime(boundarySlot.ts, {
+    nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45), random: () => 0,
+  });
+  assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于当前时间 10 分钟');
+  assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于最近发帖 15 分钟');
 });

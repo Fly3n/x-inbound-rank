@@ -1071,6 +1071,33 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     assert.deepEqual((await send({ type: 'getState' })).online, ['me']);
     assert.equal(store['scheduled:uid-9'].items[0].id, 'requested');
 
+    // 排期同步 429 后同样退避，反复打开排期弹窗不能继续发请求
+    mismatch = false;
+    sessions.set(9, { userId: '9', handle: 'New' });
+    const scheduledCalls = () => requested.filter(([, , kind]) => kind === 'scheduled').length;
+    const before429 = scheduledCalls();
+    server.scheduledFail429Once = true;
+    assert.equal((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).status, 'error');
+    assert.ok(store['scheduled:uid-9'].retryAt > Date.now(), '记下排期同步退避时间');
+    assert.ok(store['cursor:uid-9'].rateUntil >= store['scheduled:uid-9'].retryAt, '同一个账号的主动读取一起暂停');
+    assert.match((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).message, /退避/);
+    assert.equal(scheduledCalls(), before429 + 1, '退避期内不再发请求');
+    assert.equal(store['cursor:uid-9'].rate429Count, 1, '账号级连续 429 计数从一处累加');
+
+    // 一个入口被限流后，回填和出站也不能绕过去继续请求
+    const blockedBefore = requested.length;
+    assert.match((await send({ type: 'syncOutNow', account: 'uid-9' })).error, /退避/);
+    assert.match((await send({ type: 'startBackfill', account: 'uid-9' })).error, /退避/);
+    await fire('inc', 'uid-9');
+    await fire('out', 'uid-9');
+    assert.equal(requested.length, blockedBefore, '退避期内所有主动读取都不发请求');
+
+    // 退避只属于当前账号，不能把另一个正常账号一起封住
+    const meCalls = requested.filter(([, uid]) => uid === '1').length;
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0, rateUntil: 0, rate429Count: 0 });
+    await fire('inc', 'me');
+    assert.ok(requested.filter(([, uid]) => uid === '1').length > meCalls, '另一个账号照常更新');
+
     await send({ type: 'setAccountEnabled', enabled: false, account: 'uid-9' });
     assert.equal(alarms['inc:uid-9'], undefined);
     assert.ok(alarms['inc:me'], '关闭另一账号不影响旧账号任务');

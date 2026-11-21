@@ -197,7 +197,9 @@
         e.preventDefault();
         e.stopPropagation();
         if (XIRRel.session()?.account !== account || !enabled) return;
-        const filledTs = XIRSchedule.pickJitteredTime(slot.ts, { nowTs: Date.now(), scheduled: state.items });
+        const filledTs = XIRSchedule.pickJitteredTime(slot.ts, {
+          nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt,
+        });
         const ok = await fillNativeForm(form, filledTs);
         if (XIRRel.session()?.account !== account || !enabled) return;
         lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };

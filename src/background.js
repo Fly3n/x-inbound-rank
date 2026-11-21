@@ -1426,6 +1426,13 @@ const handlers = {
     if (!account) return { items: [], syncedAt: 0, lastPostAt: 0, status: 'error', message: '未识别到当前 X 账号' };
     const cached = (await kvGet(keys.scheduled(account))) || { items: [], syncedAt: 0, error: null };
     const lastPostAt = (await kvGet(keys.lastPostAt(account))) || 0;
+    const cachedReply = (message) => ({
+      items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message,
+    });
+    if (busy) return cachedReply('正在读取其他数据，已显示上次排期缓存');
+    const cursor = await kvGet(keys.cursor(account), {});
+    const pausedUntil = Math.max(cursor.rateUntil || 0, cursor.out?.retryAt || 0);
+    if (pausedUntil > now()) return cachedReply('接口正在退避，已显示上次排期缓存');
     const tpl = await kvGet(keys.tplScheduled(account));
     if (!tpl) {
       await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'need_tpl' });
@@ -1435,20 +1442,44 @@ const handlers = {
     if (!force && cached.syncedAt && now() - cached.syncedAt < 30_000) {
       return { items: cached.items || [], syncedAt: cached.syncedAt, lastPostAt, status: 'ok' };
     }
-    const r = await fetchViaTab(account, { kind: 'scheduled', tpl: tpl.url }, { account, mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 });
+    if ((cached.retryAt || 0) > now()) {
+      return cachedReply(`接口正在退避，将在 ${new Date(cached.retryAt).toLocaleTimeString()} 后重试；已显示上次排期缓存`);
+    }
+    if (busy) return cachedReply('正在读取其他数据，已显示上次排期缓存');
+    busy = true;
+    let r;
+    try {
+      r = await fetchViaTab(account, { kind: 'scheduled', tpl: tpl.url }, { account, mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 });
+    } finally {
+      busy = false;
+    }
     if (r.error === 'no_tab') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '未连接到 X 页面，已显示上次缓存' };
     if (r.error === 'outside_window') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '读取只在每天 08:00–24:00 进行，已显示上次缓存' };
+    if (r.error === 'backoff') {
+      return cachedReply(`接口正在退避，将在 ${new Date(r.rateResetAt || 0).toLocaleTimeString()} 后重试；已显示上次排期缓存`);
+    }
     if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
       await kvRemove(keys.tplScheduled(account));
       await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'tpl_expired', status: r.status || 0 });
       return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '接口参数已更新，请点一下「已排期帖子」重新连接' };
     }
-    if (r.status === 429) return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '暂时被 X 限流（429），已显示上次缓存' };
-    if (!r.ok) return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `同步排期失败（${r.error || 'HTTP ' + r.status}），已显示缓存` };
+    if (r.status === 429) {
+      const retryAt = r.backoffUntil || r.rateResetAt || now() + PACE.backoffStartMs;
+      await updateCursor(account, (c) => {
+        c.rateUntil = Math.max(c.rateUntil || 0, retryAt);
+      });
+      await kvSet(keys.scheduled(account), { ...cached, retryAt });
+      return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '暂时被 X 限流（429），已显示上次缓存' };
+    }
+    if (!r.ok) {
+      const retryAt = now() + serviceWait(cached.errorCount || 0);
+      await kvSet(keys.scheduled(account), { ...cached, retryAt, errorCount: (cached.errorCount || 0) + 1 });
+      return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `同步排期失败（${r.error || 'HTTP ' + r.status}），已显示缓存` };
+    }
     try {
       const items = parseScheduledTweets(r.body);
       const syncedAt = now();
-      await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
+      await kvSet(keys.scheduled(account), { items, syncedAt, retryAt: null, errorCount: 0, error: null });
       await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'ok', count: items.length, scheduledTimes: items.map(({ executeAt }) => executeAt) });
       return { items, syncedAt, lastPostAt, status: 'ok' };
     } catch (e) {

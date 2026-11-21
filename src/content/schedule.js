@@ -87,6 +87,7 @@ const XIRSchedule = (() => {
       const items = conflictsFor(ts, scheduled);
       slots.push({
         ts,
+        dayStart,
         minuteOfDay: m,
         label: formatSlotLabel(m),
         isHour: m % 60 === 0,
@@ -119,10 +120,19 @@ const XIRSchedule = (() => {
    * - 保证与已有排期距离 >= 15 分钟（不撞档）；
    * - 若所有随机候选都不满足，按最接近 slotTs 的合法分钟兜底。
    */
-  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random } = {}) {
-    const minTs = nowTs + MIN_FUTURE_MS;
+  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random, dayStart = null, lastPostAt = 0 } = {}) {
+    const minTs = Math.max(nowTs + MIN_FUTURE_MS, earliestAllowedTs(nowTs, lastPostAt));
+    let slotDay = dayStart;
+    if (!Number.isFinite(slotDay)) {
+      const d = new Date(slotTs);
+      const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      slotDay = d.getHours() === 0 && d.getMinutes() === 0 ? midnight - 86_400_000 : midnight;
+    }
+    const dayMin = slotDay + START_MIN * MIN_MS;
+    const dayMax = slotDay + END_MIN * MIN_MS;
     const safe = (ts) => {
       if (ts < minTs) return false;
+      if (ts < dayMin || ts > dayMax) return false;
       for (const item of scheduled) {
         if (item && Number.isFinite(item.executeAt) && Math.abs(ts - item.executeAt) < CONFLICT_MS) return false;
       }
