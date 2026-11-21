@@ -11,6 +11,9 @@ globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 ? 0 :
 let activeNow = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
 const realDateNow = Date.now;
 Date.now = () => activeNow;
+const realRandom = Math.random;
+let randomOverride = null;
+Math.random = () => randomOverride ?? realRandom();
 // 模拟升级：已有任务的账号继续启用，仅被识别过的账号保持关闭。
 const store = {
   accounts: { me: { handle: 'Me', userId: '1' }, seen: { handle: 'Seen', userId: '3' } },
@@ -340,17 +343,23 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(job().rangeDays, 15);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
-  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再回看 1 小时
+  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再向更早补 1 小时
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
-  await listeners.alarm({ name: 'tick' });
+  randomOverride = 0.999999; // 下一次自动更新要能排到晚间窗口末尾附近，不能提前一小时收口
+  try {
+    await listeners.alarm({ name: 'tick' });
+  } finally {
+    randomOverride = null;
+  }
   assert.equal(server.calls - before, 4);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
   // 下一次定在下一个自动时段，并约好闹钟
   const gap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(gap >= 8 * 60 * 60_000 && gap <= 13 * 60 * 60_000 + 1_000);
+  assert.ok(gap > 13 * 60 * 60_000, '完整窗口内可以排到 22:30 前，而不是 21:30 就停止');
+  assert.ok(gap >= 8 * 60 * 60_000 && gap <= 13.5 * 60 * 60_000 + 1_000);
   assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
   // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时仍会做每日安全回看
@@ -509,7 +518,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   const firstManualCalls = server.calls - before;
   assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取');
   const nextAutoGap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(nextAutoGap >= 8 * 60 * 60_000 && nextAutoGap <= 13 * 60 * 60_000 + 1_000,
+  assert.ok(nextAutoGap >= 8 * 60 * 60_000 && nextAutoGap <= 13.5 * 60 * 60_000 + 1_000,
     '立即更新后顺延到下一个自动时段');
   assert.equal(alarms['inc:me'], undefined, '自动更新关闭时不安排自动读取');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');

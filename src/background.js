@@ -21,7 +21,7 @@ const PACE = {
   incPageGapMs: [15_000, 27_000], // 增量、回填补读、出站和诊断的页间间隔
   incPagesPerEvent: 6, // 增量：每个后台事件最多六页，读完休息后自动续，避免单次事件过长
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
-  incOverlapMs: 60 * 60_000, // 增量：接续点之后再回看 1 小时，接住 X 短时迟到放出的回复
+  incOverlapMs: 60 * 60_000, // 增量：以上一轮读取时间为基准再向更早补 1 小时，接住 X 短时迟到放出的回复
   restMs: [180_000, 300_000], // 一次读不完、分几轮读时，轮与轮之间的休息
   manualCooldownMs: 10 * 60_000, // 手动更新：十分钟内不重复向 X 发请求
   // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），比提及的 180 次小得多，单独定节奏：
@@ -54,8 +54,8 @@ const ACTIVE_LAST_START_MIN = 23 * 60 + 30;
 const inActiveHours = (ts = now()) => new Date(ts).getHours() >= ACTIVE_START_HOUR;
 // 日常自动读取放在上午和晚间，模拟人自己刷通知的两个自然时段。
 const AUTO_SLOTS = [
-  { start: 8 * 60, end: 11 * 60 + 30, scheduleEnd: 10 * 60 + 30 },
-  { start: 18 * 60, end: 22 * 60 + 30, scheduleEnd: 21 * 60 + 30 },
+  { start: 8 * 60, end: 11 * 60 + 30 },
+  { start: 18 * 60, end: 22 * 60 + 30 },
 ];
 const inAutoSlot = (ts = now()) => {
   const d = new Date(ts);
@@ -70,12 +70,13 @@ function nextAutoSlot(ts = now()) {
     if (minute >= slot.start) continue;
     const base = new Date(d);
     base.setHours(0, 0, 0, 0);
-    return base.getTime() + slot.start * 60_000 + rand([0, (slot.scheduleEnd - slot.start) * 60_000]);
+    return base.getTime() + slot.start * 60_000 + rand([0, (slot.end - slot.start) * 60_000]);
   }
+  const first = AUTO_SLOTS[0];
   const tomorrow = new Date(d);
   tomorrow.setDate(d.getDate() + 1);
-  tomorrow.setHours(8, 0, 0, 0);
-  return tomorrow.getTime() + rand([0, 150 * 60_000]);
+  tomorrow.setHours(0, 0, 0, 0);
+  return tomorrow.getTime() + first.start * 60_000 + rand([0, (first.end - first.start) * 60_000]);
 }
 function nextActiveAt(ts = now()) {
   if (inActiveHours(ts)) {
@@ -424,7 +425,7 @@ async function flushSnapshot(account, force) {
 
 const setAlert = (account, message) => kvSet(keys.alert(account), { at: now(), message });
 
-/** 记下这一轮增量的时间，并定好下一个上午。只改 cur，在 updateCursor 里调用；返回下一次的时间，交给 armInc 约闹钟。 */
+/** 记下这一轮增量的时间，并定好下一个上午或晚间时段。只改 cur，在 updateCursor 里调用；返回下一次的时间，交给 armInc 约闹钟。 */
 function planNextInc(cur, from) {
   cur.lastIncrementalAt = from;
   cur.nextIncAt = nextAutoSlot(from);
@@ -683,7 +684,7 @@ async function maybeIncremental(account, manual = false) {
     if (!due || due.error) return due || false;
     const { cur } = due;
 
-    // 每次从最新一页往回读，并在上次成功读取的位置之外回看 1 小时：接住 X 短时晚放的回复。
+    // 每次从最新一页往回读，先接到上次成功读取的位置，再以那一轮读取时间为基准向更早补 1 小时：接住 X 短时晚放的回复。
     // 每个后台事件最多读 6 页；没读完就记下位置，休息 3–5 分钟后继续，
     // 直到接上、或者读到保存期限（90 天前，更早的反正要清掉）。
     // 接上之前接续点不动；出错中断时下次重读这一段，靠主键去重。
@@ -800,7 +801,7 @@ async function maybeIncremental(account, manual = false) {
       if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
       delete c.incResume;
       delete c.serviceRetries;
-      // 手动更新已经拿到最新数据，下一次自动更新顺延到下一个上午，避免当天再扫一遍。
+      // 手动更新已经拿到最新数据，下一次自动更新顺延到下一个上午或晚间时段，避免当天再扫一遍。
       return planNextInc(c, now());
     });
     if ((await getSettings(account)).fetchEnabled) await armInc(account, next);
