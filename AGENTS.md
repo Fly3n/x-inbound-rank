@@ -23,7 +23,7 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - 数据来源是 X 网页版「通知 → 提及」的内部接口，用已登录的网页会话读。不走官方 API，不逐帖抓评论（请求量大、接口更脆，已比较过）。优先用网页版现在自己用的 GraphQL `NotificationsTimeline`（额度 1500 次 / 15 分钟、每页 40 条，2026-11-19 负责人要求换新）：`tap.js` 看到 X 页面读通知（「全部」或「提及」）的请求就报上地址，存在 `tpl:mentions:<账号>`，`fetcher.js` 照着发、把 `timeline_type` 换成 `Mentions`。没有模板时用旧 REST `mentions.json`。**不自己开通知页取模板**：X 一打开通知页就会把未读通知标成已读，算动了账号状态。两种接口的游标不通用：一个回填任务（`job.api`）、一轮补读（`incResume.api`）从头到尾用同一个；新接口 400 / 404 时删掉模板（`pull` 返回 `tpl_bad`），回填换旧接口从最新一页重来，增量一两分钟后用旧接口重读。
 - 零写操作：不点赞、不关注、不发帖。数据只存本机，无任何上报。
 - **发帖排期辅助**（2026-11-20 负责人定）：在 X 原生排期弹窗内注入快捷档期条，纯辅助填时间、不代点确认/发布。固定每天 07:00–24:00 每 30 分钟一档；档位 `[T - 15m, T + 15m)` 内已有排期则置灰不可选（悬停看具体时间与摘要）；已过去、距现在不足 10 分钟或距最近发帖不足 15 分钟的档跳过；弹窗内横排显示当天最近几个档，其余今天档位及明天全天收在「更多档期」下拉列表；点击空档后前后随机浮动 1–6 分钟填入 X 原生日期/时间下拉框。同步走「旁听模板 + 打开排期弹窗按需 GET（30 秒防抖）」：`tap.js` 认 `FetchScheduledTweets` 记为 `tpl:scheduled:<账号>` 并顺手旁听返回，新建/删除排期或发帖时通知后台记 `lastPostAt` 并作废同步防抖；缓存按账号存 `scheduled:<账号>`。设置页配 `showSchedule` 开关。
-- 权限只有 `storage`、`alarms` 和 x.com / twitter.com 的站点权限。不加 `cookies`、`tabs`、`scripting`。
+- 正式功能权限只有 `storage`、`alarms` 和 x.com / twitter.com 的站点权限。2026-11-21 负责人同意在维护阶段额外加 `http://127.0.0.1/*`，只用于把本机数据推给开发桥；正式分发前要移除这条，或改成按需授权。不加 `cookies`、`tabs`、`scripting`。
 - 不做时间衰减、不做「我回了他」加分（「我回 N」只展示，不参与排名）、不做收费。
 
 ## 数据流
@@ -58,8 +58,19 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 | `src/diagnostics.js` | 本机诊断日志：按小时分键写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
 | `src/ui/` | 弹窗 | 改界面 |
 | `src/snapshot.js` / `src/ui/snapshot.*` | 开发用只读本机快照页：把 `chrome.storage.local` 和 IndexedDB 两份数据合成 JSON；不挂弹窗入口、不发请求、不新增权限 | 改本机数据迁移或排查工具 |
+| `src/bridge.js` | 开发用本机数据桥：把当前快照自动 POST 到 `127.0.0.1:17321`；服务不在线时退避，不影响抓取 | 改开发数据通道 |
+| `scripts/live-bridge.mjs` | 本机 HTTP 接收器：只监听 `127.0.0.1`，原子写 `.local/xir-live.json` 和摘要 | 改桥接服务 |
+| `scripts/install-bridge.mjs` | 安装/卸载用户级 LaunchAgent，让本机服务随登录启动 | 改桥接启动方式 |
 
 **隔离原则**：只有 `fetcher.js` 和 `parser.js`（以及专做提及诊断的 `mentions-diagnostics.js`）知道 X 接口字段，只有 `content.js` / `schedule-ui.js` 的页面选择器知道 X DOM。其他文件不得出现 X 的字段名或选择器。
+
+### 开发用本机数据桥（仅维护阶段）
+
+- `manifest.json` 临时带 `http://127.0.0.1/*` host permission；分发前必须处理。
+- `src/bridge.js` 在账号/数据变化、任务结束、30 分钟兜底和 X 页面上线时，把 `{ accounts, data, storage, source: 'live' }` 推到 `http://127.0.0.1:17321/ingest`。2.5 秒合并短时间内的多次触发；服务不在线时静默退避 60 秒，不弹窗，不影响抓取。
+- `scripts/live-bridge.mjs` 只监听回环地址，原子替换 `.local/xir-live.json` 和 `.local/xir-live.meta.json`，文件权限 600；不读 X、不访问外网。
+- `npm run bridge:install` 安装 `~/Library/LaunchAgents/com.xir.live-bridge.plist` 并启动；`npm run bridge:uninstall` 停止并移除服务。前台调试用 `npm run bridge`。
+- 两个 `.local` 文件包含账号标识和回复内容，不提交、不分享；快照页保留作手动兜底。
 
 ## 数据模型
 
@@ -190,6 +201,7 @@ npm test
 - `test/flow.test.mjs`：用假的 chrome API 和假接口跑后台全流程（回填、429 退避与续跑、去重、增量、关开关、清空）。
 - `test/session.test.mjs`：账号会话切换和页面缓存隔离。
 - `test/snapshot.test.mjs`：开发用本机快照的结构、文件名和摘要。
+- `test/bridge.test.mjs`：本机桥的健康检查、快照落盘、摘要和来源校验。
 
 这些测试的假数据都是按「预期的接口形态」写的，能证明逻辑自洽，**不能证明 X 真实返回长这样**。`fake-indexeddb` 只是测试依赖，插件本身零依赖、无需构建。
 
