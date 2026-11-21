@@ -8,7 +8,7 @@ const DAY = 86400000;
 // 后台页与页之间要等好几秒（真实节奏）；测试里把一秒以上的等待都快进成立刻，只验证流程
 const realSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 ? 0 : ms, ...args);
-let activeNow = new Date(2026, 10, 21, 12, 0, 0, 0).getTime();
+let activeNow = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
 const realDateNow = Date.now;
 Date.now = () => activeNow;
 // 模拟升级：已有任务的账号继续启用，仅被识别过的账号保持关闭。
@@ -340,17 +340,17 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(job().rangeDays, 15);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
-  // 增量：间隔里来了 7 条（跨 5 页），一轮读完并回看 52 小时
+  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再回看 6 小时
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
   await listeners.alarm({ name: 'tick' });
-  assert.equal(server.calls - before, 5);
+  assert.equal(server.calls - before, 4);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
-  // 下一次随机定在 22–26 小时后，并约好闹钟
+  // 下一次定在下一个上午，并约好闹钟
   const gap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(gap >= 22 * 60 * 60_000 && gap <= 26 * 60 * 60_000 + 1_000);
+  assert.ok(gap >= 23 * 60 * 60_000 && gap <= 25.5 * 60 * 60_000 + 1_000);
   assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
   // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时仍会做每日安全回看
@@ -358,7 +358,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
   await fire('inc');
-  assert.equal(server.calls - before, 5);
+  assert.equal(server.calls - before, 4);
 
   // X 晚放出来的回复即使落在已经越过的接续点之后，也要靠回看窗口捞回来
   const late = { ...mention(0.02, '2', '50', '50'), id_str: '1999' };
@@ -396,7 +396,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
   await Promise.all([fire('inc'), fire('inc')]);
-  assert.equal(server.calls - before, 5, '同时到的两个触发只跑一轮');
+  assert.equal(server.calls - before, 4, '同时到的两个触发只跑一轮');
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.color;
@@ -426,6 +426,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     await listeners.alarm({ name: 'tick' });
     assert.equal(server.calls, before, 'X 页面在后台不读取');
     assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /切到.*X 页面/);
+
+    hiddenTabs.delete(1);
+    hiddenTabs.delete(4);
+    activeNow = new Date(2026, 10, 21, 12, 0, 0, 0).getTime();
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+    await listeners.alarm({ name: 'tick' });
+    assert.equal(server.calls, before, '自动更新只在上午窗口启动');
   } finally {
     hiddenTabs.delete(1);
     hiddenTabs.delete(4);
@@ -433,7 +440,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     store['cursor:me'] = savedCursor;
   }
 
-  // 关掉抓取开关：清掉遗留闹钟，之后就算触发入口也不发请求，初始化也被拒
+  // 关掉自动更新：清掉遗留自动闹钟，后台 tick 不请求；手动初始化仍可启动
   await chrome.alarms.create('inc:me', { when: Date.now() + 1_000 });
   await chrome.alarms.create('out:me', { when: Date.now() + 1_000 });
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
@@ -441,9 +448,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(alarms['out:me'], undefined);
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   await listeners.alarm({ name: 'tick' });
-  assert.ok((await send({ type: 'startBackfill', account: 'me' })).error);
-  assert.ok((await send({ type: 'syncOutNow', account: 'me' })).error, '关了开关，手动读我的回复也被拒');
   assert.equal(server.calls, before);
+  assert.deepEqual(await send({ type: 'startBackfill', account: 'me' }), { ok: true }, '手动初始化不受自动更新开关影响');
+  await until(() => job().pages === 1, '关掉自动更新后仍能手动初始化');
+  await send({ type: 'pauseJob', account: 'me' });
 
   // 点开某人：返回他在窗口内的回复
   const detail = await send({ type: 'getReplies', account: 'me', actorId: '2' });
@@ -475,13 +483,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
     await fire('inc');
   }
-  assert.equal(server.calls - before, 48, '分多个短任务接上并继续回看 52 小时');
+  assert.equal(server.calls - before, 47, '分多个短任务接上并继续回看 6 小时');
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
   assert.equal(await count(), 16 + 130, '一条不丢');
   feed.splice(0, 130); // 这批合成数据已入库，后续立即更新只验证正常的近端回看
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
 
-  await set({ fetchEnabled: true });
   store['cursor:me'].inLastReadAt = 1;
   store['cursor:me'].out.lastReadAt = 1;
   const countBeforeManual = await count();
@@ -492,11 +499,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     inbound: store['cursor:me'].inLastReadAt,
     outbound: store['cursor:me'].out.lastReadAt,
   } });
-  assert.equal(server.calls, before + 5);
+  const firstManualCalls = server.calls - before;
+  assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取');
   const nextAutoGap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(nextAutoGap >= 22 * 60 * 60_000 && nextAutoGap <= 26 * 60 * 60_000 + 1_000,
-    '立即更新后顺延为下一次每日更新');
-  assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
+  assert.ok(nextAutoGap >= 23 * 60 * 60_000 && nextAutoGap <= 25.5 * 60 * 60_000 + 1_000,
+    '立即更新后顺延到下一个上午');
+  assert.equal(alarms['inc:me'], undefined, '自动更新关闭时不安排自动读取');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
   assert.ok(store['cursor:me'].out.lastReadAt > 1, '手动更新返回前已成功读取出站数据');
@@ -508,12 +516,13 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual([server.calls, server.outCalls], beforeSecond, '冷却期内不发请求');
   activeNow += 11 * 60_000;
   assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).ok, '完成后可再次立即更新');
-  assert.deepEqual([server.calls, server.outCalls], [beforeSecond[0] + 5, beforeSecond[1] + 1]);
+  assert.deepEqual([server.calls - beforeSecond[0], server.outCalls - beforeSecond[1]], [firstManualCalls, 1]);
+  const afterSecond = [server.calls, server.outCalls];
   activeNow += 11 * 60_000;
   store['cursor:me'].rateUntil = Date.now() + 60_000;
   const lastManualAt = store['cursor:me'].lastManualAt;
   assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /退避/);
-  assert.deepEqual([server.calls, server.outCalls], [beforeSecond[0] + 5, beforeSecond[1] + 1], '接口退避时不发请求');
+  assert.deepEqual([server.calls, server.outCalls], afterSecond, '接口退避时不发请求');
   assert.equal(store['cursor:me'].lastManualAt, lastManualAt, '没有发出请求就不记冷却');
   delete store['cursor:me'].rateUntil;
 

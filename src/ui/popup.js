@@ -294,11 +294,11 @@ async function draw() {
     ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
     : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
   $('outLine').hidden = !$('outLine').textContent;
-  $('outReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
+  $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
     : outCoveredNow && !outPending
       ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : '已读到列表底部') : '已覆盖所选范围')
       : outDataReady && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
-  $('outSync').disabled = !isSession || !rules.fetchEnabled || outPending || outCoveredNow || starting.has('outSync');
+  $('outSync').disabled = !isSession || outPending || outCoveredNow || starting.has('outSync');
   $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);
   $('initRange').value = String(rules.initDays);
@@ -322,10 +322,10 @@ async function draw() {
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
   $('start').textContent = starting.has('start') ? '启动中' : inPhase || '初始化';
-  $('start').disabled = !isSession || !rules.fetchEnabled || !!inPhase || inCovered || starting.has('start');
-  $('inReason').textContent = !isSession ? '打开此账号的 X 页面' : !rules.fetchEnabled ? '自动更新已关闭'
+  $('start').disabled = !isSession || !!inPhase || inCovered || starting.has('start');
+  $('inReason').textContent = !isSession ? '打开此账号的 X 页面'
     : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
-  $('resume').disabled = !isSession || !rules.fetchEnabled;
+  $('resume').disabled = !isSession;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
   renderFields('updateSummary', [
@@ -340,7 +340,7 @@ async function draw() {
     () => {},
   );
   $('fetchEnabled').checked = rules.fetchEnabled;
-  $('updateNow').disabled = !isSession || !rules.fetchEnabled || !s.cursor.syncedId || updatingNow;
+  $('updateNow').disabled = !isSession || !s.cursor.syncedId || updatingNow;
   $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
   for (const k of SHOW) $(k).checked = rules[k];
 
