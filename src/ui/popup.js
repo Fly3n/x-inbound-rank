@@ -329,8 +329,8 @@ async function draw() {
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
   renderFields('updateSummary', [
-    ['别人回我：', readSummary(inboundAt, s.cursor.inLastReadCounts)],
-    ['我回别人：', readSummary(outboundAt, out?.lastReadCounts)],
+    ['别人回我：', readSummary(inboundAt, s.cursor.inLastReadCounts, true)],
+    ['我回别人：', readSummary(outboundAt, out?.lastReadCounts, true)],
   ]);
   renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts);
   renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts);
@@ -360,8 +360,8 @@ function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
   renderFields(id, [
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtShortDay(data.from)} – ${fmtShortDay(data.to)}` : '暂无记录'],
-    ['上次初始化', initializedAt ? `${fmtExactTime(initializedAt)}（${days} 天）` : '未完成'],
-    ['上次读取', readSummary(readAt, counts, true)],
+    ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
+    ['上次读取', readSummary(readAt, counts)],
   ]);
 }
 
