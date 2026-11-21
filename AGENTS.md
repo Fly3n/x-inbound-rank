@@ -71,6 +71,10 @@ Chrome 插件（Manifest V3，无构建步骤，原生 JS）。统计「谁最�
 - `scripts/live-bridge.mjs` 只监听回环地址，原子替换 `.local/xir-live.json` 和 `.local/xir-live.meta.json`，文件权限 600；不读 X、不访问外网。
 - `npm run bridge:install` 安装 `~/Library/LaunchAgents/com.xir.live-bridge.plist` 并启动；`npm run bridge:uninstall` 停止并移除服务。前台调试用 `npm run bridge`。
 - 两个 `.local` 文件包含账号标识和回复内容，不提交、不分享；快照页保留作手动兜底。
+- 负责人本机 Chrome 数据位置（2026-11-21 核对，扩展 ID 由源码绝对路径派生）：
+  - `~/Library/Application Support/Google/Chrome/Default/Local Extension Settings/pplobbjmpgfdghaapmflccigedljpkfm/`
+  - `~/Library/Application Support/Google/Chrome/Default/IndexedDB/chrome-extension_pplobbjmpgfdghaapmflccigedljpkfm_0.indexeddb.leveldb/`
+- 上述目录只用于定位和备份核对，不直接读取或修改 LevelDB。macOS TCC 会拦住终端读取其内容；维护时以桥接生成的 `.local/xir-live.json` 为准。移动源码目录会改变扩展 ID，数据和扩展会被视为另一份，先确认 ID 再操作。
 
 ## 数据模型
 
