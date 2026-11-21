@@ -22,6 +22,7 @@ const PACE = {
   incIntervalMs: [50 * 60_000, 70 * 60_000], // 增量：大约每小时一次，每轮结束后在这个范围里随机定下一次，不卡整点
   incMaxPages: 40, // 增量：单次最多页数（约 800 条提及，3 分钟内跑完，不超过 Service Worker 单次事件时限）
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
+  incOverlapMs: 24 * 60 * 60_000, // 增量：在接续点之外回看 24 小时，接住 X 晚些才放出来的回复
   restMs: [60_000, 120_000], // 一次读不完、分几轮读时，轮与轮之间的休息
   slowPages: 20, // 一次要读很多页时（增量读满 40 页后的补读）：按回填的页间隔，一个闹钟事件最多读这么多页（约 4 分钟）
   outDelayMs: [60_000, 120_000], // 我的回复：每轮增量（或回填）结束后隔这么久读，单独一个闹钟事件，不和增量挤在一起
@@ -252,7 +253,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   if (inspectOnly) {
     await record('diagnostic_page', {
       ...trace, source: 'mentions', decisions, entries: parsed.entryIds.length,
-      oldestAt: parsed.oldestTs, more: !!parsed.bottomCursor,
+      newestAt: parsed.newestTs, oldestAt: parsed.oldestTs, more: !!parsed.bottomCursor,
     });
     return { kind: 'ok', parsed, decisions };
   }
@@ -267,7 +268,7 @@ async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }
   }
   batch.read += parsed.events.length;
   batch.added += added;
-  await record('page_saved', { ...trace, source: 'mentions', decisions, oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
+  await record('page_saved', { ...trace, source: 'mentions', decisions, newestAt: parsed.newestTs, oldestAt: parsed.oldestTs, cursorRepeated: !!cursor && cursor === parsed.bottomCursor, entries: parsed.entryIds.length, parsed: parsed.events.length, added, more: !!parsed.bottomCursor });
   await updateCursor(account, (cur) => {
     cur.inLastReadAt = readAt;
     cur.inLastReadCounts = { ...batch };
@@ -375,7 +376,7 @@ async function finishJob(account, job, { reachedEnd }) {
   await saveJob(account, job);
   const next = await updateCursor(account, (cur) => {
     cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
-    // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读回到它为止
+    // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读到它之后，再回看一段
     if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
     return planNextInc(cur, job.startedAt); // 回填期间新来的回复留给下一次增量
   });
@@ -449,7 +450,7 @@ async function stepBackfill(account) {
       job.serviceRetries = 0;
       if (p.oldestTs) job.oldestTs = p.oldestTs;
 
-      if (p.oldestTs && p.oldestTs <= job.targetTs) {
+      if (p.newestTs && p.newestTs < job.targetTs) {
         await finishJob(account, job, { reachedEnd: false });
         return;
       }
@@ -559,13 +560,14 @@ async function maybeIncremental(account, manual = false) {
     if (!due || due.error) return due || false;
     const { cur } = due;
 
-    // 从最新一页往回读，读到上次的接续点为止：间隔里来了多少就读多少，不丢。
+    // 从最新一页往回读，并在上次成功读取的位置之外多回看 24 小时：接住 X 晚些才放出来的回复。
     // 一轮最多 40 页，平时一小时的量远到不了。读满还没接上（比如电脑关了一整天），
     // 记下位置，一两分钟后按回填的慢节奏接着读，直到接上、或者读到保存期限（90 天前，更早的反正要清掉）。
     // 接上之前接续点不动；出错中断时下次重读这一段，靠主键去重。
     const stopAt = cur.syncedId;
     const resume = cur.incResume?.stopAt === stopAt ? cur.incResume : null;
     const floorTs = now() - KEEP_DAYS * DAY_MS;
+    const overlapCutoff = Math.min(cur.lastIncrementalAt || now(), now()) - PACE.incOverlapMs;
     const api = resume?.api || (await mentionsApi(account)); // 接着上一轮读的，游标是哪个接口的就用哪个
     const gap = resume ? PACE.pageGapMs : PACE.incPageGapMs;
     const maxPages = resume ? PACE.slowPages : PACE.incMaxPages;
@@ -626,10 +628,14 @@ async function maybeIncremental(account, manual = false) {
       }
       const p = res.parsed;
       if (page === 0 && !resume) topId = p.newestId;
+      const crossedCheckpoint = !stopAt || !!(p.newestId && !idGt(p.newestId, stopAt));
+      const pastOverlap = p.newestTs != null && p.newestTs < overlapCutoff;
       const stopReason = !p.entryIds.length ? 'empty_page'
-        : !idGt(p.oldestId, stopAt) ? 'reached_checkpoint'
         : !p.bottomCursor ? 'no_next_page'
-        : p.oldestTs <= floorTs ? 'retention_boundary' : null;
+        : p.bottomCursor === cursor ? 'repeated_cursor'
+        : p.newestTs != null && p.newestTs < floorTs ? 'retention_boundary'
+        : p.newestTs != null ? (pastOverlap && crossedCheckpoint ? 'reached_overlap' : null)
+        : crossedCheckpoint ? 'reached_checkpoint' : null;
       if (stopReason) {
         await record('pagination_stop', { ...trace, source: 'mentions', reason: stopReason, checkpoint: stopAt });
         caughtUp = true;
@@ -672,6 +678,7 @@ async function maybeIncremental(account, manual = false) {
 // 状态放在 cursor.out：{ status: 'ok'|'need_tpl'|'error', message, syncedId, coverTs, lastAt, pages }
 //   running：{ at, pages } 正在读、已读几页（读完清掉）；syncedId：上次读到的最新一条；fullFor：最近一次完整读覆盖的初始化范围（天），手动点「初始化」时清成 0 表示要完整读；
 //   resume：完整读被页数上限截断时的续读位置；lastAt：最近一次读完的时间；lastFullAt / lastFullDays：最近一次完整读（初始化）完成的时间和范围。
+// 增量同样在接续点之外回看 24 小时，接住 X 晚些才放出来的回复。
 
 const saveOut = (account, patch) =>
   updateCursor(account, (cur) => {
@@ -703,11 +710,12 @@ async function syncOut(account, manual = false) {
     const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
     // 第一次必须手动点「初始化」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
     if (!prev.lastAt && !prev.syncedId && prev.fullFor !== 0) return;
-    // 完整读：手动初始化（fullFor 被清成 0）、或本机数据是旧版本存的——读到初始化范围的起点。否则只读到上次的位置。
+    // 完整读：手动初始化（fullFor 被清成 0）、或本机数据是旧版本存的——读到初始化范围的起点。否则读到上次位置之后再回看一段。
     const full = !prev.syncedId || prev.fullFor === 0 || (prev.schema || 1) < OUT_SCHEMA;
     // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
     const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
     const stopAt = full ? null : resume?.stopAt || prev.syncedId;
+    const overlapCutoff = Math.min(prev.lastAt || prev.lastReadAt || now(), now()) - PACE.incOverlapMs;
     // 一次要读很多页（完整读、或接着上一轮读）时按回填的节奏，慢一些；平时的增量一般就一两页，按增量的节奏
     const slow = full || !!resume;
     const gap = slow ? PACE.pageGapMs : PACE.incPageGapMs;
@@ -769,14 +777,20 @@ async function syncOut(account, manual = false) {
       const added = await putEvents(account, p.events, OUT);
       batch.read += p.events.length;
       batch.added += added;
-      await record('page_saved', { ...trace, source: 'replies', posts: p.events.map(({ id, own, created_at }) => ({ postId: id, own: !!own, createdAt: created_at })), oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
+      await record('page_saved', { ...trace, source: 'replies', posts: p.events.map(({ id, own, created_at }) => ({ postId: id, own: !!own, createdAt: created_at })), newestAt: p.newestTs, oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
       await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       const ended = !p.oldestId || !p.bottomCursor || p.bottomCursor === cursor; // 列表到底了
-      if (ended || p.oldestTs <= targetTs || (stopAt && !idGt(p.oldestId, stopAt))) {
+      const reachedTarget = p.newestTs != null && p.newestTs < targetTs;
+      const crossedCheckpoint = !stopAt || !!(p.newestId && !idGt(p.newestId, stopAt));
+      const pastOverlap = p.newestTs != null && p.newestTs < overlapCutoff;
+      const stoppedByTime = full
+        ? reachedTarget
+        : p.newestTs != null ? pastOverlap && crossedCheckpoint : crossedCheckpoint;
+      if (ended || stoppedByTime) {
         complete = true;
-        reachedEnd = ended;
+        reachedEnd = ended && !reachedTarget;
         pages++;
         break;
       }

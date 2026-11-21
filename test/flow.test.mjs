@@ -207,11 +207,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(store[expiredKey], undefined);
   assert.ok(diagnostics.some((event) => event.event === 'request' && event.status === 503 && event.continuation));
   assert.ok(diagnostics.some((event) => event.event === 'retry_scheduled' && event.status === 503));
-  await fireJob();
+  await fireJob(); // 退避到点：重试第 2 页
+  while (job().status === 'running') await fireJob();
   assert.equal(job().status, 'done');
   assert.equal(job().reachedEnd, false);
-  assert.equal(server.calls, 3);
-  assert.equal(await count(), 6);
+  assert.equal(server.calls, 4);
+  assert.equal(await count(), 8, '多读一页跨过时间边界，避免混排导致漏页');
 
   // 榜单：Other 那条是我去别人帖子下评论后的回复，不上榜
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 4]]);
@@ -230,47 +231,47 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await fire('out');
   assert.equal(server.opened.length, 0, '后台重试不打开标签页');
   assert.equal((await boardRows())[0].replied, 0);
-  // 页面上出现了那条请求：记下地址，马上补读。7 天窗口读到 9 天前那条为止（2 页）
+  // 页面上出现了那条请求：记下地址，马上补读。整页跨过 7 天边界才停（3 页）
   delete alarms['out:me'];
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
   assert.ok(alarms['out:me'], '拿到地址后约好补读');
   await fire('out');
-  assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 2]);
+  assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId, server.outCalls], ['ok', '9005', 3]);
   assert.equal(store['cursor:me'].out.reachedEnd, false, '读到 7 天范围，不是列表到底');
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
   assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
-  // 没有新回复时只读 1 页
+  // 没有新回复时也会回看最近一天，重复记录由主键吞掉
   await fire('out');
-  assert.equal(server.outCalls, 3);
+  assert.equal(server.outCalls, 5);
 
   // 榜单范围切到半个月：榜单和标签快照立刻按新范围重算，不发请求
   assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
   assert.ok((await send({ type: 'setSettings', account: 'me', patch: { initDays: 60 } })).error, '初始化范围只接受 7、15、30');
   await setWindow(15);
-  assert.equal(server.calls, 3);
-  assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 5]]);
+  assert.equal(server.calls, 4);
+  assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
   assert.equal(store['snap:me'].windowDays, 15);
-  assert.equal(store['snap:me'].users.fan.count, 5);
+  assert.equal(store['snap:me'].users.fan.count, 7);
 
   // 改口径和颜色：榜单和标签立刻跟着变；越界的值夹回范围
   const set = (patch) => send({ type: 'setSettings', account: 'me', patch });
-  await set({ minCount: 6 });
+  await set({ minCount: 8 });
   assert.deepEqual(await boardRows(), []);
   assert.deepEqual(store['snap:me'].users, {});
   await set({ minCount: 2, topN: 9999, tiers: [{ min: 5, color: 'green' }], baseColor: 'purple' });
   assert.equal(store['settings:me'].topN, 500);
   assert.equal(store['snap:me'].users.fan.color, 'green');
   const full = await send({ type: 'getBoard', account: 'me' });
-  assert.deepEqual([full.people, full.replies], [1, 5]);
+  assert.deepEqual([full.people, full.replies], [1, 7]);
   await set({ topN: 100, tiers: [{ min: 20, color: 'red' }, { min: 10, color: 'orange' }, { min: 5, color: 'blue' }], baseColor: 'gray' });
-  assert.equal(server.calls, 3, '改设置不发请求');
+  assert.equal(server.calls, 4, '改设置不发请求');
 
-  // 改了初始化范围也不会自己去读：闹钟到点只读新来的（1 页）。榜单按半个月算，本机已有的 9 天前那条也算上
+  // 改了初始化范围也不会自己去读：闹钟到点只做增量，并回看最近一天。榜单按半个月算，本机已有的 9 天前那条也算上
   await set({ initDays: 15 });
   let outBefore = server.outCalls;
   await fire('out');
-  assert.equal(server.outCalls - outBefore, 1);
-  assert.equal((await boardRows())[0].replied, 3);
+  assert.equal(server.outCalls - outBefore, 2);
+  assert.equal((await boardRows())[0].replied, 4);
   assert.equal(store['cursor:me'].out.lastFullDays, 7, '还是上次初始化的范围');
   // 手动点「初始化」：不管上次读到哪，按范围重新读一遍
   outBefore = server.outCalls;
@@ -308,12 +309,12 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(job().rangeDays, 15);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
-  // 增量：间隔里来了 7 条（跨 3 页），一轮读完，读到上次的位置就停
+  // 增量：间隔里来了 7 条（跨 4 页），一轮读完并回看最近一天
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
   await listeners.alarm({ name: 'tick' });
-  assert.equal(server.calls - before, 3);
+  assert.equal(server.calls - before, 4);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
   // 下一次随机定在 50–70 分钟后，并约好闹钟
@@ -321,12 +322,23 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(gap > 49 * 60_000 && gap < 70 * 60_000);
   assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
-  // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时只读 1 页
+  // 闹钟到点（把时间拨过去）就跑，不用等兜底闹钟；没有新内容时仍会回看最近一天
   store['cursor:me'].nextIncAt = 0;
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
   await fire('inc');
-  assert.equal(server.calls - before, 1);
+  assert.equal(server.calls - before, 4);
+
+  // X 晚放出来的回复即使落在已经越过的接续点之后，也要靠回看窗口捞回来
+  const late = { ...mention(0.02, '2', '50', '50'), id_str: '1999' };
+  feed.splice(9, 0, late);
+  store['cursor:me'].nextIncAt = 0;
+  store['cursor:me'].lastAttemptAt = 0;
+  const countBeforeLate = await count();
+  await fire('inc');
+  assert.equal(await count(), countBeforeLate + 1);
+  assert.ok((await send({ type: 'exportAll', account: 'me' })).inbound.some((event) => event.id === '1999'));
+  feed.splice(feed.indexOf(late), 1);
 
   // 打开过 X 的通知页：记下它读通知的请求，下一轮起用新接口读提及；新接口参数过期（404）就删掉、改回旧接口
   assert.equal(server.mentionTpl, undefined, '没记下之前用旧接口');
@@ -353,7 +365,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
   await Promise.all([fire('inc'), fire('inc')]);
-  assert.equal(server.calls - before, 1, '同时到的两个触发只跑一轮');
+  assert.equal(server.calls - before, 4, '同时到的两个触发只跑一轮');
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.color;
@@ -375,7 +387,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 点开某人：返回他在窗口内的回复
   const detail = await send({ type: 'getReplies', account: 'me', actorId: '2' });
-  assert.equal(detail.total, 14);
+  assert.equal(detail.total, 15);
   assert.equal(detail.outbound.total, (await boardRows()).find((row) => row.actor_id === '2').replied);
   assert.equal(detail.outbound.items[0].id, '9005');
   assert.ok(detail.outbound.items[0].created_at);
@@ -383,10 +395,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   // 数据现状和全量导出：两份数据各自的条数和起止时间
   const st = await send({ type: 'getAccountState', account: 'me' });
-  assert.deepEqual([st.db.in.count, st.db.out.count], [15, 6]);
+  assert.deepEqual([st.db.in.count, st.db.out.count], [16, 6]);
   assert.ok(st.db.out.from < st.db.out.to && st.cursor.out.lastFullAt);
   const all = await send({ type: 'exportAll', account: 'me' });
-  assert.deepEqual([all.inbound.length, all.out.length], [15, 6]);
+  assert.deepEqual([all.inbound.length, all.out.length], [16, 6]);
 
   // 增量读满 40 页（约 800 条）还没接上（比如电脑关了一整天）：不再放弃，记下位置，一两分钟后接着读到接上为止
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
@@ -401,9 +413,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(rest >= 59_000 && rest <= 120_000, '休息一两分钟接着读');
   store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
   await fire('inc');
-  assert.equal(server.calls - before, 44);
+  assert.equal(server.calls - before, 47, '接上后继续回看最近一天');
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
-  assert.equal(await count(), 15 + 130, '一条不丢');
+  assert.equal(await count(), 16 + 130, '一条不丢');
+  feed.splice(0, 130); // 这批合成数据已入库，后续立即更新只验证正常的近端回看
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
 
   await set({ fetchEnabled: true });
@@ -418,7 +431,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     inbound: store['cursor:me'].inLastReadAt,
     outbound: store['cursor:me'].out.lastReadAt,
   } });
-  assert.equal(server.calls, before + 1);
+  assert.equal(server.calls, before + 4);
   assert.equal(alarms['inc:me'].when, scheduled, '立即更新保留已有的自动更新时间');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
@@ -428,10 +441,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.ok(store['cursor:me'].out.lastReadCounts.read > 0);
   const beforeSecond = [server.calls, server.outCalls];
   assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).ok, '完成后可再次立即更新');
-  assert.deepEqual([server.calls, server.outCalls], beforeSecond.map((n) => n + 1));
+  assert.deepEqual([server.calls, server.outCalls], [beforeSecond[0] + 4, beforeSecond[1] + 2]);
   store['cursor:me'].rateUntil = Date.now() + 60_000;
   assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /退避/);
-  assert.deepEqual([server.calls, server.outCalls], beforeSecond.map((n) => n + 1), '接口退避时不发请求');
+  assert.deepEqual([server.calls, server.outCalls], [beforeSecond[0] + 4, beforeSecond[1] + 2], '接口退避时不发请求');
   delete store['cursor:me'].rateUntil;
   await set({ fetchEnabled: false });
 
@@ -496,6 +509,36 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   await set({ initDays: 7 });
   await set({ fetchEnabled: false });
 
+  // 接续点比 24 小时回看边界更旧：不能只看回看边界就停，必须继续读到接续点
+  await set({ fetchEnabled: true });
+  const staleFeed = feed.splice(0, feed.length,
+    { ...mention(25 / 24, '2', '50', '50'), id_str: '6006' },
+    { ...mention(26 / 24, '2', '50', '50'), id_str: '6005' },
+    { ...mention(27 / 24, '2', '50', '50'), id_str: '6004' },
+    { ...mention(2, '2', '50', '50'), id_str: '6003' },
+    { ...mention(2.5, '2', '50', '50'), id_str: '6002' },
+    { ...mention(2.9, '2', '50', '50'), id_str: '6001' },
+    { ...mention(3, '2', '50', '50'), id_str: '6000' },
+    { ...mention(3.1, '2', '50', '50'), id_str: '5999' },
+    { ...mention(3.2, '2', '50', '50'), id_str: '5998' },
+    { ...mention(3.3, '2', '50', '50'), id_str: '5997' });
+  const staleCursor = structuredClone(store['cursor:me']);
+  try {
+    Object.assign(store['cursor:me'], { syncedId: '6000', nextIncAt: 0, lastAttemptAt: 0 });
+    delete store['cursor:me'].lastIncrementalAt;
+    delete store['cursor:me'].incResume;
+    delete store['cursor:me'].rateUntil;
+    const staleCalls = server.calls;
+    const staleCount = await count();
+    await fire('inc');
+    assert.equal(server.calls - staleCalls, 3, '第 3 页到接续点就停，不依赖列表结束');
+    assert.equal(await count(), staleCount + 9, '接续点之前的记录一条不少');
+  } finally {
+    feed.splice(0, feed.length, ...staleFeed);
+    store['cursor:me'] = staleCursor;
+    await set({ fetchEnabled: false });
+  }
+
   // 清空：榜单、快照、游标都没了，设置保留
   await send({ type: 'clearData', account: 'me' });
   assert.equal(await count(), 0);
@@ -549,6 +592,9 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
   const originalSend = chrome.tabs.sendMessage;
   const requested = [];
   let mismatch = false;
+  let releaseFirst;
+  const firstFetchHeld = new Promise((resolve) => { releaseFirst = resolve; });
+  let held = false;
   chrome.tabs.sendMessage = async (id, msg) => {
     if (msg.type !== 'xir:fetch') return originalSend(id, msg);
     requested.push([id, msg.userId, msg.kind]);
@@ -558,15 +604,25 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
       }
       return { ok: true, status: 200, userId: msg.userId, body: scheduled('requested') };
     }
+    if (!held) {
+      held = true;
+      await firstFetchHeld;
+    }
     return originalSend(id, msg);
   };
   try {
-    await Promise.all([fire('inc', 'me'), fire('inc', 'uid-9')]);
+    const both = Promise.all([fire('inc', 'me'), fire('inc', 'uid-9')]);
+    await until(() => requested.length === 1, '第一份请求开始');
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(requested.length, 1, '同时到期时只有一份请求占用读取锁');
-    const waiting = requested[0][1] === '1' ? 'uid-9' : 'me';
+    const firstUid = requested[0][1];
+    const waiting = firstUid === '1' ? 'uid-9' : 'me';
     assert.ok(alarms[`inc:${waiting}`], '未拿到锁的账号保留自己的闹钟');
+    releaseFirst();
+    await both;
+    assert.ok(requested.every(([, uid]) => uid === firstUid), '一轮读取期间不串到另一个账号');
     await fire('inc', waiting);
-    assert.deepEqual(requested.map(([id, uid]) => [id, uid]).sort(), [[1, '1'], [9, '9']]);
+    assert.deepEqual([...new Set(requested.map(([id, uid]) => `${id}:${uid}`))].sort(), ['1:1', '9:9']);
     assert.ok(store['cursor:me'].inLastReadAt);
     assert.ok(store['cursor:uid-9'].inLastReadAt);
 

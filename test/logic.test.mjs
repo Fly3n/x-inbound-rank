@@ -160,6 +160,7 @@ test('解析：只收直接回复我的，引用和提及不计', () => {
   assert.deepEqual(r.events.map((e) => e.text), ['说得对', '', ''], '摘要去掉开头的 @，拿不到内容就是空串');
   assert.equal(r.bottomCursor, 'CURSOR');
   assert.equal(r.newestId, '207');
+  assert.equal(r.newestTs, Date.parse('Thu Nov 12 08:00:00 +0000 2026'));
   // 被引用的旧帖 100 不在时间线条目里，不能把「本页最早时间」拉回到 1 月
   assert.equal(r.oldestId, '200');
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10);
@@ -211,7 +212,7 @@ test('解析：结构不对就报错，不返回空结果', () => {
   assert.equal(parseMentions(body([], [], null), me).bottomCursor, null); // 空列表是合法的「到底了」
   // 实测到的空账号返回：globalObjects 是 {}，时间线里只有一个 Top 游标
   const empty = { globalObjects: {}, timeline: { id: 'x', instructions: [{ clearCache: {} }, { addEntries: { entries: [{ entryId: 'cursor-top-1', content: { operation: { cursor: { value: 'T', cursorType: 'Top' } } } }] } }] } };
-  assert.deepEqual(parseMentions(empty, me), { events: [], entryIds: [], newestId: null, oldestId: null, oldestTs: null, bottomCursor: null });
+  assert.deepEqual(parseMentions(empty, me), { events: [], entryIds: [], newestId: null, newestTs: null, oldestId: null, oldestTs: null, bottomCursor: null });
 });
 
 // ---- 我在别人帖子下的回复 ----
@@ -275,6 +276,7 @@ test('解析我的回复：只留别人帖子下的，置顶、原创、转发�
   assert.equal(countsFromMe(r.events[3]), false);
   assert.deepEqual(r.events.map((e) => e.root_handle), ['u2', 'u3', null, 'Me'], '根帖主人的 @ID 只给导出用');
   assert.deepEqual([r.newestId, r.oldestId, r.bottomCursor], ['905', '900', 'NEXT'], '范围只看每个条目里我发的最后一条');
+  assert.equal(r.newestTs, Date.parse('Thu Nov 12 08:00:00 +0000 2026'));
   assert.equal(new Date(r.oldestTs).getUTCMonth(), 10, '置顶帖和被回复的旧帖不拉低时间范围');
 });
 

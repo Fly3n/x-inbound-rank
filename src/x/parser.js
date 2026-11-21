@@ -105,7 +105,7 @@ function fromGraphql(body, inspect) {
  * @returns {{
  *   events: Array,        // 别人对我的回复
  *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
- *   newestId: string|null, oldestId: string|null, oldestTs: number|null,
+ *   newestId: string|null, newestTs: number|null, oldestId: string|null, oldestTs: number|null,
  *   bottomCursor: string|null
  * }}
  */
@@ -117,6 +117,7 @@ export function parseMentions(body, me, inspect) {
 
   const events = [];
   let newestId = null;
+  let newestTs = null;
   let oldestId = null;
   let oldestTs = null;
   let missing = 0;
@@ -129,7 +130,10 @@ export function parseMentions(body, me, inspect) {
       continue;
     }
     const ts = tweetTime(t);
-    if (!newestId || idGt(id, newestId)) newestId = id;
+    if (!newestId || idGt(id, newestId)) {
+      newestId = id;
+      newestTs = ts;
+    }
     if (!oldestId || idGt(oldestId, id)) {
       oldestId = id;
       oldestTs = ts;
@@ -175,7 +179,7 @@ export function parseMentions(body, me, inspect) {
     throw new ParseError('时间线条目引用的帖子在返回里一条都找不到');
   }
 
-  return { events, entryIds: [...new Set(entryIds)], newestId, oldestId, oldestTs, bottomCursor };
+  return { events, entryIds: [...new Set(entryIds)], newestId, newestTs, oldestId, oldestTs, bottomCursor };
 }
 
 // ---------- 我自己的回复列表（GraphQL：个人主页「回复」栏） ----------
@@ -198,7 +202,7 @@ function collectTweets(node, out) {
 /**
  * @returns {{
  *   events: Array,   // 我在别人帖子下的回复：{ id, created_at, reply_to_id, to_user_id, root_user_id, root_handle, conversation_id, text }
- *   newestId, oldestId, oldestTs,   // 本页里我自己发的帖子（每个条目取最后一条，不含置顶）的范围，用于判断翻到哪了
+ *   newestId, newestTs, oldestId, oldestTs,   // 本页里我自己发的帖子（每个条目取最后一条，不含置顶）的范围，用于判断翻到哪了
  *   bottomCursor
  * }}
  */
@@ -250,10 +254,14 @@ export function parseMyReplies(body, me) {
   if (blankEntries && !parsedEntries) throw new ParseError('时间线里有帖子条目，但解析不出帖子内容');
 
   let newestId = null;
+  let newestTs = null;
   let oldestId = null;
   let oldestTs = null;
   for (const t of mains) {
-    if (!newestId || idGt(t.id_str, newestId)) newestId = t.id_str;
+    if (!newestId || idGt(t.id_str, newestId)) {
+      newestId = t.id_str;
+      newestTs = tweetTime(t);
+    }
     if (!oldestId || idGt(oldestId, t.id_str)) {
       oldestId = t.id_str;
       oldestTs = tweetTime(t);
@@ -286,7 +294,7 @@ export function parseMyReplies(body, me) {
     });
   }
 
-  return { events, newestId, oldestId, oldestTs, bottomCursor };
+  return { events, newestId, newestTs, oldestId, oldestTs, bottomCursor };
 }
 
 // ---------- 已排期帖子列表（GraphQL：FetchScheduledTweets） ----------

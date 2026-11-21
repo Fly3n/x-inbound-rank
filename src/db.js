@@ -57,14 +57,26 @@ async function putRows(account, events, name) {
   let added = 0;
   for (const e of events) {
     const row = { ...e, account };
-    const get = store.getKey([account, e.id]);
+    const get = store.get([account, e.id]);
     get.onsuccess = () => {
-      if (get.result === undefined) added++;
-      store.put(row);
+      const previous = get.result;
+      if (previous === undefined) added++;
+      store.put(mergeKnown(previous, row));
     };
   }
   await done(tx);
   return added;
+}
+
+/** 重读同一条时保留已知事实，别让新响应里的 null / 空串覆盖掉根帖归属和正文。 */
+function mergeKnown(previous, incoming) {
+  if (!previous) return incoming;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(incoming)) {
+    const known = value !== null && value !== undefined && value !== '';
+    if (known || merged[key] === null || merged[key] === undefined || merged[key] === '') merged[key] = value;
+  }
+  return merged;
 }
 
 /** 该账号在这张表里的全部事件。结果冻结、共用，不要改。 */
