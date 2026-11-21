@@ -75,24 +75,6 @@
 [data-xir-c="purple"] { --xir-bg: #9333ea; --xir-fg: #fff; }
 [data-xir-c="gray"] { --xir-bg: #6b7280; --xir-fg: #fff; }
 
-.xir-tip {
-  position: fixed;
-  z-index: 2147483647;
-  max-width: 230px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  font: 12px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  white-space: pre-line;
-  color: #fff;
-  background: rgba(15, 20, 25, 0.94);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  pointer-events: none;
-}
-
-.xir-tip[hidden] {
-  display: none;
-}
-
 /* ---- 发帖排期快捷档期条（嵌入 X 原生排期弹窗） ---- */
 .xir-sched {
   --xir-s-bg: #f7f9f9;

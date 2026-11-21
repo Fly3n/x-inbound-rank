@@ -14,10 +14,17 @@ const store = {
   'job:me': { status: 'done', startedAt: 1 },
   current: 'me',
 };
+const sessionStore = {};
 const alarms = {};
 const version = 'test-version';
 const tab = (id) => ({ id, url: 'https://x.com/home' });
 const sessions = new Map([[1, { userId: '1', handle: 'Me' }], [4, { userId: '1', handle: 'Me' }]]);
+const staleTabs = new Set();
+const loadingTabs = new Set();
+const reloadCalls = [];
+const windowCalls = { get: [], update: [], create: [] };
+const openWindows = new Map();
+let nextWindowId = 100;
 let activeTab = 1;
 const listeners = {};
 const hook = (name) => ({ addListener: (fn) => (listeners[name] = fn) });
@@ -84,6 +91,11 @@ globalThis.chrome = {
       set: async (o) => void Object.assign(store, structuredClone(o)),
       remove: async (k) => void pick(k).forEach((x) => delete store[x]),
     },
+    session: {
+      get: async (k) => Object.fromEntries((k === null ? Object.keys(sessionStore) : pick(k)).filter((x) => x in sessionStore).map((x) => [x, structuredClone(sessionStore[x])])),
+      set: async (o) => void Object.assign(sessionStore, structuredClone(o)),
+      remove: async (k) => void pick(k).forEach((x) => delete sessionStore[x]),
+    },
   },
   alarms: {
     create: async (name, opts) => void (alarms[name] = { ...opts, scheduledTime: opts.when }),
@@ -91,17 +103,50 @@ globalThis.chrome = {
     clear: async (name) => delete alarms[name],
     onAlarm: hook('alarm'),
   },
-  runtime: { getManifest: () => ({ version }), onInstalled: hook('installed'), onStartup: hook('startup'), onMessage: hook('message') },
+  runtime: {
+    getManifest: () => ({ version }),
+    getURL: (path) => `chrome-extension://test/${path}`,
+    onInstalled: hook('installed'),
+    onStartup: hook('startup'),
+    onMessage: hook('message'),
+  },
   tabs: {
-    query: async ({ active } = {}) => (active ? [tab(activeTab)] : [...sessions.keys()].map(tab)),
+    query: async ({ active } = {}) => (active ? [tab(activeTab)] : [...sessions.keys()].map((id) => ({ ...tab(id), status: loadingTabs.has(id) ? 'loading' : 'complete' }))),
+    get: async (id) => ({ ...tab(id), status: loadingTabs.has(id) ? 'loading' : 'complete' }),
+    reload: async (id) => {
+      reloadCalls.push(id);
+      staleTabs.delete(id);
+    },
     sendMessage: async (id, msg) => {
       const session = sessions.get(id);
-      if (msg.type === 'xir:ping') return session ? { ok: true, version, ...session } : null;
+      if (msg.type === 'xir:ping') return session ? { ok: true, version: staleTabs.has(id) ? 'old-version' : version, ...session } : null;
       if (session?.userId !== msg.userId) throw new Error('向错误的标签页发出了请求');
       if (msg.kind === 'out') return { ...respondOut(msg), userId: session.userId };
       server.mentionTpl = msg.tpl;
       return { ...respond(msg.cursor), userId: session.userId };
     },
+  },
+  windows: {
+    get: async (id) => {
+      windowCalls.get.push(id);
+      const win = openWindows.get(id);
+      if (!win) throw new Error('window not found');
+      return win;
+    },
+    update: async (id, patch) => {
+      windowCalls.update.push([id, patch]);
+      const win = openWindows.get(id);
+      if (!win) throw new Error('window not found');
+      Object.assign(win, patch);
+      return win;
+    },
+    create: async (opts) => {
+      windowCalls.create.push(opts);
+      const win = { id: ++nextWindowId, ...opts };
+      openWindows.set(win.id, win);
+      return win;
+    },
+    onRemoved: hook('windowRemoved'),
   },
 };
 
@@ -648,4 +693,43 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
   } finally {
     chrome.tabs.sendMessage = originalSend;
   }
+});
+
+test('固定窗口复用，扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
+  openWindows.clear();
+  windowCalls.get.length = 0;
+  windowCalls.update.length = 0;
+  windowCalls.create.length = 0;
+  store.pinnedWindowId = 999; // 上一版留在 local 的旧 ID 不能被复用
+  const opens = await Promise.all([send({ type: 'openPinned' }), send({ type: 'openPinned' })]);
+  assert.deepEqual(opens, [{ ok: true }, { ok: true }], '同时点两次不会开出两个窗口');
+  const pinnedId = sessionStore.pinnedWindowId;
+  assert.ok(pinnedId);
+  assert.equal(windowCalls.create.length, 1);
+  assert.match(windowCalls.create[0].url, /popup\.html\?pinned=1$/);
+  assert.deepEqual(await send({ type: 'openPinned' }), { ok: true });
+  assert.equal(sessionStore.pinnedWindowId, pinnedId, '再点固定只聚焦已经打开的窗口');
+  assert.deepEqual(windowCalls.update.at(-1), [pinnedId, { focused: true, state: 'normal' }]);
+  assert.equal(windowCalls.create.length, 1);
+
+  await listeners.windowRemoved(pinnedId);
+  await until(() => sessionStore.pinnedWindowId === undefined, '关闭固定窗口后清掉记录');
+
+  staleTabs.add(1);
+  loadingTabs.add(1);
+  const before = reloadCalls.length;
+  await listeners.startup();
+  assert.equal(reloadCalls.length, before, '加载中的页面先不打断');
+  assert.ok(alarms.staleTabs, '安排一次补查');
+  assert.equal(sessionStore.staleTabsRetries, 1);
+  await listeners.alarm({ name: 'staleTabs' });
+  assert.equal(sessionStore.staleTabsRetries, 2);
+  await listeners.alarm({ name: 'staleTabs' });
+  assert.equal(sessionStore.staleTabsRetries, 2, '最多补查两轮，避免无限刷新');
+  loadingTabs.delete(1);
+  await listeners.alarm({ name: 'staleTabs' });
+  assert.deepEqual(reloadCalls.slice(before), [1], '页面加载完后只刷新旧内容脚本所在的 X 页面');
+  assert.equal(staleTabs.has(1), false);
+  assert.equal(sessionStore.staleTabsRetries, undefined);
+  delete store.pinnedWindowId;
 });

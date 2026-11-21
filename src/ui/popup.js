@@ -687,6 +687,23 @@ $('disableAccount').addEventListener('click', async (e) => {
   }
 });
 
+const pinned = new URLSearchParams(location.search).has('pinned');
+document.body.classList.toggle('pinned', pinned);
+$('pin').hidden = pinned;
+$('pin').addEventListener('click', async () => {
+  const button = $('pin');
+  button.disabled = true;
+  try {
+    const result = await call('openPinned');
+    if (result?.error) return alert(result.error);
+    window.close();
+  } catch {
+    alert('固定窗口打开失败，请重试。');
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
 // 任务状态、快照变化时自动刷新。读取过程中一页要写好几次存储，攒 200 毫秒再画；

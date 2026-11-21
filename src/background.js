@@ -36,11 +36,14 @@ const PACE = {
 // 本地数据保存多久见 rank.js 的 KEEP_DAYS（90 天，和最长的榜单范围一致）
 
 const TICK_ALARM = 'tick';
+const STALE_TABS_ALARM = 'staleTabs';
 const JOB_ALARM = 'job';
 const INC_ALARM = 'inc';
 const OUT_ALARM = 'out';
 const alarmFor = (kind, account) => `${kind}:${account}`;
 const X_TABS = { url: ['https://x.com/*', 'https://twitter.com/*'] };
+const PINNED_WINDOW = 'pinnedWindowId';
+const STALE_TABS_RETRY = 'staleTabsRetries';
 const enabledAccounts = async () => Object.entries(await kvGet(keys.accounts, {})).filter(([, a]) => a.enabled && a.userId);
 const enabledAccount = async (account) => account && (await kvGet(keys.accounts, {}))[account]?.enabled === true;
 
@@ -122,6 +125,124 @@ async function pingTab(tab) {
   }
   return null;
 }
+
+/**
+ * 扩展重载/更新后，已打开页面里的旧内容脚本不会自己换新。
+ * 只刷新连不上或版本对不上的 X 标签页；正常页面不动。
+ */
+const isXTabUrl = (url) => /^https:\/\/(?:x|twitter)\.com\//.test(url || '');
+
+async function reloadStaleXirTabs() {
+  if (!chrome.tabs?.query || !chrome.tabs?.get || !chrome.tabs?.reload) return { reloaded: 0, pending: 0 };
+  const tabs = await chrome.tabs.query(X_TABS).catch(() => []);
+  let reloaded = 0;
+  let pending = 0;
+  for (const tab of tabs) {
+    if (!tab?.id || tab.discarded) continue;
+    if (tab.status === 'loading') {
+      pending++;
+      continue;
+    }
+    if (await pingTab(tab)) continue;
+    // 失败可能刚好碰上页面开始导航。刷新前再查一次，避免打断已经换到新文档的页面。
+    const current = await chrome.tabs.get(tab.id).catch(() => null);
+    if (!current || current.discarded || !isXTabUrl(current.url)) continue;
+    if (current.status === 'loading') {
+      pending++;
+      continue;
+    }
+    if (await pingTab(current)) continue;
+    try {
+      await chrome.tabs.reload(tab.id);
+      reloaded++;
+    } catch {
+      pending++; // 标签页可能刚关闭或暂时拒绝刷新；留下一次补查。
+    }
+  }
+  return { reloaded, pending };
+}
+
+let tabRefresh = null;
+function refreshStaleTabs({ retry = false } = {}) {
+  if (tabRefresh) return tabRefresh;
+  tabRefresh = reloadStaleXirTabs()
+    .then(async (result) => {
+      if (!result.pending) {
+        await chrome.storage.session?.remove?.(STALE_TABS_RETRY);
+      } else if (retry) {
+        const saved = await chrome.storage.session?.get?.(STALE_TABS_RETRY);
+        const attempts = Number(saved?.[STALE_TABS_RETRY]) || 0;
+        if (attempts < 2) {
+          await chrome.storage.session?.set?.({ [STALE_TABS_RETRY]: attempts + 1 });
+          await chrome.alarms.create(STALE_TABS_ALARM, { when: now() + 30_000 });
+        }
+      }
+      return result;
+    })
+    .catch(() => ({ reloaded: 0, pending: 0 }))
+    .finally(() => { tabRefresh = null; });
+  return tabRefresh;
+}
+
+async function pinnedWindowId() {
+  const saved = await chrome.storage.session?.get?.(PINNED_WINDOW);
+  const id = Number(saved?.[PINNED_WINDOW]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+async function setPinnedWindowId(id) {
+  if (id) await chrome.storage.session.set({ [PINNED_WINDOW]: id });
+  else await chrome.storage.session.remove(PINNED_WINDOW);
+}
+
+let pinnedChain = Promise.resolve();
+function serialPinned(fn) {
+  const run = pinnedChain.then(fn);
+  pinnedChain = run.catch(() => {});
+  return run;
+}
+
+async function openPinnedWindowUnlocked() {
+  if (!chrome.windows?.get || !chrome.windows?.create || !chrome.windows?.update) {
+    return { error: '当前 Chrome 不支持固定窗口。' };
+  }
+  if (!chrome.storage.session?.get || !chrome.storage.session?.set || !chrome.storage.session?.remove) {
+    return { error: '当前 Chrome 不支持固定窗口。' };
+  }
+  const saved = await pinnedWindowId();
+  if (saved) {
+    try {
+      await chrome.windows.get(saved);
+      await chrome.windows.update(saved, { focused: true, state: 'normal' });
+      return { ok: true };
+    } catch {
+      await setPinnedWindowId(null);
+    }
+  }
+  try {
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL('src/ui/popup.html?pinned=1'),
+      type: 'popup',
+      width: 500,
+      height: 760,
+      focused: true,
+    });
+    if (!win?.id) return { error: '固定窗口没有成功创建，请重试。' };
+    await setPinnedWindowId(win.id);
+    return { ok: true };
+  } catch (e) {
+    return { error: `固定窗口打开失败：${String(e?.message || e)}` };
+  }
+}
+
+const openPinnedWindow = () =>
+  serialPinned(openPinnedWindowUnlocked).catch((e) => ({ error: `固定窗口打开失败：${String(e?.message || e)}` }));
+
+chrome.windows?.onRemoved?.addListener((id) => {
+  serialPinned(async () => {
+    if (await pinnedWindowId() === id) await setPinnedWindowId(null);
+  }).catch(() => {});
+});
 
 async function senderAccount(msg, sender) {
   if (!Number.isInteger(sender?.tab?.id) || (sender.frameId ?? 0) !== 0 ||
@@ -920,7 +1041,10 @@ async function recoverAlarms(account) {
 async function ensureTick() {
   await migrateAccounts();
   if (!(await chrome.alarms.get(TICK_ALARM))) await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 30 });
-  for (const [account] of await enabledAccounts()) await recoverAlarms(account);
+  await Promise.all([
+    refreshStaleTabs({ retry: true }),
+    ...(await enabledAccounts()).map(([account]) => recoverAlarms(account)),
+  ]);
   queueBridgePush();
 }
 chrome.runtime.onInstalled.addListener(ensureTick);
@@ -928,6 +1052,7 @@ chrome.runtime.onStartup.addListener(ensureTick);
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   await migrateAccounts();
+  if (alarm.name === STALE_TABS_ALARM) return refreshStaleTabs({ retry: true });
   if (alarm.name === TICK_ALARM) {
     await readDiagnostics().catch(() => {});
     await Promise.all((await enabledAccounts()).map(async ([account]) => {
@@ -1157,6 +1282,7 @@ const handlers = {
     return { message: '别人回我已读完；我回别人暂未读取，请查看数据状态。' };
   },
   setAccountEnabled,
+  openPinned: openPinnedWindow,
   async getState() {
     const registry = await kvGet(keys.accounts, {});
     const accounts = Object.fromEntries(Object.entries(registry).filter(([, a]) => a.enabled));

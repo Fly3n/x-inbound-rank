@@ -15,7 +15,6 @@
 
   let account = null; // 当前账号（小写 handle）
   let users = {}; // 快照：handle -> { rank, count, color, last }
-  let windowDays = 7; // 快照按几天的窗口算的
   let show = { rank: true, rel: true, place: true }; // 三种标签各自显不显示（设置页的开关，随快照下发）
   let alive = true; // 插件被重载后旧脚本失效，停止一切动作
 
@@ -61,9 +60,7 @@
   function useSnap(snap) {
     users = snap?.users || {};
     places.clear(); // 本机数据更新了，之前问不出来的可以再问一次
-    windowDays = snap?.windowDays || 7;
     show = snap ? { rank: true, out: true, rel: true, place: true, ...snap.show } : {};
-    hideTip(); // 数据变了，开着的提示可能已经过时
     rescan();
   }
 
@@ -116,11 +113,6 @@
 
   // ---------- 内联标签 ----------
 
-  const fmtDate = (ts) => {
-    const d = new Date(ts);
-    return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  };
-
   function handleOf(nameEl) {
     for (const a of nameEl.querySelectorAll('a[href^="/"]')) {
       const m = a.getAttribute('href').match(/^\/([A-Za-z0-9_]{1,15})$/);
@@ -148,8 +140,6 @@
       badge = document.createElement('span');
       badge.className = 'xir-badge';
       badge.innerHTML = `${ICON_RANK}<span class="xir-rank"></span>${ICON_REPLY}<span class="xir-count"></span><span class="xir-out" hidden>${ICON_OUT}<span></span></span>`;
-      badge.addEventListener('mouseenter', showTip);
-      badge.addEventListener('mouseleave', hideTip);
     }
     // 标签放进用户名区域的最后一行里（@handle · 时间 那一行），不直接挂在用户名区域下面：
     // 别的插件（实测 FeedSieve）会把「用户名区域的最后一个子节点」当成那一行，往里塞自己的标记；
@@ -240,24 +230,6 @@
     chip(nameEl, 'xir-rel', REL[rel], rel, REL_TIP[rel], placeEl);
   }
 
-  let tip;
-  function showTip(e) {
-    const u = users[e.currentTarget.dataset.handle];
-    if (!u) return;
-    tip ??= document.body.appendChild(Object.assign(document.createElement('div'), { className: 'xir-tip' }));
-    tip.textContent =
-      `最近 ${windowDays} 天在我帖子下回复我，第 ${u.rank} 名，共 ${u.count} 次\n` +
-      (u.replied != null ? `我直接评论他的帖子 ${u.replied} 次\n` : '') +
-      `最近一次：${fmtDate(u.last)}`;
-    const r = e.currentTarget.getBoundingClientRect();
-    tip.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;
-    tip.style.top = `${r.bottom + 6}px`;
-    tip.hidden = false;
-  }
-  function hideTip() {
-    if (tip) tip.hidden = true;
-  }
-
   function rescan() {
     document.querySelectorAll(SEL.userName).forEach(mark);
   }
@@ -272,7 +244,7 @@
     });
   }
   // 我们自己插、改标签也会触发这个监听；只动了自家节点的变化不用再扫一遍
-  const OURS = '.xir-badge, .xir-chip, .xir-tip, .xir-sched';
+  const OURS = '.xir-badge, .xir-chip, .xir-sched';
   const isOurs = (n) => n.nodeType === 1 && n.matches(OURS);
   const onlyOurs = (r) => r.target.closest?.(OURS) || ([...r.addedNodes].every(isOurs) && [...r.removedNodes].every(isOurs));
   new MutationObserver((records) => {
