@@ -576,7 +576,7 @@ $('exportBoard').addEventListener('click', () =>
   ]),
 );
 
-// 导出全量数据：本机存的每一条回复，一条一行，两份数据放在同一张表里用「类型」区分
+// 导出全量数据：本机保存的全部统计相关回复，一条一行，两份数据放在同一张表里用「类型」区分
 $('exportAll').addEventListener('click', async () => {
   const { account } = view;
   const { inbound, out: outAll } = await call('exportAll', { account });
