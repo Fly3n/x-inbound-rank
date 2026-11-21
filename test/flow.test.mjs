@@ -340,7 +340,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(job().rangeDays, 15);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
 
-  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再回看 6 小时
+  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再回看 1 小时
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
@@ -490,7 +490,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
     await fire('inc');
   }
-  assert.equal(server.calls - before, 47, '分多个短任务接上并继续回看 6 小时');
+  assert.equal(server.calls - before, 47, '分多个短任务接上并继续回看 1 小时');
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
   assert.equal(await count(), 16 + 130, '一条不丢');
   feed.splice(0, 130); // 这批合成数据已入库，后续立即更新只验证正常的近端回看
