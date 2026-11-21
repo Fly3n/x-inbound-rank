@@ -14,10 +14,12 @@ test('本机快照：版本、账号、两份数据和环境信息', () => {
     exportedAt: '2026-11-21T03:04:05.000Z',
     extensionVersion: '0.23.1',
     environment: { timezone: 'Asia/Shanghai' },
+    source: 'live',
   });
 
   assert.equal(snapshot.schemaVersion, SNAPSHOT_SCHEMA);
   assert.equal(snapshot.kind, 'xir-local-snapshot');
+  assert.equal(snapshot.source, 'live');
   assert.equal(snapshot.extensionVersion, '0.23.1');
   assert.equal(snapshot.environment.timezone, 'Asia/Shanghai');
   assert.deepEqual(snapshot.data, data);

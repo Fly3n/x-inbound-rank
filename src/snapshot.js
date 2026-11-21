@@ -9,10 +9,12 @@ export function buildSnapshot({
   exportedAt = new Date().toISOString(),
   extensionVersion = '',
   environment = {},
+  source = 'manual',
 } = {}) {
   return {
     schemaVersion: SNAPSHOT_SCHEMA,
     kind: 'xir-local-snapshot',
+    source,
     exportedAt,
     extensionVersion,
     environment: {

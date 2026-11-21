@@ -6,7 +6,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "bridge": "node scripts/live-bridge.mjs",
+    "bridge:install": "node scripts/install-bridge.mjs",
+    "bridge:uninstall": "node scripts/install-bridge.mjs uninstall"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0"

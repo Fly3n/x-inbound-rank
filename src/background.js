@@ -6,6 +6,7 @@ import { record, readDiagnostics } from './diagnostics.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError, idGt } from './x/parser.js';
 import { replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
+import { queueBridgePush } from './bridge.js';
 
 // 请求节奏。提及：旧接口额度实测 180 次 / 15 分钟、每页 20 条，新接口 1500 次 / 15 分钟、每页 40 条（2026-11-19）。
 // 下面的回填节奏约 55 次 / 15 分钟（旧接口额度的三成，负责人用了一周没被限流），每小时约 220 页。
@@ -157,6 +158,7 @@ async function setAccountEnabled({ userId, account, enabled }) {
   if (!updated) return { error: '找不到要关闭的账号。' };
   if (enabled) {
     await refreshSnapshot(updated);
+    queueBridgePush();
     await recoverAlarms(updated);
   }
   return { ok: true, account: updated };
@@ -379,6 +381,7 @@ async function finishJob(account, job, { reachedEnd }) {
   });
   await armInc(account, next);
   await refreshSnapshot(account);
+  queueBridgePush();
 }
 
 /** 当前有没有该往下走的回填任务：有就返回 { account, job }。 */
@@ -461,6 +464,7 @@ async function stepBackfill(account) {
         job.message = `已连续翻 ${job.pages} 页，为安全起见先停下。确认账号没有异常后可点「继续」`;
       } else if (job.batchPages >= PACE.batchPages) {
         job.batchPages = 0;
+        queueBridgePush(); // 每批结束把本机数据推给开发桥，长回填期间也能看到进度
         await scheduleJob(account, job, rand(PACE.batchRestMs));
       } else {
         await scheduleJob(account, job, rand(PACE.pageGapMs));
@@ -469,7 +473,11 @@ async function stepBackfill(account) {
     await saveJob(account, job);
   } finally {
     // 任务停下来（暂停、出错、等标签页）时，把节流期间没跟上的数据补进快照
-    if (account) await flushSnapshot(account, (await kvGet(keys.job(account)))?.status !== 'running').catch(() => {});
+    if (account) {
+      const status = (await kvGet(keys.job(account)))?.status;
+      await flushSnapshot(account, status !== 'running').catch(() => {});
+      if (status !== 'running') queueBridgePush();
+    }
     busy = false;
   }
 }
@@ -654,6 +662,7 @@ async function maybeIncremental(account, manual = false) {
     return { ok: true };
   } finally {
     if (account) await flushSnapshot(account, true).catch(() => {});
+    queueBridgePush();
     busy = false;
   }
 }
@@ -825,6 +834,7 @@ async function syncOut(account, manual = false) {
     if (started) {
       await saveOut(account, { running: null }).catch(() => {});
       await refreshSnapshot(account).catch(() => {}); // 标签里的「我回他几次」跟着更新
+      queueBridgePush();
     }
     busy = false;
   }
@@ -840,6 +850,7 @@ async function maybePrune(account) {
     c.lastPruneAt = now();
     if (removed) c.prunedAt = now(); // 清掉过到期的数据：之后弹窗不再挂红字提示，改成一行小字
   });
+  if (removed) queueBridgePush();
 }
 
 // ---------- 清空 ----------
@@ -849,6 +860,7 @@ async function clearData(account) {
   await clearEvents(account);
   snapDirty.delete(account);
   await serial(() => kvRemove([keys.cursor(account), keys.job(account), keys.snap(account), keys.alert(account), keys.scheduled(account), keys.lastPostAt(account)])); // 和改 cursor 的排同一个队
+  queueBridgePush();
 }
 
 // ---------- 事件入口 ----------
@@ -895,6 +907,7 @@ async function ensureTick() {
   await migrateAccounts();
   if (!(await chrome.alarms.get(TICK_ALARM))) await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 30 });
   for (const [account] of await enabledAccounts()) await recoverAlarms(account);
+  queueBridgePush();
 }
 chrome.runtime.onInstalled.addListener(ensureTick);
 chrome.runtime.onStartup.addListener(ensureTick);
@@ -909,6 +922,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await recoverAlarms(account);
       await maybeIncremental(account);
     }));
+    queueBridgePush();
     return;
   }
   const [kind, account] = alarm.name.split(':');
@@ -994,6 +1008,7 @@ const handlers = {
       });
     }
     await refreshSnapshot(account);
+    queueBridgePush();
     await recoverAlarms(account);
     return { account };
   },
@@ -1185,6 +1200,7 @@ const handlers = {
     if (!next.fetchEnabled) await pauseJob(account, '后台抓取已关闭，任务暂停');
     else if ('fetchEnabled' in patch) await recoverAlarms(account);
     await refreshSnapshot(account); // 口径或颜色变了，标签立刻跟着变
+    queueBridgePush();
     return { ok: true };
   },
   clearData: async ({ account }) => (await clearData(account), { ok: true }),
