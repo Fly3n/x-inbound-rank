@@ -12,6 +12,31 @@ export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // ma
 export const OUT_SCHEMA = 2;
 
 /**
+ * 「我回 N」能不能按当前榜单范围显示：必须完整读过一次，并且已经覆盖这个窗口的最早时间。
+ * X 列表先到底、但没覆盖到窗口起点时不能显示 0，否则会把缺失数据说成「一次没回」。
+ * 空列表到底（reachedEnd 且没有 coverTs）是可信的 0。
+ */
+export function outboundReady(out, windowDays, now = Date.now()) {
+  if (!out?.lastAt || (out.schema || 1) < OUT_SCHEMA) return false;
+  if (out.coverTs) return out.coverTs <= now - windowDays * DAY_MS;
+  return !!out.reachedEnd;
+}
+
+/** 入站初始化是否覆盖所选范围；X 列表可信地到底且一条都没有，也算覆盖。 */
+export function inboundInitCovered(lastBackfill, syncedId, initDays, now = Date.now()) {
+  if (!lastBackfill || !syncedId) return false;
+  if (lastBackfill.oldestTs) return lastBackfill.oldestTs <= now - initDays * DAY_MS;
+  return !!lastBackfill.reachedEnd;
+}
+
+/** 出站初始化是否覆盖所选范围；提前到底不算覆盖所选范围，空列表到底才算。 */
+export function outboundInitCovered(out, initDays, now = Date.now()) {
+  if (!out || (out.schema || 1) < OUT_SCHEMA) return false;
+  if (out.coverTs) return out.coverTs <= now - initDays * DAY_MS;
+  return !!out.reachedEnd;
+}
+
+/**
  * 榜单口径和标签颜色的默认值，用户可在弹窗「设置」里改，「恢复默认」回到这里（不含 windowDays）。
  * - topN / minCount：榜单和标签只有两个条件——窗口内至少回复 minCount 次，最多前 topN 名。
  * - tiers / baseColor：标签颜色按回复次数分档，不按名次（名次靠后的一大片往往都只有两三次，
@@ -134,16 +159,18 @@ export function aggregate(events, windowDays, now = Date.now(), out = []) {
     if (e.created_at < since || e.created_at > now) continue;
     let row = byActor.get(e.actor_id);
     if (!row) {
-      row = { actor_id: e.actor_id, handle: e.actor_handle, name: e.actor_name, avatar: e.actor_avatar, count: 0, last: 0 };
+      const handle = String(e.actor_handle || e.actor_id || '');
+      row = { actor_id: e.actor_id, handle, name: e.actor_name || handle, avatar: e.actor_avatar || '', count: 0, last: 0 };
       byActor.set(e.actor_id, row);
     }
     row.count++;
     // 改过名或头像的人，展示最近一次回复时的资料
     if (e.created_at >= row.last) {
+      const handle = String(e.actor_handle || e.actor_id || '');
       row.last = e.created_at;
-      row.handle = e.actor_handle;
-      row.name = e.actor_name;
-      row.avatar = e.actor_avatar;
+      row.handle = handle;
+      row.name = e.actor_name || handle;
+      row.avatar = e.actor_avatar || '';
     }
   }
   return byActor;
@@ -155,13 +182,16 @@ export function aggregate(events, windowDays, now = Date.now(), out = []) {
  *       以及 replied——同一窗口内我直接评论他的帖子几次（out 是我发出的回复，没有就都是 0）。
  * people / replies：窗口内在我帖子下回复过我的总人数和总次数（不受 minCount、topN 影响）。
  */
-export function ranking(events, rules, now = Date.now(), out = []) {
-  const mine = outboundCounts(out, rules.windowDays, now);
+export function ranking(events, rules, now = Date.now(), out = [], showOut = true) {
+  const mine = showOut ? outboundCounts(out, rules.windowDays, now) : null;
   const all = [...aggregate(events, rules.windowDays, now, out).values()];
   const rows = all.filter((r) => r.count >= rules.minCount);
   rows.sort((a, b) => b.count - a.count || b.last - a.last || a.handle.localeCompare(b.handle));
   return {
-    rows: rows.slice(0, rules.topN).map((r, i) => ({ rank: i + 1, ...r, color: colorOf(r.count, rules), replied: mine.get(r.actor_id) || 0 })),
+    rows: rows.slice(0, rules.topN).map((r, i) => ({
+      rank: i + 1, ...r, color: colorOf(r.count, rules),
+      replied: showOut ? mine.get(r.actor_id) || 0 : null,
+    })),
     people: all.length,
     replies: all.reduce((n, r) => n + r.count, 0),
   };
@@ -192,6 +222,9 @@ export function repliesOf(events, actorId, rules, now = Date.now(), limit = 50, 
  */
 export function badgeSnapshot(events, rules, now = Date.now(), out = [], showOut = true) {
   const users = {};
-  for (const r of ranking(events, rules, now, out || []).rows) users[r.handle.toLowerCase()] = { rank: r.rank, count: r.count, color: r.color, last: r.last, ...(showOut ? { replied: r.replied } : {}) };
+  for (const r of ranking(events, rules, now, out || []).rows) {
+    const key = String(r.handle || r.actor_id || '').toLowerCase();
+    if (key) users[key] = { rank: r.rank, count: r.count, color: r.color, last: r.last, ...(showOut ? { replied: r.replied } : {}) };
+  }
   return users;
 }

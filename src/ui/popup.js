@@ -1,5 +1,8 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
-import { COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, KEEP_DAYS, WARN_DAYS, DAY_MS, colorOf, underMyPosts, countsFromMe } from '../rank.js';
+import {
+  COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, KEEP_DAYS, WARN_DAYS, DAY_MS,
+  colorOf, underMyPosts, countsFromMe, outboundReady, inboundInitCovered, outboundInitCovered,
+} from '../rank.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
@@ -92,7 +95,7 @@ function detailRow() {
 function renderList() {
   const { eventCount } = view;
   const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
-  const rows = q ? view.rows.filter((r) => r.handle.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) : view.rows;
+  const rows = q ? view.rows.filter((r) => `${r.handle || ''} ${r.name || ''}`.toLowerCase().includes(q)) : view.rows;
   const empty = !eventCount
     ? '还没有数据，到「设置」页点「初始化」'
     : q
@@ -104,12 +107,12 @@ function renderList() {
           el('li', { className: 'person', title: '点开看双方的回复记录', dataset: { actor: r.actor_id } }, [
             el('span', { className: 'rank', textContent: r.rank }),
             // 只有头像是去他主页的链接，这一行其他地方点了都是展开回复列表
-            el('a', { className: 'avatar', href: `https://x.com/${r.handle}`, target: '_blank', rel: 'noreferrer', title: `打开 @${r.handle} 的主页` }, [
+            el('a', { className: 'avatar', href: `https://x.com/${r.handle || r.actor_id}`, target: '_blank', rel: 'noreferrer', title: `打开 @${r.handle || r.actor_id} 的主页` }, [
               el('img', { src: r.avatar, alt: '', referrerPolicy: 'no-referrer', loading: 'lazy' }),
             ]),
             el('div', { className: 'who' }, [
               el('span', { className: 'name', textContent: r.name }),
-              el('span', { className: 'sub', textContent: `@${r.handle} · 最近 ${fmtTime(r.last)}` }),
+              el('span', { className: 'sub', textContent: `@${r.handle || r.actor_id} · 最近 ${fmtTime(r.last)}` }),
             ]),
             ...(view.outReady
               ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，本机已读取的直接评论次数', textContent: `我回 ${r.replied}` })]
@@ -251,14 +254,13 @@ async function draw() {
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
   const outDataReady = (out?.schema || 1) >= OUT_SCHEMA;
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: !!out?.lastAt && outDataReady });
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: outboundReady(out, rules.windowDays) });
   // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
   // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
   const initStart = Date.now() - rules.initDays * DAY_MS;
   const lbIn = s.cursor.lastBackfill;
-  const inFrom = lbIn ? lbIn.finishedAt - lbIn.rangeDays * DAY_MS : null;
-  const inCovered = !!lbIn && !!s.cursor.syncedId && (lbIn.reachedEnd || inFrom <= initStart);
-  const outCovered = !!out && outDataReady && (out.reachedEnd || (!!out.syncedId && out.coverTs && out.coverTs <= initStart));
+  const inCovered = inboundInitCovered(lbIn, s.cursor.syncedId, rules.initDays);
+  const outCovered = outboundInitCovered(out, rules.initDays);
   const outCoveredNow = outCovered && out.status !== 'error';
 
   // 保存期限：最早的数据存满 80 天时挂红字提示先导出；第一次清理之后数据每天滚动清，改成一行小字
@@ -296,7 +298,7 @@ async function draw() {
   $('outLine').hidden = !$('outLine').textContent;
   $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
     : outCoveredNow && !outPending
-      ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : '已读到列表底部') : '已覆盖所选范围')
+      ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : 'X 列表到底，没有读到记录') : '已覆盖所选范围')
       : outDataReady && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
   $('outSync').disabled = !isSession || outPending || outCoveredNow || starting.has('outSync');
   $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
@@ -324,7 +326,9 @@ async function draw() {
   $('start').textContent = starting.has('start') ? '启动中' : inPhase || '初始化';
   $('start').disabled = !isSession || !!inPhase || inCovered || starting.has('start');
   $('inReason').textContent = !isSession ? '打开此账号的 X 页面'
-    : inPhase ? '' : inCovered ? (lbIn.reachedEnd && inFrom > initStart ? '已读到列表底部' : '已覆盖所选范围') : '';
+    : inPhase ? '' : inCovered ? (lbIn?.reachedEnd && !lbIn?.oldestTs ? 'X 列表到底，没有读到记录' : '已覆盖所选范围')
+      : lbIn?.oldestTs ? (lbIn.reachedEnd ? `X 列表到底，最早只到 ${fmtDay(lbIn.oldestTs)}` : `上次只读到 ${fmtDay(lbIn.oldestTs)}`)
+        : lbIn?.reachedEnd ? 'X 列表到底，没有读到记录' : '';
   $('resume').disabled = !isSession;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
@@ -354,7 +358,7 @@ function readSummary(at, counts, exact = false) {
   if (!at) return '暂无读取记录';
   const existing = counts ? Math.max(0, (counts.read || 0) - (counts.added || 0)) : 0;
   return (exact ? fmtExactTime(at) : fmtTime(at)) +
-    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条${existing ? ` · 已有 ${existing} 条` : ''}` : ' · 暂无条数');
+    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条 · 已有 ${existing} 条` : ' · 暂无条数');
 }
 
 function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
@@ -555,7 +559,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
       post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
       page_limit: '已达到单次回查页数上限，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
       no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
-      account_disabled: '此账号已关闭插件',
+      account_disabled: '此账号已关闭插件', backoff: '账号正在限流退避',
     };
     const outcome = result.target
       ? `；解析判定 ${result.target.reason}，本机${result.stored ? '已有' : '没有'}这条记录` : '';

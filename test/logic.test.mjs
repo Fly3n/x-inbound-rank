@@ -4,7 +4,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../src/content/rel.js';
 import '../src/content/schedule.js';
-import { ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts, cleanRules, colorOf, DEFAULT_RULES, DAY_MS } from '../src/rank.js';
+import {
+  ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
+  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, outboundReady, inboundInitCovered, outboundInitCovered,
+} from '../src/rank.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
@@ -56,6 +59,23 @@ test('两个范围：榜单范围可到 3 个月，初始化范围只有 7/15/30
   // 榜单范围比初始化长：照常按榜单范围算
   const evs = [ev(1, 'a', 50), ev(2, 'a', 80), ev(3, 'a', 95)];
   assert.equal(board(evs, rules({ windowDays: 90, minCount: 1 }), NOW)[0].count, 2);
+});
+
+test('覆盖判定：提前到底不冒充覆盖，完整到底才算数', () => {
+  const out = (patch) => ({ lastAt: NOW, schema: 2, ...patch });
+  assert.equal(outboundReady(out({ coverTs: NOW - 8 * DAY_MS, reachedEnd: false }), 7, NOW), true);
+  assert.equal(outboundReady(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: true }), 7, NOW), false, '只读到 3 天不能填满 7 天窗口');
+  assert.equal(outboundReady(out({ coverTs: null, reachedEnd: true }), 7, NOW), true, '可信的空列表是 0');
+  assert.equal(outboundReady(out({ coverTs: NOW - 8 * DAY_MS, schema: 1 }), 7, NOW), false, '旧数据口径不显示');
+
+  assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, '100', 7, NOW), true);
+  assert.equal(inboundInitCovered({ oldestTs: NOW - 3 * DAY_MS, reachedEnd: true }, '100', 7, NOW), false);
+  assert.equal(inboundInitCovered({ oldestTs: null, reachedEnd: true }, '100', 7, NOW), true, '空列表到底也覆盖');
+  assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, null, 7, NOW), false);
+
+  assert.equal(outboundInitCovered(out({ coverTs: NOW - 8 * DAY_MS, reachedEnd: false }), 7, NOW), true);
+  assert.equal(outboundInitCovered(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: true }), 7, NOW), false);
+  assert.equal(outboundInitCovered(out({ coverTs: null, reachedEnd: true }), 7, NOW), true);
 });
 
 test('标签颜色：按次数分档，不按名次', () => {
@@ -200,9 +220,91 @@ test('解析新接口的提及：和旧接口一样分类', () => {
   assert.throws(() => parseMentions({ errors: [{ message: 'boom' }] }, me), /boom/);
 });
 
+test('解析新接口：条目结构变了就报错，不冒充空列表', () => {
+  const modular = {
+    entryId: 'notification-module',
+    content: {
+      entryType: 'TimelineTimelineModule',
+      items: [{ item: { itemContent: nt('503', '2', 'Fan', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100', conversation_id_str: '100' }).content.itemContent } }],
+    },
+  };
+  assert.deepEqual(parseMentions(notif([modular]), me).events.map((e) => e.id), ['503'], '模块里包着的帖子也要解析');
+  const unavailable = (type) => ({
+    entryId: `notification-${type}`,
+    content: {
+      entryType: 'TimelineTimelineItem',
+      itemContent: { itemType: 'TimelineTweet', tweet_results: { result: { __typename: type } } },
+    },
+  });
+  assert.deepEqual(
+    parseMentions(notif([
+      nt('505', '2', 'Fan', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100', conversation_id_str: '100' }),
+      unavailable('TweetUnavailable'),
+      unavailable('TweetTombstone'),
+    ]), me).events.map((e) => e.id),
+    ['505'],
+    '正常的不可用条目只跳过自己，不能拖垮同页其它回复',
+  );
+  assert.throws(
+    () => parseMentions(notif([{ entryId: 'future-1', content: { entryType: 'TimelineTimelineItem', itemContent: { itemType: 'TimelineFuture' } } }]), me),
+    /无法识别或缺少内容/,
+  );
+  assert.throws(
+    () => parseMentions(notif([{ entryId: 'future-2', content: { entryType: 'TimelineFutureModule', items: [] } }]), me),
+    /无法识别或缺少内容/,
+  );
+  assert.throws(
+    () => parseMentions(notif([{ entryId: 'missing-content', content: null }]), me),
+    /无法识别或缺少内容/,
+  );
+  assert.throws(
+    () => parseMentions(notif([
+      nt('506', '2', 'Fan', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100', conversation_id_str: '100' }),
+      { entryId: 'missing-content-2', content: null },
+    ]), me),
+    /无法识别或缺少内容/,
+    '同页有正常帖子时，异常条目也不能被静默丢掉',
+  );
+});
+
 test('解析：只有手填 handle、没有用户 ID 时靠 screen_name 匹配', () => {
   const b = body([tweet('300', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'ME', in_reply_to_status_id_str: '100', conversation_id_str: '100' })], ['300']);
   assert.equal(parseMentions(b, { handle: 'me', userId: null }).events.length, 1);
+});
+
+test('解析：数字 ID 优先；缺 handle 也能入库和算榜', () => {
+  const b = body([tweet('301', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' })], ['301']);
+  b.globalObjects.users[2] = { ...user('2', 'Me'), screen_name: undefined, name: undefined };
+  const parsed = parseMentions(b, me);
+  assert.equal(parsed.events.length, 1, '数字 ID 不等于我时，不能拿同名的 handle 兜底');
+  assert.deepEqual([parsed.events[0].actor_handle, parsed.events[0].actor_name], ['', '']);
+  const row = ranking(parsed.events, rules({ minCount: 1 }), NOW).rows[0];
+  assert.deepEqual([row.handle, row.name], ['2', '2']);
+  assert.doesNotThrow(() => badgeSnapshot(parsed.events, rules({ minCount: 1 }), NOW));
+});
+
+test('解析：作者资料整块缺失时保留数字 ID，不静默丢回复', () => {
+  const b = body([tweet('302', '2', { in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', in_reply_to_status_id_str: '100', conversation_id_str: '100' })], ['302']);
+  delete b.globalObjects.users[2];
+  const parsed = parseMentions(b, me);
+  assert.deepEqual([parsed.events.length, parsed.events[0].actor_id, parsed.events[0].actor_handle], [1, '2', '']);
+  assert.deepEqual(ranking(parsed.events, rules({ minCount: 1 }), NOW).rows.map((r) => [r.handle, r.name]), [['2', '2']]);
+});
+
+test('解析：帖子有编号但作者数字 ID 缺失时整页报错，不悄悄漏一条', () => {
+  const missing = tweet('303', '2', { in_reply_to_user_id_str: '1', in_reply_to_status_id_str: '100', conversation_id_str: '100' });
+  delete missing.user_id_str;
+  assert.throws(() => parseMentions(body([missing], ['303']), me), /作者的数字用户 ID/);
+
+  const gqlMissing = nt('504', '2', 'Fan', {});
+  delete gqlMissing.content.itemContent.tweet_results.result.legacy.user_id_str;
+  delete gqlMissing.content.itemContent.tweet_results.result.core.user_results.result.rest_id;
+  assert.throws(() => parseMentions(notif([gqlMissing]), me), /作者数字 ID/);
+
+  const myMissing = gt('906', '1', re('100', '2', '100'));
+  delete myMissing.legacy.user_id_str;
+  delete myMissing.core.user_results.result.rest_id;
+  assert.throws(() => parseMyReplies(gql([single(myMissing)]), me), /作者数字 ID/);
 });
 
 test('解析：结构不对就报错，不返回空结果', () => {
@@ -284,6 +386,30 @@ test('解析我的回复：结构不对或 X 报错就抛错', () => {
   assert.throws(() => parseMyReplies({ data: {} }, me), ParseError);
   assert.throws(() => parseMyReplies({ errors: [{ message: 'features cannot be null' }] }, me), /features cannot be null/);
   assert.throws(() => parseMyReplies(gql([{ entryId: 'tweet-1', content: { something: 'new' } }]), me), ParseError);
+  assert.throws(() => parseMyReplies(gql([{ entryId: 'tweet-null', content: null }]), me), /解析不出帖子内容/);
+  assert.throws(
+    () => parseMyReplies(gql([
+      single(gt('907', '1', re('100', '2', '100'))),
+      { entryId: 'tweet-null-2', content: null },
+    ]), me),
+    /解析不出帖子内容/,
+    '同页有正常回复时，异常条目也不能被静默丢掉',
+  );
+  const unavailable = (type) => ({
+    entryId: `tweet-${type}`,
+    content: { entryType: 'TimelineTimelineItem', itemContent: { tweet_results: { result: { __typename: type } } } },
+  });
+  const mixed = parseMyReplies(gql([
+    single(gt('908', '1', re('100', '2', '100'))),
+    unavailable('TweetUnavailable'),
+    unavailable('TweetTombstone'),
+  ]), me);
+  assert.deepEqual(mixed.events.map((e) => e.id), ['908'], '不可用回复只跳过自己');
+  assert.throws(
+    () => parseMyReplies(gql([unavailable('TweetUnavailable')]), me),
+    /只有不可用的帖子/,
+    '整页都无法判断范围时不能冒充空列表',
+  );
   assert.deepEqual(parseMyReplies({ data: { x: { instructions: [] } } }, me).events, [], '空列表不算错');
 });
 

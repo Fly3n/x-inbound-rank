@@ -3,6 +3,7 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { inboundInitCovered, outboundReady, outboundInitCovered } from '../src/rank.js';
 
 const DAY = 86400000;
 // 后台页与页之间要等好几秒（真实节奏）；测试里把一秒以上的等待都快进成立刻，只验证流程
@@ -23,7 +24,8 @@ const store = {
 const sessionStore = {};
 const alarms = {};
 const version = 'test-version';
-const tab = (id) => ({ id, url: 'https://x.com/home' });
+const tabUrls = new Map();
+const tab = (id) => ({ id, url: tabUrls.get(id) || 'https://x.com/home' });
 const sessions = new Map([[1, { userId: '1', handle: 'Me' }], [4, { userId: '1', handle: 'Me' }]]);
 const staleTabs = new Set();
 const loadingTabs = new Set();
@@ -52,7 +54,13 @@ const feed = [
   mention(12, '2', '52', '52'), mention(14, '2', '53', '53'),
 ];
 const otherRoot = { id_str: '60', user_id_str: '3', created_at: new Date(Date.now() - 3 * DAY).toUTCString() };
-const server = { calls: 0, fail429Once: false, outCalls: 0, outUrls: [], opened: [], closed: [], tplOnOpen: null };
+const server = {
+  calls: 0, fail429Once: false, repeatInboundCursor: false,
+  earlyEndInboundAfterFirstPage: false, emptyInboundOnce: false,
+  outCalls: 0, outFail429Once: false, repeatOutCursor: false,
+  earlyEndOutAfterFirstPage: false, emptyOutOnce: false,
+  scheduledFail429Once: false, outUrls: [], opened: [], closed: [], tplOnOpen: null,
+};
 
 // ---- 假的「我的回复」列表（GraphQL 形态），每页 2 条，按时间倒序 ----
 const mine = (id, daysAgo, rootUid) => ({
@@ -68,9 +76,26 @@ const outFeed = [mine('9005', 0.2, '2'), mine('9004', 1, '2'), mine('9003', 3, '
 function respondOut(msg) {
   server.outCalls++;
   server.outUrls.push(msg.tpl);
+  if (server.outFail429Once) {
+    server.outFail429Once = false;
+    return { ok: false, status: 429, userId: '1', rateResetAt: null };
+  }
+  if (server.emptyOutOnce) {
+    server.emptyOutOnce = false;
+    return { ok: true, status: 200, userId: '1', rateResetAt: null, body: { data: { user: { result: { timeline: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [] }] } } } } } } };
+  }
+  if (server.earlyEndOutAfterFirstPage && msg.cursor) {
+    server.earlyEndOutAfterFirstPage = false;
+    return { ok: true, status: 200, userId: '1', rateResetAt: null, body: { data: { user: { result: { timeline: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [] }] } } } } } } };
+  }
   const start = Number(msg.cursor || 0);
   const entries = outFeed.slice(start, start + 2);
-  if (start + 2 < outFeed.length) entries.push({ entryId: 'cursor-bottom', content: { value: String(start + 2), cursorType: 'Bottom' } });
+  const repeated = !!server.repeatOutCursor && !!msg.cursor;
+  if (repeated) server.repeatOutCursor = false;
+  const next = repeated ? msg.cursor : String(start + 2);
+  if (start + 2 < outFeed.length || repeated) {
+    entries.push({ entryId: 'cursor-bottom', content: { value: next, cursorType: 'Bottom' } });
+  }
   return { ok: true, status: 200, userId: '1', rateResetAt: null, body: { data: { user: { result: { timeline: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries }] } } } } } } };
 }
 function respond(cursor) {
@@ -79,10 +104,23 @@ function respond(cursor) {
     server.fail429Once = false;
     return { ok: false, status: 429, userId: '1', rateResetAt: null };
   }
+  if (server.emptyInboundOnce) {
+    server.emptyInboundOnce = false;
+    return { ok: true, status: 200, userId: '1', rateResetAt: null,
+      requestUrl: 'https://x.com/i/api/2/notifications/mentions.json?count=20', responseMetadata: { age: '0' },
+      body: { globalObjects: {}, timeline: { id: 't', instructions: [{ addEntries: { entries: [] } }] } } };
+  }
+  if (server.earlyEndInboundAfterFirstPage && cursor) {
+    server.earlyEndInboundAfterFirstPage = false;
+    return { ok: true, status: 200, userId: '1', rateResetAt: null,
+      requestUrl: 'https://x.com/i/api/2/notifications/mentions.json?count=20', responseMetadata: { age: '0' },
+      body: { globalObjects: {}, timeline: { id: 't', instructions: [{ addEntries: { entries: [] } }] } } };
+  }
   const start = Number(cursor || 0);
   const page = feed.slice(start, start + 3);
   const entries = page.map((t) => ({ entryId: `tweet-${t.id_str}`, content: { item: { content: { tweet: { id: t.id_str } } } } }));
-  if (page.length) entries.push({ entryId: 'cursor-bottom', content: { operation: { cursor: { value: String(start + 3), cursorType: 'Bottom' } } } });
+  const next = server.repeatInboundCursor && cursor ? (server.repeatInboundCursor = false, cursor) : String(start + 3);
+  if (page.length) entries.push({ entryId: 'cursor-bottom', content: { operation: { cursor: { value: next, cursorType: 'Bottom' } } } });
   const tweets = Object.fromEntries([...page, otherRoot].map((t) => [t.id_str, t]));
   return { ok: true, status: 200, userId: '1', rateResetAt: null,
     requestUrl: 'https://x.com/i/api/2/notifications/mentions.json?count=20', responseMetadata: { age: '0' }, body: { globalObjects: page.length ? { tweets, users } : {}, timeline: { id: 't', instructions: [{ addEntries: { entries } }] } } };
@@ -120,6 +158,8 @@ globalThis.chrome = {
       reloadCalls.push(id);
       staleTabs.delete(id);
     },
+    onActivated: hook('activated'),
+    onUpdated: hook('updated'),
     sendMessage: async (id, msg) => {
       const session = sessions.get(id);
       if (msg.type === 'xir:ping') return session ? { ok: true, version: staleTabs.has(id) ? 'old-version' : version, visible: !hiddenTabs.has(id), ...session } : null;
@@ -207,8 +247,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(job().auto, true);
   assert.equal(job().pages, 1);
   assert.ok(job().nextAt - Date.now() >= 14 * 60_000, '退避至少 15 分钟');
+  assert.equal(store['cursor:me'].rate429Count, 1);
 
   // 退避到点后续跑，第 2 页最早一条是 8 天前，超过 7 天范围 → 完成
+  activeNow = Math.max(activeNow, store['cursor:me'].rateUntil || 0);
   const sendPage = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (id, msg) => msg.type === 'xir:ping' ? sendPage(id, msg) : { ok: false, status: 503, userId: '1' };
   await fireJob();
@@ -256,7 +298,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual(server.opened, [], '等待用户打开回复页，插件不打开标签页');
   await fire('out');
   assert.equal(server.opened.length, 0, '后台重试不打开标签页');
-  assert.equal((await boardRows())[0].replied, 0);
+  assert.equal((await boardRows())[0].replied, null, '出站还没读成时不冒充「一次没回」');
   // 页面上出现了那条请求：记下地址，马上补读。整页跨过 7 天边界才停（3 页）
   delete alarms['out:me'];
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
@@ -331,7 +373,115 @@ test('后台全流程', { timeout: 60_000 }, async () => {
 
   assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
 
+  // 出站 429 必须指数退避，不能每 15 分钟固定重试
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const savedNow = activeNow;
+    try {
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, rate429Count: 0 });
+      server.outFail429Once = true;
+      await fire('out');
+      const first = store['cursor:me'].out;
+      assert.equal(first.rate429Count, 1);
+      assert.equal(store['cursor:me'].rate429Count, 1);
+      assert.ok(first.retryAt - Date.now() >= 15 * 60_000, '第一次 429 至少退避 15 分钟');
+
+      activeNow = first.retryAt;
+      server.outFail429Once = true;
+      await fire('out');
+      const second = store['cursor:me'].out;
+      assert.equal(second.rate429Count, 2);
+      assert.equal(store['cursor:me'].rate429Count, 2);
+      assert.ok(second.retryAt - Date.now() >= 30 * 60_000, '连续 429 的等待时间翻倍');
+    } finally {
+      activeNow = savedNow;
+      store['cursor:me'] = savedCursor;
+      delete alarms['out:me'];
+      server.outFail429Once = false;
+    }
+  }
+
+  // 出站重复游标是异常，不得当成列表到底，也不能推进接续点或覆盖范围
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const beforeCover = savedCursor.out.coverTs;
+    try {
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, syncedId: '9000' });
+      const runSync = store['cursor:me'].out.syncedId;
+      server.repeatOutCursor = true;
+      await fire('out');
+      const out = store['cursor:me'].out;
+      assert.equal(out.status, 'error');
+      assert.match(out.message, /重复的翻页位置/);
+      assert.equal(out.syncedId, runSync, '重复游标不推进接续点');
+      assert.equal(out.coverTs, beforeCover, '重复游标不冒充完整覆盖');
+    } finally {
+      store['cursor:me'] = savedCursor;
+      delete alarms['out:me'];
+      server.repeatOutCursor = false;
+    }
+  }
+
+  // 出站增量在接上旧位置前提前空页：不能把中间一段静默跳过
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const beforeLastAt = savedCursor.out.lastAt;
+    const beforeCover = savedCursor.out.coverTs;
+    try {
+      const checkpoint = '9002'; // 第一页两条都比它新，第二页提前空掉
+      Object.assign(store['cursor:me'].out, {
+        status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, manualTask: false,
+        syncedId: checkpoint, fullFor: 15, schema: 2,
+      });
+      store['cursor:me'].rateUntil = 0;
+      store['cursor:me'].rate429Count = 0;
+      server.earlyEndOutAfterFirstPage = true;
+      await fire('out');
+      const out = store['cursor:me'].out;
+      assert.equal(out.status, 'error');
+      assert.match(out.message, /提前结束/);
+      assert.equal(out.syncedId, checkpoint, '提前结束不推进接续点');
+      assert.equal(out.lastAt, beforeLastAt, '提前结束不冒充读完');
+      assert.equal(out.coverTs, beforeCover, '提前结束不冒充覆盖');
+
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, nextAutoAt: 0, resume: null, syncedId: checkpoint });
+      store['cursor:me'].rateUntil = 0;
+      store['cursor:me'].rate429Count = 0;
+      server.emptyOutOnce = true;
+      await fire('out');
+      assert.match(store['cursor:me'].out.message, /提前结束/, '首屏空页也不能当成接上旧位置');
+    } finally {
+      store['cursor:me'] = savedCursor;
+      delete alarms['out:me'];
+      server.earlyEndOutAfterFirstPage = false;
+      server.emptyOutOnce = false;
+    }
+  }
+
+  // 自动出站的等待/续读不能绕到上午、晚间窗口之外
+  {
+    const savedOut = structuredClone(store['cursor:me'].out);
+    const savedNow = activeNow;
+    try {
+      activeNow = new Date(2026, 10, 21, 11, 40, 0, 0).getTime();
+      store['cursor:me'].out = {
+        ...savedOut, status: 'queued', retryAt: 0, nextAutoAt: 0,
+        resume: { cursor: '2', topId: '9005', rounds: 0, full: false, stopAt: '9000', nextAt: 0 },
+      };
+      const before = server.outCalls;
+      await fire('out');
+      assert.equal(server.outCalls, before, '自动出站等待期间不绕过窗口');
+      assert.ok(alarms['out:me'].when >= new Date(2026, 10, 21, 18, 0, 0, 0).getTime(), '改到晚间窗口再继续');
+      assert.equal(store['cursor:me'].out.resume.nextAt, alarms['out:me'].when);
+    } finally {
+      activeNow = savedNow;
+      store['cursor:me'].out = savedOut;
+      delete alarms['out:me'];
+    }
+  }
+
   // 重新初始化（半个月）：一直翻到列表到底，如实标记没翻够；重复的不重复计数
+  const reinitStartedAt = Date.now();
   await send({ type: 'startBackfill', account: 'me' });
   await until(() => job().pages === 1 && job().nextAt, '重跑第 1 页');
   await send({ type: 'startBackfill', account: 'me' });
@@ -342,6 +492,29 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.equal(await count(), 8);
   assert.equal(job().rangeDays, 15);
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
+  assert.equal(store['cursor:me'].lastIncrementalAt, reinitStartedAt, '重新初始化完成后重置旧补漏锚点');
+
+  // 回填遇到重复游标：暂停在异常处，不把半截数据标成“列表到底”
+  {
+    const savedJob = structuredClone(job());
+    const savedCursor = structuredClone(store['cursor:me']);
+    try {
+      server.repeatInboundCursor = true;
+      await send({ type: 'startBackfill', account: 'me' });
+      await until(() => job().pages === 1 && job().nextAt, '重复游标测试的第 1 页');
+      await fireJob();
+      assert.equal(job().status, 'error');
+      assert.match(job().message, /重复的翻页位置/);
+      assert.equal(store['cursor:me'].syncedId, savedCursor.syncedId, '异常时不推进接续点');
+      assert.deepEqual(store['cursor:me'].lastBackfill, savedCursor.lastBackfill, '异常时不改上次覆盖范围');
+    } finally {
+      server.repeatInboundCursor = false;
+      store['job:me'] = savedJob;
+      store['cursor:me'] = savedCursor;
+      delete store['alert:me'];
+      delete alarms['job:me'];
+    }
+  }
 
   // 增量：间隔里来了 7 条，一轮读完并在接续点之后再向更早补 1 小时
   for (let i = 0; i < 7; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(2000 + i) });
@@ -406,6 +579,76 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   before = server.calls;
   await Promise.all([fire('inc'), fire('inc')]);
   assert.equal(server.calls - before, 4, '同时到的两个触发只跑一轮');
+
+  // 增量被限流：放弃本轮，不推进下一次补漏的锚点
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const beforeAnchor = savedCursor.lastIncrementalAt;
+    try {
+      Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+      server.fail429Once = true;
+      const result = await fire('inc');
+      assert.match(result.message, /限流/);
+      assert.equal(store['cursor:me'].lastIncrementalAt, beforeAnchor, '失败不推进补漏锚点');
+      assert.ok(store['cursor:me'].rateUntil > Date.now());
+    } finally {
+      server.fail429Once = false;
+      store['cursor:me'] = savedCursor;
+      delete store['alert:me'];
+      delete alarms['inc:me'];
+    }
+  }
+
+  // 入站重复游标是异常：保留原接续点，不能当成已接上
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const beforeSync = savedCursor.syncedId;
+    const beforeAnchor = savedCursor.lastIncrementalAt;
+    try {
+      Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+      server.repeatInboundCursor = true;
+      const result = await fire('inc');
+      assert.match(result.error, /翻页异常/);
+      assert.equal(store['cursor:me'].syncedId, beforeSync, '重复游标不推进接续点');
+      assert.equal(store['cursor:me'].lastIncrementalAt, beforeAnchor, '重复游标不推进补漏锚点');
+      assert.equal(store['cursor:me'].incResume, undefined);
+      assert.match(store['alert:me'].message, /重复的翻页位置/);
+    } finally {
+      server.repeatInboundCursor = false;
+      store['cursor:me'] = savedCursor;
+      delete store['alert:me'];
+      delete alarms['inc:me'];
+    }
+  }
+
+  // 入站分页在接上旧位置前提前空页：同样保留接续点和补漏锚点
+  {
+    const savedCursor = structuredClone(store['cursor:me']);
+    const beforeAnchor = savedCursor.lastIncrementalAt;
+    try {
+      const checkpoint = feed[4].id_str; // 第一页全是比它更新的已有记录，第二页提前空掉
+      Object.assign(store['cursor:me'], { syncedId: checkpoint, nextIncAt: 0, lastAttemptAt: 0, rateUntil: 0, rate429Count: 0 });
+      delete store['cursor:me'].incResume;
+      server.earlyEndInboundAfterFirstPage = true;
+      const result = await fire('inc');
+      assert.match(result.error, /提前结束/);
+      assert.equal(store['cursor:me'].syncedId, checkpoint, '提前结束不推进接续点');
+      assert.equal(store['cursor:me'].lastIncrementalAt, beforeAnchor, '提前结束不推进补漏锚点');
+      assert.equal(store['cursor:me'].incResume, undefined);
+      assert.match(store['alert:me'].message, /提前结束/);
+
+      Object.assign(store['cursor:me'], { syncedId: checkpoint, nextIncAt: 0, lastAttemptAt: 0, rateUntil: 0, rate429Count: 0 });
+      delete store['cursor:me'].incResume;
+      server.emptyInboundOnce = true;
+      assert.match((await fire('inc')).error, /提前结束/, '首屏空页也不能当成接上旧位置');
+    } finally {
+      server.earlyEndInboundAfterFirstPage = false;
+      server.emptyInboundOnce = false;
+      store['cursor:me'] = savedCursor;
+      delete store['alert:me'];
+      delete alarms['inc:me'];
+    }
+  }
 
   // 旧版本留下的快照缺字段：页面再上线时重算补齐
   delete store['snap:me'].users.fan.color;
@@ -489,18 +732,22 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   for (let i = 0; i < 130; i++) feed.unshift({ ...mention(0, '2', '50', '50'), id_str: String(3000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   before = server.calls;
+  const incrementStartedAt = Date.now();
   await fire('inc');
   assert.equal(server.calls - before, 6, '一次后台事件最多 6 页');
   assert.equal(store['cursor:me'].syncedId, '2006', '没接上之前接续点不动');
   assert.ok(store['cursor:me'].incResume, '记下读到哪了');
+  assert.equal(store['cursor:me'].incResume.startedAt, incrementStartedAt, '续读保留整轮的起始时间');
   const rest = alarms['inc:me'].when - Date.now();
   assert.ok(rest >= 179_000 && rest <= 300_000, '休息三到五分钟接着读');
   while (store['cursor:me'].incResume) {
+    activeNow += 5 * 60_000; // 分多段才读完时，补漏锚点不能被最后一段带偏
     store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
     await fire('inc');
   }
   assert.equal(server.calls - before, 47, '分多个短任务接上并继续回看 1 小时');
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
+  assert.equal(store['cursor:me'].lastIncrementalAt, incrementStartedAt, '补漏锚点固定在这一轮的起点');
   assert.equal(await count(), 16 + 130, '一条不丢');
   feed.splice(0, 130); // 这批合成数据已入库，后续立即更新只验证正常的近端回看
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
@@ -613,6 +860,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   store['cursor:me'].out = {
     ...savedOutState,
     status: 'ok', message: null, limitReached: null, attemptCoverTs: null,
+    coverTs: null,
     fullFor: 0, initDays: 30, targetTs: Date.now() - 40 * DAY,
     resume: { cursor: '0', topId: null, rounds: 119, full: true, stopAt: null, nextAt: 0 },
   };
@@ -623,7 +871,7 @@ test('后台全流程', { timeout: 60_000 }, async () => {
     assert.equal(afterLimit.limitReached, true);
     assert.equal(afterLimit.lastFullAt, savedOutState.lastFullAt, '失败不改上次初始化完成时间');
     assert.equal(afterLimit.lastFullDays, savedOutState.lastFullDays, '失败不改上次初始化范围');
-    assert.equal(afterLimit.coverTs, savedOutState.coverTs, '失败不拿这次的部分进度冒充完整覆盖');
+    assert.equal(afterLimit.coverTs, null, '失败不拿这次的部分进度冒充完整覆盖');
     assert.ok(afterLimit.attemptCoverTs >= Date.now() - 11 * DAY, '记下这次实际读到的最早时间');
     assert.equal(afterLimit.syncedId, savedOutState.syncedId, '没读完时接续点不动');
     const callsAtLimit = server.outCalls;
@@ -672,12 +920,63 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   }
 
   // 清空：榜单、快照、游标都没了，设置保留
-  await send({ type: 'clearData', account: 'me' });
+  const realClearSend = chrome.tabs.sendMessage;
+  let releaseHeld;
+  let heldClear = false;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch' && !heldClear) {
+      heldClear = true;
+      await new Promise((resolve) => { releaseHeld = resolve; });
+    }
+    return realClearSend(id, msg);
+  };
+  try {
+    await send({ type: 'startBackfill', account: 'me' });
+    await until(() => heldClear, '读取中的请求开始');
+    assert.match((await send({ type: 'clearData', account: 'me' })).error, /正在读取/);
+  } finally {
+    releaseHeld?.();
+    chrome.tabs.sendMessage = realClearSend;
+  }
+  let cleared;
+  for (let i = 0; i < 40; i++) {
+    cleared = await send({ type: 'clearData', account: 'me' });
+    if (!cleared.error) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(cleared?.ok, true, '读取锁释放后再清空');
   assert.equal(await count(), 0);
   assert.deepEqual(await boardRows(), []);
   assert.equal(store['snap:me'], undefined);
   assert.equal(store['cursor:me'], undefined);
   assert.equal(store['settings:me'].fetchEnabled, false);
+
+  // 两份数据都真的为空时：可信地记下「空初始化完成」，之后自动增量还能启动，不会卡死
+  const emptySavedInbound = feed.splice(0, feed.length);
+  const emptySavedOutbound = outFeed.splice(0, outFeed.length);
+  try {
+    await send({ type: 'startBackfill', account: 'me' });
+    await until(() => job()?.status === 'done', '空的别人回我初始化完成');
+    assert.deepEqual([job().reachedEnd, job().oldestTs], [true, null]);
+    assert.equal(store['cursor:me'].syncedId, '0');
+    assert.equal(inboundInitCovered(store['cursor:me'].lastBackfill, store['cursor:me'].syncedId, 7), true);
+
+    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+    await send({ type: 'syncOutNow', account: 'me' });
+    await until(() => store['cursor:me'].out?.lastAt, '空的我回别人初始化完成');
+    const emptyOut = store['cursor:me'].out;
+    assert.deepEqual([emptyOut.reachedEnd, emptyOut.coverTs, emptyOut.syncedId], [true, null, '0']);
+    assert.equal(outboundReady(emptyOut, 7), true);
+    assert.equal(outboundInitCovered(emptyOut, 7), true);
+
+    emptyOut.nextAutoAt = 0;
+    await fire('out');
+    assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId], ['ok', '0'], '可信空列表的日常增量不会报假异常');
+    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
+  } finally {
+    feed.splice(0, feed.length, ...emptySavedInbound);
+    outFeed.splice(0, outFeed.length, ...emptySavedOutbound);
+  }
 
   // 过期清理：只留最近 90 天，一天最多清一次；清掉过数据就记下（弹窗据此不再挂红字提示）
   const { putEvents } = await import('../src/db.js');
@@ -731,6 +1030,10 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     if (msg.type !== 'xir:fetch') return originalSend(id, msg);
     requested.push([id, msg.userId, msg.kind]);
     if (msg.kind === 'scheduled') {
+      if (server.scheduledFail429Once) {
+        server.scheduledFail429Once = false;
+        return { ok: false, status: 429, userId: msg.userId, rateResetAt: null };
+      }
       if (mismatch) {
         sessions.set(id, { userId: '8', handle: 'Changed' });
       }

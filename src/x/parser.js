@@ -68,34 +68,55 @@ function fromGraphql(body, inspect) {
   const users = {};
   const entryIds = [];
   let bottomCursor = null;
-  let blank = 0;
+  let candidates = 0;
+  let unknown = 0;
   for (const ins of instructions) {
     for (const entry of ins?.entries || []) {
-      const c = entry?.content;
-      if (c?.cursorType === 'Bottom' && typeof c.value === 'string') bottomCursor = c.value;
-      const item = c?.itemContent;
-      if (!item || item.itemType !== 'TimelineTweet') continue;
-      let t = item.tweet_results?.result;
-      if (t?.__typename === 'TweetWithVisibilityResults') t = t.tweet;
-      const l = t?.legacy;
-      if (!l || typeof l.id_str !== 'string') {
-        inspect?.(t?.rest_id, 'missing_post_payload');
-        blank++;
-        continue;
-      }
-      const u = t.core?.user_results?.result;
-      tweets[l.id_str] = l;
-      entryIds.push(l.id_str);
-      if (u && l.user_id_str && !users[l.user_id_str]) {
-        users[l.user_id_str] = {
-          screen_name: u.core?.screen_name ?? u.legacy?.screen_name,
-          name: u.core?.name ?? u.legacy?.name ?? '',
-          profile_image_url_https: u.avatar?.image_url ?? u.legacy?.profile_image_url_https ?? '',
-        };
-      }
+      let knownContent = false;
+      walk(entry?.content, (node) => {
+        if (node.cursorType) {
+          if (node.cursorType === 'Bottom' && typeof node.value === 'string') bottomCursor = node.value;
+          knownContent = true;
+          return;
+        }
+        const item = node.itemContent;
+        if (!item) return;
+        knownContent = true;
+        if (item.itemType !== 'TimelineTweet' && !item.tweet_results?.result) {
+          unknown++;
+          return;
+        }
+        candidates++;
+        let t = item.tweet_results?.result;
+        if (t?.__typename === 'TweetWithVisibilityResults') t = t.tweet;
+        if (t?.__typename === 'TweetUnavailable' || t?.__typename === 'TweetTombstone') {
+          inspect?.(t?.rest_id, 'unavailable_post');
+          return;
+        }
+        const l = t?.legacy;
+        if (!l || typeof l.id_str !== 'string') {
+          throw new ParseError('通知里有帖子条目，但缺少帖子编号或正文结构');
+        }
+        const u = t.core?.user_results?.result;
+        const userId = l.user_id_str || u?.rest_id;
+        if (!userId) throw new ParseError('通知里的帖子缺少作者数字 ID，无法确认回复人');
+        tweets[l.id_str] = userId === l.user_id_str ? l : { ...l, user_id_str: userId };
+        entryIds.push(l.id_str);
+        if (u && !users[userId]) {
+          users[userId] = {
+            screen_name: u.core?.screen_name ?? u.legacy?.screen_name,
+            name: u.core?.name ?? u.legacy?.name ?? '',
+            profile_image_url_https: u.avatar?.image_url ?? u.legacy?.profile_image_url_https ?? '',
+          };
+        }
+      });
+      if (!knownContent) unknown++;
     }
   }
-  if (blank && !entryIds.length) throw new ParseError('通知里有帖子条目，但解析不出帖子内容');
+  if (unknown) throw new ParseError('通知里有无法识别或缺少内容的条目，不能把这一页当成完整结果');
+  if (!entryIds.length && candidates) {
+    throw new ParseError('通知里有条目，但解析不出任何帖子内容');
+  }
   return { tweets, users, entryIds, bottomCursor };
 }
 
@@ -112,8 +133,12 @@ function fromGraphql(body, inspect) {
 export function parseMentions(body, me, inspect) {
   const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body, inspect) : fromRest(body);
   const myHandle = (me.handle || '').toLowerCase();
-  const isMe = (userId, screenName) =>
-    (me.userId && userId === me.userId) || (!!myHandle && screenName && screenName.toLowerCase() === myHandle);
+  const mine = (userId, screenName) => {
+    if (me.userId && userId) return userId === me.userId;
+    if (myHandle && screenName) return screenName.toLowerCase() === myHandle;
+    return null;
+  };
+  const isMe = (userId, screenName) => mine(userId, screenName) === true;
 
   const events = [];
   let newestId = null;
@@ -139,9 +164,11 @@ export function parseMentions(body, me, inspect) {
       oldestTs = ts;
     }
 
-    const author = users[t.user_id_str];
-    if (!author || isMe(t.user_id_str, author.screen_name)) {
-      inspect?.(id, author ? 'own_reply' : 'missing_author');
+    if (!t.user_id_str) throw new ParseError('回复里缺少作者的数字用户 ID，无法确认是谁回复的');
+    // 作者资料缺失时仍保留数字用户 ID：名字和头像可以先空着，不能因此静默丢掉整条回复。
+    const author = users[t.user_id_str] || { screen_name: '', name: '', profile_image_url_https: '' };
+    if (isMe(t.user_id_str, author.screen_name)) {
+      inspect?.(id, 'own_reply');
       continue;
     }
 
@@ -158,14 +185,14 @@ export function parseMentions(body, me, inspect) {
     const root = tweets[conv];
     let rootMine = null; // null = 这一页里看不出来，留给统计层用已知的根帖归属补判
     if (conv === t.in_reply_to_status_id_str) rootMine = true; // 直接回的就是根帖，而被回的人是我
-    else if (root) rootMine = isMe(root.user_id_str, users[root.user_id_str]?.screen_name) || false;
+    else if (root) rootMine = mine(root.user_id_str, users[root.user_id_str]?.screen_name);
 
     inspect?.(id, rootMine === true ? 'accepted_own_root' : rootMine === false ? 'accepted_other_root' : 'accepted_unknown_root');
     events.push({
       id,
       actor_id: t.user_id_str,
-      actor_handle: author.screen_name,
-      actor_name: author.name,
+      actor_handle: author.screen_name || '',
+      actor_name: author.name || '',
       actor_avatar: author.profile_image_url_https || '',
       created_at: ts,
       target_post_id: t.in_reply_to_status_id_str,
@@ -175,9 +202,7 @@ export function parseMentions(body, me, inspect) {
     });
   }
 
-  if (entryIds.length && missing === new Set(entryIds).size) {
-    throw new ParseError('时间线条目引用的帖子在返回里一条都找不到');
-  }
+  if (missing) throw new ParseError('时间线条目引用的帖子在返回里缺失，不能把这一页当成完整结果');
 
   return { events, entryIds: [...new Set(entryIds)], newestId, newestTs, oldestId, oldestTs, bottomCursor };
 }
@@ -189,14 +214,21 @@ export function parseMentions(body, me, inspect) {
 
 const NESTED = new Set(['retweeted_status_result', 'quoted_status_result', 'quotedRefResult']); // 被转发、被引用的原帖不算这个条目里的帖子
 
-function collectTweets(node, out) {
+function collectTweets(node, out, info) {
   if (!node || typeof node !== 'object') return;
-  const l = node.legacy;
-  if (l && typeof l === 'object' && typeof l.id_str === 'string' && typeof l.user_id_str === 'string') {
-    const u = node.core?.user_results?.result;
-    out.push({ ...l, screen: u?.core?.screen_name ?? u?.legacy?.screen_name ?? null });
+  if (node.__typename === 'TweetUnavailable' || node.__typename === 'TweetTombstone') {
+    if (info) info.unavailable++;
+    return;
   }
-  for (const [k, v] of Object.entries(node)) if (!NESTED.has(k)) collectTweets(v, out);
+  const l = node.legacy;
+  const tweetNode = node.__typename === 'Tweet' || node.__typename === 'TweetWithVisibilityResults' || !!l?.user_id_str;
+  if (l && typeof l === 'object' && typeof l.id_str === 'string' && tweetNode) {
+    const u = node.core?.user_results?.result;
+    const userId = l.user_id_str || u?.rest_id;
+    if (!userId) throw new ParseError('我的回复条目缺少作者数字 ID，不能把这一页当成完整结果');
+    out.push({ ...l, user_id_str: userId, screen: u?.core?.screen_name ?? u?.legacy?.screen_name ?? null });
+  }
+  for (const [k, v] of Object.entries(node)) if (!NESTED.has(k)) collectTweets(v, out, info);
 }
 
 /**
@@ -218,7 +250,8 @@ export function parseMyReplies(body, me) {
 
   const myHandle = (me.handle || '').toLowerCase();
   const isMe = (userId, screenName) =>
-    (me.userId && userId === me.userId) || (!me.userId && !!myHandle && screenName && screenName.toLowerCase() === myHandle);
+    me.userId && userId ? userId === me.userId
+      : !!myHandle && !!screenName && screenName.toLowerCase() === myHandle;
 
   const byId = new Map(); // 本页出现过的所有帖子，用来查对话根帖是谁发的
   const mine = new Map(); // 我发的
@@ -226,14 +259,25 @@ export function parseMyReplies(body, me) {
   let bottomCursor = null;
   let parsedEntries = 0;
   let blankEntries = 0;
+  let contentEntries = 0;
+  let unavailableEntries = 0;
 
   for (const ins of instructions) {
     if (ins?.type === 'TimelinePinEntry') continue; // 置顶帖可能很旧，不参与判断时间范围
     for (const entry of ins?.entries || []) {
+      let cursorEntry = false;
+      walk(entry, (n) => { if (n?.cursorType) cursorEntry = true; });
+      if (/^cursor-/.test(entry?.entryId || '') || cursorEntry) continue;
+      contentEntries++;
       const found = [];
-      collectTweets(entry, found);
+      const info = { unavailable: 0 };
+      collectTweets(entry, found, info);
       if (!found.length) {
-        if (/^(tweet|profile-conversation)/.test(entry?.entryId || '')) blankEntries++;
+        if (info.unavailable) {
+          unavailableEntries++;
+          continue;
+        }
+        blankEntries++;
         continue;
       }
       parsedEntries++;
@@ -251,7 +295,10 @@ export function parseMyReplies(body, me) {
   walk(instructions, (n) => {
     if (n.cursorType === 'Bottom' && typeof n.value === 'string') bottomCursor = n.value;
   });
-  if (blankEntries && !parsedEntries) throw new ParseError('时间线里有帖子条目，但解析不出帖子内容');
+  if (blankEntries) throw new ParseError('时间线里有内容条目，但解析不出帖子内容');
+  if (contentEntries && !parsedEntries && unavailableEntries) {
+    throw new ParseError('时间线里只有不可用的帖子，无法判断读取范围');
+  }
 
   let newestId = null;
   let newestTs = null;
