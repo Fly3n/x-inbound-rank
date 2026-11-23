@@ -194,7 +194,51 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   }
   assert.equal(queries.at(-1).lastFocusedWindow, undefined, '查询不限定 lastFocusedWindow，覆盖多个窗口前台页');
   assert.deepEqual(reloadCalls.slice(multiBefore), [1, 4], '一次性刷新各窗口正在前台的旧页面');
-  assert.ok((await readDiagnostics()).some((r) => r.event === 'stale_tab_refresh' && r.reloaded === 2 && r.pending === 0));
+  assert.ok((await readDiagnostics()).some((r) => r.event === 'stale_tab_refresh' && r.queried === 2 && r.reloaded === 2 && r.pending === 0));
+
+  // 并发触发竞态：第一轮未结束时切换到新旧脚本页，第一轮结束后不丢事件自动补跑
+  const realRaceSend = chrome.tabs.sendMessage;
+  let releaseFirstPing;
+  const firstPingBlocked = new Promise((resolve) => { releaseFirstPing = resolve; });
+  let pingHeld = false;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:ping' && id === 1 && !pingHeld) {
+      pingHeld = true;
+      await firstPingBlocked;
+    }
+    return realRaceSend(id, msg);
+  };
+  const raceBefore = reloadCalls.length;
+  try {
+    env.setActiveTab(1);
+    const firstRun = listeners.startup();
+    await until(() => pingHeld, '第一轮补刷开始探活');
+    env.setActiveTab(4);
+    staleTabs.add(4);
+    const secondRun = listeners.activated({ tabId: 4, windowId: 2 });
+    releaseFirstPing();
+    await Promise.all([firstRun, secondRun]);
+    assert.deepEqual(reloadCalls.slice(raceBefore), [4], '进行中新增的触发不丢弃，结束后自动补跑并刷新旧页');
+  } finally {
+    chrome.tabs.sendMessage = realRaceSend;
+    env.setActiveTab(1);
+  }
+
+  // 打开弹窗检测到当前账号离线/旧版时立即兜底补刷（常规 X 页刷新，通知页保持不动）
+  staleTabs.add(1);
+  const popupBefore = reloadCalls.length;
+  await send({ type: 'getState' });
+  await until(() => reloadCalls.length > popupBefore, '打开弹窗触发未连接常规页补刷');
+  assert.deepEqual(reloadCalls.slice(popupBefore), [1]);
+
+  tabUrls.set(1, 'https://x.com/notifications');
+  staleTabs.add(1);
+  const popupNoticeBefore = reloadCalls.length;
+  await send({ type: 'getState' });
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(reloadCalls.length, popupNoticeBefore, '打开弹窗兜底补刷也绝不碰通知页');
+  tabUrls.delete(1);
+  staleTabs.delete(1);
 
   const daytime = env.getNow();
   try {

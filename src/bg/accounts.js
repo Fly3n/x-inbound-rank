@@ -103,13 +103,23 @@ export async function reloadStaleXirTabs() {
       pending++; // 标签页可能刚关闭或暂时拒绝刷新；留下一次补查。
     }
   }
-  if (reloaded || pending) await record('stale_tab_refresh', { reloaded, pending });
+  const queried = tabs.length;
+  if (reloaded || pending) {
+    await record('stale_tab_refresh', { queried, reloaded, pending });
+    queueBridgePush();
+  }
   return { reloaded, pending };
 }
 
 let tabRefresh = null;
+let tabRefreshQueued = false;
+let tabRefreshRetry = false;
 export function refreshStaleTabs({ retry = false } = {}) {
-  if (tabRefresh) return tabRefresh;
+  if (tabRefresh) {
+    tabRefreshQueued = true;
+    tabRefreshRetry = tabRefreshRetry || retry;
+    return tabRefresh;
+  }
   tabRefresh = reloadStaleXirTabs()
     .then(async (result) => {
       if (!result.pending) {
@@ -125,7 +135,15 @@ export function refreshStaleTabs({ retry = false } = {}) {
       return result;
     })
     .catch(() => ({ reloaded: 0, pending: 0 }))
-    .finally(() => { tabRefresh = null; });
+    .finally(async () => {
+      tabRefresh = null;
+      if (tabRefreshQueued) {
+        const queuedRetry = tabRefreshRetry;
+        tabRefreshQueued = false;
+        tabRefreshRetry = false;
+        await refreshStaleTabs({ retry: queuedRetry });
+      }
+    });
   return tabRefresh;
 }
 

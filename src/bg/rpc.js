@@ -10,7 +10,7 @@ import {
   serial, updateCursor, board, refreshSnapshot, clearSnapDirty,
 } from './runtime.js';
 import { clearAccountAlarms, recoverAlarms } from './alarms.js';
-import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled } from './accounts.js';
+import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled, refreshActiveStaleTab } from './accounts.js';
 import { mentionsApi } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
 import { maybeIncremental } from './incremental.js';
@@ -159,6 +159,7 @@ export const handlers = {
     const activeKey = accountForUser(accounts, page?.userId);
     const active = page?.userId ? { userId: page.userId, handle: page.handle, account: activeKey } : null;
     const online = [...new Set(pages.map((p) => accountForUser(accounts, p.userId)).filter(Boolean))];
+    if (!active || !online.length) refreshActiveStaleTab().catch(() => {});
     return { accounts, active, online };
   },
   async getAccountState({ account }) {
