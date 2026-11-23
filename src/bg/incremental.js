@@ -147,6 +147,7 @@ export async function maybeIncremental(account, manual = false) {
         await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
         return { message: '别人回我遇到限流，已退避。' };
       }
+      if (res.kind === 'circuit_broken') return { error: res.message };
       if (res.kind === 'error') {
         await setAlert(account, res.message);
         return { error: res.message };

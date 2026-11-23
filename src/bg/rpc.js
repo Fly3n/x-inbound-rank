@@ -11,7 +11,7 @@ import {
 } from './runtime.js';
 import { clearAccountAlarms, recoverAlarms } from './alarms.js';
 import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled, refreshActiveStaleTab } from './accounts.js';
-import { mentionsApi } from './transport.js';
+import { mentionsApi, clearAccountCircuit } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
 import { maybeIncremental } from './incremental.js';
 import { handleOutboundTap, syncOut, syncOutNow } from './outbound.js';
@@ -126,6 +126,7 @@ export const handlers = {
     const beforeManual = await kvGet(keys.cursor(account), {});
     const wait = PACE.manualCooldownMs - (now() - (beforeManual.lastManualAt || 0));
     if (wait > 0) return { error: `刚刚更新过，请 ${Math.ceil(wait / 60_000)} 分钟后再试。` };
+    await clearAccountCircuit(account);
     const result = await maybeIncremental(account, true);
     if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
     if (!result?.ok && !result?.deferred) return result;
@@ -147,6 +148,7 @@ export const handlers = {
     if (blockedUntil > now()) {
       return { error: `接口正在退避，请在 ${new Date(blockedUntil).toLocaleTimeString()} 后再试。` };
     }
+    await clearAccountCircuit(account);
     await syncOut(account, true);
     const after = (await kvGet(keys.cursor(account), {})).out;
     if (after?.status === 'need_tpl') return { message: after.message };
@@ -186,10 +188,19 @@ export const handlers = {
   },
   exportAll: async ({ account }) => ({ inbound: await getEvents(account), out: await getEvents(account, OUT) }),
   getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account), now(), 50, await getEvents(account, OUT)),
-  startBackfill: ({ account }) => startBackfill(account),
-  syncOutNow,
+  startBackfill: async ({ account }) => {
+    await clearAccountCircuit(account);
+    return startBackfill(account);
+  },
+  syncOutNow: async ({ account }) => {
+    await clearAccountCircuit(account);
+    return syncOutNow({ account });
+  },
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
-  resumeJob: ({ account }) => resumeJob(account),
+  resumeJob: async ({ account }) => {
+    await clearAccountCircuit(account);
+    return resumeJob(account);
+  },
   async setSettings({ account, patch }) {
     if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '榜单范围只能是 7 天、15 天、30 天、2 个月或 3 个月' };
     if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '补历史范围只能是 7 天或 15 天' };
@@ -204,6 +215,7 @@ export const handlers = {
       const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);
       if (!outPending) await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
     } else {
+      if (patch.fetchEnabled === true) await clearAccountCircuit(account);
       if ('outAutoSync' in patch && !next.outAutoSync) {
         const out = (await kvGet(keys.cursor(account), {})).out;
         const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);

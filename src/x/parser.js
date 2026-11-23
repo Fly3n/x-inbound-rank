@@ -436,3 +436,33 @@ export function parseScheduledTweets(body) {
   items.sort((a, b) => a.executeAt - b.executeAt);
   return items;
 }
+
+const ACCOUNT_ANOMALY_CODES = new Set([32, 64, 89, 226, 326]);
+const ACCOUNT_ANOMALY_RE = /\b(account is locked|temporarily locked|temporarily restricted|suspended|automated|challenge|verify your account|bounce)\b/i;
+
+/** 识别 X 账号侧异常信号（登录失效、封禁、锁定/要求验证、判定自动化）；普通 429 限流与 5xx 临时故障不属于此类。 */
+export function detectAccountAnomaly(status, body) {
+  if (status === 401 || status === 403) {
+    const err = Array.isArray(body?.errors) ? body.errors[0] : null;
+    const code = err?.code;
+    const msg = err?.message ? String(err.message).slice(0, 120) : '';
+    return {
+      code: code ?? status,
+      reason: `HTTP ${status}${code ? ` / code ${code}` : ''}${msg ? `：${msg}` : ''}`,
+    };
+  }
+  const errors = Array.isArray(body?.errors) ? body.errors : [];
+  for (const err of errors) {
+    if (!err || typeof err !== 'object') continue;
+    const code = Number(err.code);
+    const kind = String(err.kind || '');
+    const msg = String(err.message || '');
+    if (ACCOUNT_ANOMALY_CODES.has(code) || kind === 'Bounce' || err.bounce || ACCOUNT_ANOMALY_RE.test(msg)) {
+      return {
+        code: Number.isFinite(code) && code > 0 ? code : (kind || 'anomaly'),
+        reason: `${Number.isFinite(code) && code > 0 ? `code ${code}` : (kind || '账号异常')}${msg ? `：${msg.slice(0, 120)}` : ''}`,
+      };
+    }
+  }
+  return null;
+}

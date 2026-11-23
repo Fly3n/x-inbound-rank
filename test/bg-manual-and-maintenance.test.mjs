@@ -186,3 +186,59 @@ test('清空数据并发保护与 90 天过期数据滚动清理', async () => {
   await listeners.alarm({ name: 'tick' });
   assert.equal(await count(), 4, '24 小时内不重复清');
 });
+
+test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自动抓取、不自动恢复，仅用户手动重开后解除', async () => {
+  await setSettings({ fetchEnabled: true, outAutoSync: true });
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/FetchScheduledTweets?variables=%7B%7D' });
+  assert.ok(alarms['inc:me'], '熔断前已安排入站自动闹钟');
+  assert.ok(alarms['out:me'], '熔断前已安排出站自动闹钟');
+
+  const realSend = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') {
+      return {
+        ok: true,
+        status: 200,
+        userId: '1',
+        body: { errors: [{ code: 326, message: 'To protect our users from spam, this account is temporarily locked.' }] },
+      };
+    }
+    return realSend(id, msg);
+  };
+  try {
+    store['cursor:me'].nextIncAt = 0;
+    store['cursor:me'].lastAttemptAt = 0;
+    await fire('inc');
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+  }
+
+  // 立即硬熔断：自动更新与低频同步均强制关闭、全部闹钟清空、写红字告警与熔断标记
+  assert.equal(store['settings:me'].fetchEnabled, false, '熔断后强制关闭自动更新');
+  assert.equal(store['settings:me'].outAutoSync, false, '熔断后强制关闭低频同步');
+  assert.equal(alarms['inc:me'], undefined, '熔断后清空入站闹钟');
+  assert.equal(alarms['out:me'], undefined, '熔断后清空出站闹钟');
+  assert.equal(alarms['job:me'], undefined, '熔断后清空补历史闹钟');
+  assert.equal(store['cursor:me'].circuitBroken.code, 326);
+  assert.match(store['alert:me'].message, /熔断/);
+
+  // 绝不自动恢复：推进到下一时段、触发 tick/inc/out/hello/active/排期同步均零请求
+  const beforeNoAuto = [server.calls, server.outCalls];
+  env.advanceNow(12 * 60 * 60_000);
+  await listeners.alarm({ name: 'tick' });
+  await fire('inc');
+  await fire('out');
+  await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+  await pageSend({ type: 'xir:active' });
+  const schedRes = await pageSend({ type: 'xir:scheduled:sync', force: false });
+  assert.equal(schedRes.status, 'error');
+  assert.match(schedRes.message, /熔断/);
+  assert.deepEqual([server.calls, server.outCalls], beforeNoAuto, '熔断期间任何自动路径均不得发请求');
+  assert.equal(alarms['inc:me'], undefined, '熔断期间页面上线与 tick 不重新排期');
+
+  // 仅用户手动重新开启自动更新后才解除熔断并恢复排期
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+  assert.equal(store['cursor:me'].circuitBroken, undefined, '用户手动重开后解除熔断标记');
+  assert.equal(store['alert:me'], undefined, '解除熔断后清除告警');
+  assert.ok(alarms['inc:me'], '用户手动重开后恢复自动排期');
+});

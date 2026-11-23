@@ -104,6 +104,7 @@ export async function stepBackfill(account) {
     // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
     const latest = await kvGet(keys.job(account));
     if (!await enabledAccount(account) || !latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
+    if (res.kind === 'circuit_broken') return;
 
     if (res.kind === 'tpl_bad') {
       // 新接口的模板失效：换旧接口从最新一页重来，已入库的靠主键去重

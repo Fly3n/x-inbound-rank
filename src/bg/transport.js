@@ -1,13 +1,59 @@
-// 经由 x.com 标签页发请求、统一限流退避与提及拉取入库。
-import { putEvents, kvGet, kvRemove, keys } from '../db.js';
+// 经由 x.com 标签页发请求、统一限流退避、账号异常硬熔断与提及拉取入库。
+import { putEvents, kvGet, kvSet, kvRemove, keys, getSettings } from '../db.js';
 import { record } from '../diagnostics.js';
-import { parseMentions, ParseError, idGt } from '../x/parser.js';
+import { queueBridgePush } from '../bridge.js';
+import { parseMentions, detectAccountAnomaly, ParseError, idGt } from '../x/parser.js';
 import { mentionsEvidence } from '../x/mentions-diagnostics.js';
 import {
   PACE, X_TABS, now, inActiveHours, temporaryUnavailable,
-  updateCursor, markSnapDirty, flushSnapshot,
+  updateCursor, setAlert, markSnapDirty, flushSnapshot,
 } from './runtime.js';
+import { clearAccountAlarms } from './alarms.js';
 import { pingTab } from './accounts.js';
+
+/** 命中 X 账号侧异常信号时立即硬熔断：关闭全部自动抓取、清空闹钟与续读、挂红字告警，绝不自动恢复。 */
+export async function tripAccountCircuit(account, anomaly, source) {
+  const settings = await getSettings(account);
+  if (settings.fetchEnabled || settings.outAutoSync) {
+    await kvSet(keys.settings(account), { ...settings, fetchEnabled: false, outAutoSync: false });
+  }
+  await clearAccountAlarms(account);
+  await updateCursor(account, (cur) => {
+    cur.circuitBroken = { at: now(), code: anomaly.code, reason: anomaly.reason, source };
+    delete cur.incResume;
+    if (cur.out) {
+      cur.out = {
+        ...cur.out,
+        status: 'error',
+        resume: null,
+        retryAt: null,
+        running: null,
+        manualTask: false,
+        message: '检测到 X 账号异常，已熔断停止读取。',
+      };
+    }
+  });
+  const job = await kvGet(keys.job(account));
+  if (job && job.status !== 'done') {
+    await kvSet(keys.job(account), { ...job, status: 'error', nextAt: null, message: '检测到 X 账号异常，已熔断停止读取。' });
+  }
+  await setAlert(account, `检测到 X 账号异常/验证限制（${anomaly.reason}），已立即熔断并关闭全部自动抓取；请先在 X 确认账号正常后，再手动重新开启自动更新。`);
+  await record('circuit_breaker', { account, source, code: anomaly.code, reason: anomaly.reason });
+  queueBridgePush();
+}
+
+/** 仅在用户手动重新开启自动更新或显式触发手动读取时解除熔断。 */
+export async function clearAccountCircuit(account) {
+  const had = await updateCursor(account, (cur) => {
+    if (!cur.circuitBroken) return false;
+    delete cur.circuitBroken;
+    return true;
+  });
+  if (had) {
+    await kvRemove(keys.alert(account));
+    queueBridgePush();
+  }
+}
 
 /** 任一读取入口收到 429 后，统一抬高账号级退避并累计连续次数。 */
 export async function recordRateLimit(account, resetAt = 0) {
@@ -48,6 +94,9 @@ export async function fetchViaTab(account, req, trace) {
   // 429 是账号级信号：所有主动读取入口都从这里过，不能只挡当前那一路。
   // out.retryAt 只用于出站自己的等待（包括 503），不拿来封住入站和回填。
   const cur = await kvGet(keys.cursor(account), {});
+  if (cur.circuitBroken) {
+    return report({ ok: false, status: 0, error: 'circuit_broken', reason: cur.circuitBroken.reason });
+  }
   const blockedUntil = Math.max(cur.rateUntil || 0, req.kind === 'out' ? cur.out?.retryAt || 0 : 0);
   if (blockedUntil > now()) {
     return report({ ok: false, status: 0, error: 'backoff', rateResetAt: blockedUntil });
@@ -66,6 +115,11 @@ export async function fetchViaTab(account, req, trace) {
       if (r?.status === 429) {
         const rate = await recordRateLimit(account, r.rateResetAt);
         return { ...result, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
+      }
+      const anomaly = detectAccountAnomaly(r?.status, r?.body);
+      if (anomaly) {
+        await tripAccountCircuit(account, anomaly, source);
+        return { ...result, ok: false, error: 'circuit_broken', anomaly };
       }
       if (r?.ok) await clearRateLimit(account);
       return result;
@@ -93,6 +147,7 @@ export async function pull(account, cursor, api = 'rest', batch = { read: 0, add
   const r = await fetchViaTab(account, { cursor, tpl: tpl?.url }, trace);
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (r.error === 'outside_window') return { kind: 'outside_window' };
+  if (r.error === 'circuit_broken') return { kind: 'circuit_broken', message: '检测到 X 账号异常，已熔断并关闭全部自动抓取；请先在 X 确认账号正常后再手动开启。' };
   if (r.error === 'backoff') return { kind: 'backoff', retryAt: r.rateResetAt || 0 };
   if (tpl && (r.error === 'bad_tpl' || r.status === 400 || r.status === 404)) {
     if (!inspectOnly) await kvRemove(keys.tplMentions(account)); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口

@@ -23,6 +23,7 @@ export async function recoverAlarms(account) {
   const settings = await getSettings(account);
   const autoEnabled = settings.fetchEnabled;
   const cur = await kvGet(keys.cursor(account), {});
+  if (cur.circuitBroken) return;
   const job = await kvGet(keys.job(account));
   const out = cur.out;
   const ensure = async (kind, when) => {

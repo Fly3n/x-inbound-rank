@@ -45,6 +45,7 @@ export async function handleScheduledSync(msg, sender) {
   });
   if (isBusy()) return cachedReply('正在读取其他数据，已显示上次排期缓存');
   const cursor = await kvGet(keys.cursor(account), {});
+  if (cursor.circuitBroken) return cachedReply('账号异常已熔断，已显示上次排期缓存');
   const pausedUntil = Math.max(cursor.rateUntil || 0, cursor.out?.retryAt || 0);
   if (pausedUntil > now()) return cachedReply('接口正在退避，已显示上次排期缓存');
   const tpl = await kvGet(keys.tplScheduled(account));
@@ -66,6 +67,7 @@ export async function handleScheduledSync(msg, sender) {
   } finally {
     releaseBusy();
   }
+  if (r.error === 'circuit_broken') return cachedReply('账号异常已熔断，已显示上次排期缓存');
   if (r.error === 'no_tab') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '未连接到 X 页面，已显示上次缓存' };
   if (r.error === 'outside_window') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '读取只在每天 08:00–24:00 进行，已显示上次缓存' };
   if (r.error === 'backoff') {

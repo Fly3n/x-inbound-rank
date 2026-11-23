@@ -151,6 +151,7 @@ export async function syncOut(account, manual = false) {
       const trace = { account, mode: full ? 'outbound_backfill' : manual ? 'outbound_manual' : 'outbound_auto', run, page: pages + 1 };
       const r = await fetchViaTab(account, { kind: 'out', tpl: tpl.url, cursor }, trace);
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
+      if (r.error === 'circuit_broken') return;
       if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, message: '打开此账号的 X 页面后自动继续。' });
       if (r.error === 'outside_window') {
         const when = nextActiveAt();

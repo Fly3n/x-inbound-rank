@@ -10,7 +10,7 @@ import {
   ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
   cleanRules, colorOf, DEFAULT_RULES, DAY_MS, inboundInitCovered, outboundInitCovered,
 } from '../src/rank.js';
-import { parseCreatedReply, parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
+import { parseCreatedReply, parseMentions, parseMyReplies, parseScheduledTweets, detectAccountAnomaly, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
 
@@ -477,6 +477,18 @@ test('解析已排期列表：兼容秒和毫秒时间戳，按时间升序，�
   assert.throws(() => parseScheduledTweets({ errors: [{ message: 'denied' }] }), /denied/);
   assert.throws(() => parseScheduledTweets({ data: {} }), ParseError);
   assert.throws(() => parseScheduledTweets({ data: { viewer: { scheduled_tweet_list: [{ rest_id: 'bad' }] } } }), ParseError);
+});
+
+test('detectAccountAnomaly：精准识别 401/403 与账号锁定/自动化错误码，不误伤 429/503/404', () => {
+  assert.equal(detectAccountAnomaly(401, {})?.code, 401);
+  assert.equal(detectAccountAnomaly(403, { errors: [{ code: 326, message: 'Account is locked' }] })?.code, 326);
+  assert.equal(detectAccountAnomaly(200, { errors: [{ code: 226, message: 'This request looks like it might be automated.' }] })?.code, 226);
+  assert.equal(detectAccountAnomaly(200, { errors: [{ code: 64, message: 'Your account is suspended' }] })?.code, 64);
+  assert.ok(detectAccountAnomaly(200, { errors: [{ kind: 'Bounce', message: 'Challenge required' }] }));
+  assert.equal(detectAccountAnomaly(429, { errors: [{ code: 88, message: 'Rate limit exceeded' }] }), null);
+  assert.equal(detectAccountAnomaly(503, {}), null);
+  assert.equal(detectAccountAnomaly(404, {}), null);
+  assert.equal(detectAccountAnomaly(200, { data: {} }), null);
 });
 
 test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过，刚发帖后自动顺延', () => {
