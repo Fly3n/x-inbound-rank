@@ -347,6 +347,14 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
     text: createPayload({ id: '9903', replyTo: '100', toUid: '1', toHandle: 'Me', conv: '100', text: '自回复' }),
   });
   assert.equal((await boardRows())[0].replied, 1, '重复 ID、二级回复和自己帖子下回复都不误算');
+  assert.equal(store['lastPostAt:me'], undefined, '回复别人不应刷新发帖排期的主帖缓冲时间');
+
+  // 发一条原创主帖（无 in_reply_to_status_id_str）：不入出站回复表，但刷新主帖缓冲时间
+  await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9904', replyTo: null, toUid: null, toHandle: null, conv: '9904', text: '今天发条主帖' }),
+  });
+  assert.ok(store['lastPostAt:me'] > 0, '原创主帖应刷新发帖排期的主帖缓冲时间');
 
   // 3. 异常载荷记入后台诊断日志，不污染数据
   await pageSend({ type: 'xir:outbound:tap', text: JSON.stringify({ data: { unexpected: true } }) });

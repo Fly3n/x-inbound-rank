@@ -159,6 +159,50 @@
   cursor: default;
 }
 
+.xir-sched-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.xir-sched-step {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--xir-s-bd);
+  border-radius: 999px;
+  background: var(--xir-s-slot-bg);
+  color: var(--xir-s-fg);
+  font: 600 12px/1 inherit;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.xir-sched-step.is-primary:not(:disabled) {
+  border-color: #1d9bf0;
+  background: #1d9bf0;
+  color: #fff;
+}
+.xir-sched-step:hover:not(:disabled) {
+  border-color: #1d9bf0;
+  background: var(--xir-s-slot-hover);
+  color: #1d9bf0;
+}
+.xir-sched-step.is-primary:hover:not(:disabled) {
+  background: #1a8cd8;
+  border-color: #1a8cd8;
+  color: #fff;
+}
+.xir-sched-step:disabled {
+  border-color: transparent;
+  background: var(--xir-s-busy-bg);
+  color: var(--xir-s-busy-fg);
+  cursor: not-allowed;
+}
+
 .xir-sched-row {
   display: flex;
   flex-wrap: wrap;

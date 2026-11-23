@@ -177,10 +177,27 @@
   }
 
   function slotTooltip(slot) {
-    if (!slot.occupied) return `点击填入 ${slot.label} 附近随机时间（前后浮动 5–20 分钟）`;
+    if (!slot.occupied) return `点击填入 ${slot.label} 附近安全时间（与相邻排期尽量间隔 30–40 分钟）`;
+    if (slot.tooClose) {
+      return slot.items
+        .map((it) => `与 ${XIRSchedule.formatTime(it.executeAt)} 排期间隔不足 25 分钟${it.text ? `：${it.text}` : ''}`)
+        .join('\n');
+    }
     return slot.items
       .map((it) => `已排 ${XIRSchedule.formatTime(it.executeAt)}${it.text ? `：${it.text}` : ''}`)
       .join('\n');
+  }
+
+  async function pickSlot(slot, form, closeDrop) {
+    if (!slot || slot.occupied || XIRRel.session()?.account !== account || !enabled) return;
+    const filledTs = XIRSchedule.pickJitteredTime(slot.ts, {
+      nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt,
+    });
+    const ok = await fillNativeForm(form, filledTs);
+    if (XIRRel.session()?.account !== account || !enabled) return;
+    lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };
+    if (closeDrop) dropOpen = false;
+    renderPanel((activeDialog && findScheduleForm(activeDialog)) || form);
   }
 
   function makeSlotButton(slot, form, inDropdown) {
@@ -193,18 +210,10 @@
     if (slot.occupied) {
       btn.disabled = true;
     } else {
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (XIRRel.session()?.account !== account || !enabled) return;
-        const filledTs = XIRSchedule.pickJitteredTime(slot.ts, {
-          nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt,
-        });
-        const ok = await fillNativeForm(form, filledTs);
-        if (XIRRel.session()?.account !== account || !enabled) return;
-        lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };
-        if (inDropdown) dropOpen = false;
-        renderPanel((activeDialog && findScheduleForm(activeDialog)) || form);
+        pickSlot(slot, form, inDropdown);
       });
     }
     return btn;
@@ -267,6 +276,38 @@
     });
     head.append(title, stat, refresh);
     panel.appendChild(head);
+
+    // 快捷上下空档切换：无上一档/下一档时自动置灰
+    const freeSlots = XIRSchedule.availableSlots(plan);
+    const pickedIdx = lastPicked ? freeSlots.findIndex((s) => s.ts === lastPicked.slotTs) : -1;
+    const prevSlot = pickedIdx > 0 ? freeSlots[pickedIdx - 1] : null;
+    const nextSlot = pickedIdx < 0 ? freeSlots[0] || null : freeSlots[pickedIdx + 1] || null;
+    const nav = document.createElement('div');
+    nav.className = 'xir-sched-nav';
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'xir-sched-step';
+    prevBtn.textContent = '← 上一档';
+    prevBtn.disabled = !prevSlot;
+    prevBtn.title = prevSlot ? `切到上一个可用空档（${prevSlot.label}）` : '没有更早的可用空档';
+    prevBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      pickSlot(prevSlot, form, false);
+    });
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'xir-sched-step is-primary';
+    nextBtn.textContent = '下一空档 →';
+    nextBtn.disabled = !nextSlot;
+    nextBtn.title = nextSlot ? `自动选择下一个安全空档（${nextSlot.label} 附近）` : '今明两天已无可用空档';
+    nextBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      pickSlot(nextSlot, form, false);
+    });
+    nav.append(prevBtn, nextBtn);
+    panel.appendChild(nav);
 
     // 直接排列行：当天最近几个半小时档 + 「更多档期 ▾」下拉按钮
     const row = document.createElement('div');

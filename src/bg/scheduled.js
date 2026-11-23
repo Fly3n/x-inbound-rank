@@ -27,9 +27,6 @@ export async function handlePostEvent(msg, sender) {
   const account = await senderAccount(msg, sender);
   if (!account) return {};
   const ts = Number.isFinite(at) ? at : now();
-  if (op === 'CreateTweet') {
-    await kvSet(keys.lastPostAt(account), ts);
-  }
   if (op === 'CreateScheduledTweet' || op === 'DeleteScheduledTweet') {
     const cached = await kvGet(keys.scheduled(account));
     if (cached) await kvSet(keys.scheduled(account), { ...cached, syncedAt: 0 }); // 下次打开排期弹窗立刻拉最新

@@ -492,9 +492,12 @@ test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过
   const tight = buildDaySlots({ nowTs: at(12, 25), dayOffset: 0 });
   assert.equal(tight.slots[0].label, '13:00');
 
-  // 12:19 刚发过帖，12:20 打开：12:19 + 15m = 12:34 > 12:30，跳过 12:30 从 13:00 开始
+  // 12:19 刚发过主帖，12:20 打开：12:19 + 30m = 12:49 > 12:30，跳过 12:30 从 13:00 开始
   const justPosted = buildDaySlots({ nowTs: at(12, 20), dayOffset: 0, lastPostAt: at(12, 19) });
   assert.equal(justPosted.slots[0].label, '13:00');
+  // 12:05 刚发过主帖，12:20 打开：12:05 + 30m = 12:35 > 12:30，同样跳过 12:30 从 13:00 开始
+  const postedEarlier = buildDaySlots({ nowTs: at(12, 20), dayOffset: 0, lastPostAt: at(12, 5) });
+  assert.equal(postedEarlier.slots[0].label, '13:00');
 
   // 明天完整覆盖 07:00–24:00（共 35 档）
   const plan = buildSchedulePlan({ nowTs: at(12, 0), days: 7 });
@@ -504,8 +507,8 @@ test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过
   assert.equal(plan.groups[1].slots[34].label, '24:00');
 });
 
-test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮动避开过去和冲突', () => {
-  const { buildDaySlots, pickJitteredTime } = globalThis.XIRSchedule;
+test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–40 分钟、夹缝档自动置灰与上下空档', () => {
+  const { buildDaySlots, buildSchedulePlan, availableSlots, pickJitteredTime } = globalThis.XIRSchedule;
   const at = (h, m) => new Date(2026, 10, 20, h, m, 0, 0).getTime();
   const scheduled = [
     { id: '1', executeAt: at(15, 22), text: '下午茶' }, // 落在 15:30 档 [15:15, 15:45)
@@ -520,12 +523,42 @@ test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮
   assert.deepEqual(byLabel['16:00'].items.map((x) => x.id), ['2']);
   assert.equal(byLabel['16:30'].occupied, false);
 
-  // 点击 15:00：在前后 5–20 分钟内挑；15:22 已排，冲突候选会被过滤
+  // 点击 15:00：15:22 已排，所有随机结果必须与 15:22 相距 >= 25 分钟，且优先落在 30–40 分钟区间（14:45–14:52）
   for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
     const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r });
+    const gapMin = Math.round(Math.abs(picked - at(15, 22)) / 60_000);
+    assert.ok(gapMin >= 30 && gapMin <= 40, `应优先贴合 30-40 分钟安全间距，实际 ${gapMin} 分钟`);
+  }
+
+  // 前一条在 21:05（占 21:00），点 21:30 档：杜绝落到 21:20，应落在 21:35–21:45（距 21:05 正好 30–40 分钟）
+  const tightPrev = [{ id: 'p', executeAt: at(21, 5), text: '上一条' }];
+  for (const r of [0, 0.3, 0.7, 0.99]) {
+    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: tightPrev, random: () => r });
+    const gapMin = Math.round((picked - at(21, 5)) / 60_000);
+    assert.ok(gapMin >= 30 && gapMin <= 40, `应距 21:05 间隔 30-40 分钟，实际 ${gapMin} 分钟`);
+  }
+
+  // 夹缝档检测：20:50 与 21:35 之间仅隔 45 分钟，21:00 与 21:30 周围都没有 >=25m 的安全分钟，均自动置灰
+  const squeezed = [
+    { id: 'a', executeAt: at(20, 50), text: '前' },
+    { id: 'b', executeAt: at(21, 35), text: '后' },
+  ];
+  const squeezedDay = buildDaySlots({ nowTs: at(20, 0), dayOffset: 0, scheduled: squeezed });
+  const sqMap = Object.fromEntries(squeezedDay.slots.map((s) => [s.label, s]));
+  assert.equal(sqMap['21:00'].occupied, true);
+  assert.equal(sqMap['21:30'].occupied, true);
+  assert.equal(sqMap['22:00'].occupied, false);
+
+  // availableSlots 按时间顺序列出全部未占用空档，供「← 上一档」「下一空档 →」使用
+  const free = availableSlots(buildSchedulePlan({ nowTs: at(20, 0), days: 2, scheduled: squeezed }));
+  assert.equal(free[0].label, '20:30');
+  assert.ok(!free.some((s) => s.ts === at(21, 0) || s.ts === at(21, 30)));
+
+  // 无紧邻排期时：围绕点击档位做 ±5–12 分钟自然随机浮动（避开整点/半点）
+  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
+    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r });
     const diffMin = Math.round((picked - at(15, 0)) / 60_000);
-    assert.ok(Math.abs(diffMin) >= 5 && Math.abs(diffMin) <= 20, `应浮动 5-20 分钟，实际 ${diffMin}`);
-    assert.ok(Math.abs(picked - at(15, 22)) >= 15 * 60_000, '不应与 15:22 撞档');
+    assert.ok(Math.abs(diffMin) >= 5 && Math.abs(diffMin) <= 12, `无紧邻排期应浮动 5-12 分钟，实际 ${diffMin}`);
   }
 
   // 首尾档位浮动不能越出当天 07:00–24:00
@@ -537,13 +570,12 @@ test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮
   assert.ok(firstPicked >= firstSlot.ts, '07:00 档不能向前浮动到早上 7 点前');
   assert.ok(lastPicked <= lastSlot.ts, '24:00 档不能向后浮动到次日');
 
-  // 实际填入也要避开「现在 10 分钟」和「刚发帖 15 分钟」两个门槛
-  const boundarySlot = buildDaySlots({ nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45) }).slots.find((slot) => slot.ts === at(13, 0));
+  // 实际填入也要避开「现在 10 分钟」和「刚发主帖 30 分钟」两个门槛
+  const boundarySlot = buildDaySlots({ nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45) }).slots.find((slot) => slot.ts === at(13, 30));
   const boundaryPicked = pickJitteredTime(boundarySlot.ts, {
     nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45), random: () => 0,
   });
-  assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于当前时间 10 分钟');
-  assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于最近发帖 15 分钟');
+  assert.ok(boundaryPicked >= at(13, 15), '浮动后不能早于最近主帖 30 分钟');
 });
 
 test('抓取层：模板识别且自有请求集合有容量上限', async () => {

@@ -1,16 +1,20 @@
-// 发帖排期纯逻辑：固定半小时档位（每天 07:00–24:00）、±15 分钟冲突判定、首个可用档顺延、点击后大范围随机浮动。
+// 发帖排期纯逻辑：固定半小时档位（每天 07:00–24:00）、硬性 25 分钟安全防撞、优先贴合相邻排期 30–40 分钟、刚发主帖 30 分钟顺延。
 // 经典脚本，供内容脚本（schedule-ui.js）和单元测试共用，不依赖 DOM 或 chrome API。
 const XIRSchedule = (() => {
   const MIN_MS = 60_000;
   const STEP_MIN = 30; // 半小时一档
   const START_MIN = 7 * 60; // 07:00
   const END_MIN = 24 * 60; // 24:00（次日 00:00）
-  const CONFLICT_MS = 15 * MIN_MS; // 档位前后 15 分钟内已有排期即视为已占
+  const CONFLICT_MS = 15 * MIN_MS; // 档位前后 15 分钟内已有排期即归属该档并视为已占
+  const MIN_GAP_MS = 25 * MIN_MS; // 任意两条排期之间硬性最小安全间距 25 分钟
+  const IDEAL_MIN_MS = 30 * MIN_MS; // 优先贴合最近前/后排期 30–40 分钟区间
+  const IDEAL_MAX_MS = 40 * MIN_MS;
   const LEAD_MS = 10 * MIN_MS; // 首个可选档距当前时间至少 10 分钟（给浮动和 X 原生最小提前量留余地）
-  const POST_BUFFER_MS = 15 * MIN_MS; // 刚发过帖后 15 分钟内的档自动跳过
+  const POST_BUFFER_MS = 30 * MIN_MS; // 刚发过主帖后 30 分钟内的档自动跳过
   const MIN_FUTURE_MS = 5 * MIN_MS; // 浮动后填入的时间至少在未来 5 分钟
-  const JITTER_MIN = 5; // 至少浮动 5 分钟，避开整点和半点附近
-  const JITTER_MAX = 20; // 最多浮动 20 分钟，模拟真人不会总卡在同一分钟
+  const JITTER_MIN = 5; // 无紧邻排期时的自然随机浮动下限（避开整点/半点）
+  const JITTER_MAX = 12; // 无紧邻排期时的自然随机浮动上限
+  const SEARCH_MAX = 15; // 围绕点击档位搜索安全分钟的最大半径（±15 分钟）
 
   const pad2 = (n) => String(n).padStart(2, '0');
   const startOfDay = (ts) => {
@@ -59,10 +63,32 @@ const XIRSchedule = (() => {
     return hits;
   }
 
+  function nearestGapMs(ts, scheduled = []) {
+    let best = Infinity;
+    for (const item of scheduled) {
+      if (!item || !Number.isFinite(item.executeAt)) continue;
+      const gap = Math.abs(ts - item.executeAt);
+      if (gap < best) best = gap;
+    }
+    return best;
+  }
+
+  function isSafeCandidate(ts, { minTs, dayMin, dayMax, scheduled }) {
+    if (ts < minTs || ts < dayMin || ts > dayMax) return false;
+    return nearestGapMs(ts, scheduled) >= MIN_GAP_MS;
+  }
+
+  function hasSafeMinuteInSlot(slotTs, { minTs, dayMin, dayMax, scheduled }) {
+    for (let d = -SEARCH_MAX; d <= SEARCH_MAX; d++) {
+      if (isSafeCandidate(slotTs + d * MIN_MS, { minTs, dayMin, dayMax, scheduled })) return true;
+    }
+    return false;
+  }
+
   /**
    * 首个可展示档位的最早时间戳：
    * - 必须至少晚于 now + 10 分钟（已过去的、过近的档跳过）；
-   * - 若刚发过帖（lastPostAt 在近 15 分钟内），再顺延到 lastPostAt + 15 分钟之后。
+   * - 若刚发过主帖（lastPostAt 在近 30 分钟内），再顺延到 lastPostAt + 30 分钟之后。
    */
   function earliestAllowedTs(nowTs, lastPostAt = 0) {
     const fromNow = nowTs + LEAD_MS;
@@ -78,6 +104,8 @@ const XIRSchedule = (() => {
     const base = new Date(startOfDay(nowTs));
     base.setDate(base.getDate() + dayOffset);
     const dayStart = base.getTime();
+    const dayMin = dayStart + START_MIN * MIN_MS;
+    const dayMax = dayStart + END_MIN * MIN_MS;
     const minTs = dayOffset === 0 ? earliestAllowedTs(nowTs, lastPostAt) : 0;
     const slots = [];
     for (let m = START_MIN; m <= END_MIN; m += STEP_MIN) {
@@ -85,13 +113,26 @@ const XIRSchedule = (() => {
       const ts = d.getTime();
       if (dayOffset === 0 && ts < minTs) continue;
       const items = conflictsFor(ts, scheduled);
+      let tooClose = false;
+      let occupied = items.length > 0;
+      if (!occupied && !hasSafeMinuteInSlot(ts, { minTs: Math.max(nowTs + MIN_FUTURE_MS, minTs), dayMin, dayMax, scheduled })) {
+        occupied = true;
+        tooClose = true;
+        for (const item of scheduled) {
+          if (item && Number.isFinite(item.executeAt) && Math.abs(item.executeAt - ts) < MIN_GAP_MS + SEARCH_MAX * MIN_MS) {
+            items.push(item);
+          }
+        }
+        items.sort((a, b) => Math.abs(a.executeAt - ts) - Math.abs(b.executeAt - ts));
+      }
       slots.push({
         ts,
         dayStart,
         minuteOfDay: m,
         label: formatSlotLabel(m),
         isHour: m % 60 === 0,
-        occupied: items.length > 0,
+        occupied,
+        tooClose,
         items,
       });
     }
@@ -100,8 +141,8 @@ const XIRSchedule = (() => {
 
   /**
    * 生成今天 + 未来 days-1 天（默认共 7 天）的档期视图：
-   * - today：当天剩余档位（若今天已无剩余档，仍保留空数组，界面可直接展示明天或下拉）
-   * - days：按天分组的所有档位（去掉空天，供「更多档期」下拉列表使用）
+   * - primary：首个有档位的日期（今天或明天）
+   * - groups：按天分组的所有档位（去掉空天，供「更多档期」下拉列表使用）
    */
   function buildSchedulePlan({ nowTs = Date.now(), days = 7, scheduled = [], lastPostAt = 0 } = {}) {
     const groups = [];
@@ -113,12 +154,20 @@ const XIRSchedule = (() => {
     return { primary, groups };
   }
 
+  /** 按时间顺序提取所有可用空档，供「← 上一档」「下一空档 →」快捷切换使用。 */
+  function availableSlots(plan) {
+    const out = [];
+    for (const g of plan?.groups || []) {
+      for (const s of g.slots || []) if (!s.occupied) out.push(s);
+    }
+    return out;
+  }
+
   /**
-   * 点击某个空档 slotTs 后，计算实际填入 X 原生表单的浮动时间（精确到分钟）：
-   * - 默认在 [-20..-5, +5..+20] 分钟内随机挑选，避开整点和半点附近；
-   * - 保证结果 >= nowTs + 5 分钟；
-   * - 保证与已有排期距离 >= 15 分钟（不撞档）；
-   * - 若所有随机候选都不满足，按最接近 slotTs 的合法分钟兜底。
+   * 点击某个空档 slotTs 后，计算实际填入 X 原生表单的安全时间（精确到分钟）：
+   * - 硬性保证：>= now + 5m、>= earliestAllowedTs、不越出 07:00–24:00、与所有已有排期至少相距 25 分钟；
+   * - 若附近 60 分钟内有已有排期，优先挑选与最近排期距离落在 30–40 分钟区间内的随机分钟（尽量避开整点/半点）；
+   * - 若周围无紧邻排期，则在 [-12..-5, +5..+12] 分钟内随机挑选（自然避开整点/半点）。
    */
   function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random, dayStart = null, lastPostAt = 0 } = {}) {
     const minTs = Math.max(nowTs + MIN_FUTURE_MS, earliestAllowedTs(nowTs, lastPostAt));
@@ -130,24 +179,27 @@ const XIRSchedule = (() => {
     }
     const dayMin = slotDay + START_MIN * MIN_MS;
     const dayMax = slotDay + END_MIN * MIN_MS;
-    const safe = (ts) => {
-      if (ts < minTs) return false;
-      if (ts < dayMin || ts > dayMax) return false;
-      for (const item of scheduled) {
-        if (item && Number.isFinite(item.executeAt) && Math.abs(ts - item.executeAt) < CONFLICT_MS) return false;
+    const pickRandom = (list) => list[Math.min(list.length - 1, Math.floor(random() * list.length))];
+
+    const safeAll = [];
+    for (let d = -SEARCH_MAX; d <= SEARCH_MAX; d++) {
+      const ts = slotTs + d * MIN_MS;
+      if (isSafeCandidate(ts, { minTs, dayMin, dayMax, scheduled })) {
+        safeAll.push({ d, ts, gap: nearestGapMs(ts, scheduled) });
       }
-      return true;
-    };
-    const offsets = [];
-    for (let d = JITTER_MIN; d <= JITTER_MAX; d++) {
-      offsets.push(-d, d);
     }
-    const valid = offsets.map((d) => slotTs + d * MIN_MS).filter(safe);
-    if (valid.length) {
-      const idx = Math.min(valid.length - 1, Math.floor(random() * valid.length));
-      return valid[idx];
+    const hasTightNeighbor = nearestGapMs(slotTs, scheduled) <= 60 * MIN_MS;
+    if (hasTightNeighbor) {
+      const idealNonZero = safeAll.filter((c) => c.d !== 0 && c.gap >= IDEAL_MIN_MS && c.gap <= IDEAL_MAX_MS);
+      if (idealNonZero.length) return pickRandom(idealNonZero).ts;
+      const idealAny = safeAll.filter((c) => c.gap >= IDEAL_MIN_MS && c.gap <= IDEAL_MAX_MS);
+      if (idealAny.length) return pickRandom(idealAny).ts;
     }
-    if (safe(slotTs)) return slotTs;
+    const natural = safeAll.filter((c) => Math.abs(c.d) >= JITTER_MIN && Math.abs(c.d) <= JITTER_MAX);
+    if (natural.length) return pickRandom(natural).ts;
+    const nonZero = safeAll.filter((c) => c.d !== 0);
+    if (nonZero.length) return pickRandom(nonZero).ts;
+    if (safeAll.length) return pickRandom(safeAll).ts;
     // 兜底：向后微调到合法分钟
     const fallback = Math.ceil(minTs / MIN_MS) * MIN_MS;
     return Math.max(slotTs, fallback);
@@ -158,6 +210,9 @@ const XIRSchedule = (() => {
     START_MIN,
     END_MIN,
     CONFLICT_MS,
+    MIN_GAP_MS,
+    IDEAL_MIN_MS,
+    IDEAL_MAX_MS,
     LEAD_MS,
     POST_BUFFER_MS,
     formatSlotLabel,
@@ -167,6 +222,7 @@ const XIRSchedule = (() => {
     earliestAllowedTs,
     buildDaySlots,
     buildSchedulePlan,
+    availableSlots,
     pickJitteredTime,
   };
 })();

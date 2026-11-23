@@ -20,7 +20,7 @@
     }
   });
   const TPL_OP = /^User\w*Replies|^NotificationsTimeline$|^FetchScheduledTweets$/;
-  const POST_OP = /^(CreateTweet|CreateScheduledTweet|DeleteScheduledTweet)$/;
+  const POST_OP = /^(CreateScheduledTweet|DeleteScheduledTweet)$/;
   const opOf = (url) => {
     try {
       return String(url).match(OP)?.[1] || null;

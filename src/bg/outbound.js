@@ -1,5 +1,5 @@
 // 我回别人：日常浏览器发帖实时旁听入库，以及按需补历史 / 低频自动兜底同步。
-import { putEvents, kvGet, kvRemove, keys, getSettings, OUT } from '../db.js';
+import { putEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from '../db.js';
 import { DAY_MS, OUT_SCHEMA } from '../rank.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
@@ -37,7 +37,11 @@ export async function handleOutboundTap(msg, sender) {
     await record('outbound_tap_unmatched', { account, reason: parsed.reason });
     return {};
   }
-  if (!parsed.event) return {};
+  if (!parsed.event) {
+    // 原创/引用主帖（非回复）才刷新刚发帖缓冲，避免回复别人误顺延发帖排期
+    if (parsed.reason === 'not_reply') await kvSet(keys.lastPostAt(account), now());
+    return {};
+  }
   const added = await putEvents(account, [parsed.event], OUT);
   await record('outbound_tap', {
     account,
