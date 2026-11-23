@@ -25,7 +25,7 @@
 - 浏览器资源计时记录在 `x.com` 上为空，模板 URL 只能通过 `tap.js` 旁听截取。
 - 照模板替换 `userId`、`count`、`cursor` 重发**不需要** `x-client-transaction-id`，返回 200，页大小 20；但额度只有 **50 次 / 15 分钟**。
 - 返回结构在对话模块中带出我发出的回复，但**不一定带出根帖**：实测两个公开账号共 63 条深层回复中，根帖在页里的 29 条，同一页有其它帖子直接回根帖从而可推出主人的 29 条（`parseMyReplies` 尚未启用该推算），认不出根帖的 5 条；只看别人帖子下的深层回复，约一半认不出根帖主人，开头 `@` 串位置也不固定。因此「我回 N」口径定为只算第一层。
-- **网页发帖实时旁听（0.31.0 新增，待真实载荷实测核对）**：在浏览器发送回复时，`tap.js` 将 `CreateTweet` POST 响应传至 `rel.js` → `content.js` → `handleOutboundTap`，由 `parseCreatedReply` 提取 `data.create_tweet.tweet_results.result`（含 `TweetWithVisibilityResults` 解包）并直接写入 `OUT` 表；结构缺失时只记录 `outbound_tap_unmatched` 诊断日志，不污染数据。
+- **网页发帖实时旁听（0.31.0 新增，2026-11-23 真实账号已实测捕获 3 条直接回复）**：在浏览器发送回复时，`tap.js` 将 `CreateTweet` POST 响应传至 `rel.js` → `content.js` → `handleOutboundTap`，由 `parseCreatedReply` 提取 `data.create_tweet.tweet_results.result`（含 `TweetWithVisibilityResults` 解包）并直接写入 `OUT` 表；结构缺失时只记录 `outbound_tap_unmatched` 诊断日志，不污染数据。
 
 ### 4. 真实账号运行与提及延迟现象
 
@@ -39,4 +39,4 @@
 3. **关系 / `M` 旁听字段兼容性**：`relationship_perspectives.following / followed_by`、旧 `legacy` 内字段与页面帖子归属结构尚未在真实账号全面确认（不符时仅不显示小标，不影响榜单）。
 4. **排期快捷档期弹窗兼容**：真实排期弹窗的选择器兼容性、日期联动与填入效果需随实际反馈调整。
 5. **X 发版导致的结构变更**：接口或 DOM 改版后插件在弹窗/错误提示中直接报错，不做静默兜底。
-6. **`CreateTweet` 真实返回载荷核对**：`parseCreatedReply` 已按 X 常见 GraphQL 结构实现，待收集真实发帖旁听的 `outbound_tap` / `outbound_tap_unmatched` 日志确认。
+6. **`CreateTweet` 真实返回载荷持续核对**：2026-11-23 已在真实账号实测命中 3 条 `outbound_tap`（`added: 1, direct: true`），后续继续借 `.local/` 日志核对是否存在其他返回变体。
