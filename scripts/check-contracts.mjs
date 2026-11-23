@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { keys as dbKeys } from '../src/db.js';
@@ -354,10 +354,46 @@ function checkTplAlignment() {
   }
 }
 
+function checkBgModules() {
+  if (!existsSync(join(ROOT, 'src/bg'))) return;
+  const bgFiles = walkFiles('src/bg', ['.js']);
+  for (const file of bgFiles) {
+    const code = readText(file);
+    assert.equal(/\baddListener\b/.test(code), false, `${file} 不得自行注册 Chrome 监听器（应集中在 src/background.js）`);
+  }
+
+  const allSrc = walkFiles('src', ['.js']);
+  const graph = new Map();
+  for (const file of allSrc) {
+    const code = readText(file);
+    const deps = [];
+    for (const m of code.matchAll(/(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]/g)) {
+      const target = resolve(dirname(join(ROOT, file)), m[1]);
+      const rel = target.slice(ROOT.length + 1).replace(/\\/g, '/');
+      deps.push(rel);
+    }
+    graph.set(file, deps);
+  }
+
+  const state = new Map();
+  function visit(node, stack) {
+    const s = state.get(node);
+    if (s === 2) return;
+    if (s === 1) {
+      assert.fail(`发现循环依赖: ${[...stack, node].join(' -> ')}`);
+    }
+    state.set(node, 1);
+    for (const dep of graph.get(node) || []) visit(dep, [...stack, node]);
+    state.set(node, 2);
+  }
+  for (const node of graph.keys()) visit(node, []);
+}
+
 export async function runContracts() {
   const checkedFiles = checkSyntax();
   checkManifestAndVersions();
   checkModuleIsolation();
+  checkBgModules();
   await checkMessageContracts();
   checkStorageKeyContracts();
   checkTplAlignment();
