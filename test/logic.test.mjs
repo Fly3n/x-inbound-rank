@@ -523,19 +523,33 @@ test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–4
   assert.deepEqual(byLabel['16:00'].items.map((x) => x.id), ['2']);
   assert.equal(byLabel['16:30'].occupied, false);
 
-  // 点击 15:00：15:22 已排，所有随机结果必须与 15:22 相距 >= 25 分钟，且优先落在 30–40 分钟区间（14:45–14:52）
+  // 点「具体档位 15:00」：15:22 已排，±1-3m 内（14:57-15:03）里 14:57 与 15:22 相距恰好 25 分钟，满足硬性安全间距
   for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
-    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r });
+    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r, mode: 'slot' });
+    const diffMin = Math.round((picked - at(15, 0)) / 60_000);
     const gapMin = Math.round(Math.abs(picked - at(15, 22)) / 60_000);
-    assert.ok(gapMin >= 30 && gapMin <= 40, `应优先贴合 30-40 分钟安全间距，实际 ${gapMin} 分钟`);
+    assert.ok(Math.abs(diffMin) >= 1 && Math.abs(diffMin) <= 3, `点具体档位应小幅浮动 ±1-3m，实际 ${diffMin} 分钟`);
+    assert.ok(gapMin >= 25, `与 15:22 间距必须 >= 25 分钟，实际 ${gapMin} 分钟`);
   }
 
-  // 前一条在 21:05（占 21:00），点 21:30 档：杜绝落到 21:20，应落在 21:35–21:45（距 21:05 正好 30–40 分钟）
+  // 点「下一空档 →」：前一条在 21:05（占 21:00），后面无排期 -> 落在 21:35–21:45（距 21:05 正好 30–40 分钟）
   const tightPrev = [{ id: 'p', executeAt: at(21, 5), text: '上一条' }];
   for (const r of [0, 0.3, 0.7, 0.99]) {
-    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: tightPrev, random: () => r });
+    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: tightPrev, random: () => r, mode: 'next' });
     const gapMin = Math.round((picked - at(21, 5)) / 60_000);
     assert.ok(gapMin >= 30 && gapMin <= 40, `应距 21:05 间隔 30-40 分钟，实际 ${gapMin} 分钟`);
+  }
+
+  // 点「下一空档 →」：前后正好差 1 小时（21:00 与 22:00）-> 居中均分落在 21:27–21:33（两边各 27–33 分钟）
+  const oneHourGap = [
+    { id: 'h1', executeAt: at(21, 0), text: '前' },
+    { id: 'h2', executeAt: at(22, 0), text: '后' },
+  ];
+  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
+    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: oneHourGap, random: () => r, mode: 'next' });
+    const gapPrev = Math.round((picked - at(21, 0)) / 60_000);
+    const gapNext = Math.round((at(22, 0) - picked) / 60_000);
+    assert.ok(gapPrev >= 27 && gapPrev <= 33 && gapNext >= 27 && gapNext <= 33, `1 小时夹缝应居中均分，实际前 ${gapPrev}m / 后 ${gapNext}m`);
   }
 
   // 夹缝档检测：20:50 与 21:35 之间仅隔 45 分钟，21:00 与 21:30 周围都没有 >=25m 的安全分钟，均自动置灰
@@ -554,11 +568,14 @@ test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–4
   assert.equal(free[0].label, '20:30');
   assert.ok(!free.some((s) => s.ts === at(21, 0) || s.ts === at(21, 30)));
 
-  // 无紧邻排期时：围绕点击档位做 ±5–12 分钟自然随机浮动（避开整点/半点）
+  // 无紧邻排期时：点具体档位做 ±1–3 分钟小幅浮动；点「下一空档」做 ±5–12 分钟自然浮动
   for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
-    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r });
-    const diffMin = Math.round((picked - at(15, 0)) / 60_000);
-    assert.ok(Math.abs(diffMin) >= 5 && Math.abs(diffMin) <= 12, `无紧邻排期应浮动 5-12 分钟，实际 ${diffMin}`);
+    const pickedSlot = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r, mode: 'slot' });
+    const diffSlot = Math.round((pickedSlot - at(15, 0)) / 60_000);
+    assert.ok(Math.abs(diffSlot) >= 1 && Math.abs(diffSlot) <= 3, `无紧邻排期点具体档位应浮动 1-3 分钟，实际 ${diffSlot}`);
+    const pickedNext = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r, mode: 'next' });
+    const diffNext = Math.round((pickedNext - at(15, 0)) / 60_000);
+    assert.ok(Math.abs(diffNext) >= 5 && Math.abs(diffNext) <= 12, `无紧邻排期点下一空档应浮动 5-12 分钟，实际 ${diffNext}`);
   }
 
   // 首尾档位浮动不能越出当天 07:00–24:00

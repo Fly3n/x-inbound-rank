@@ -12,8 +12,11 @@ const XIRSchedule = (() => {
   const LEAD_MS = 10 * MIN_MS; // 首个可选档距当前时间至少 10 分钟（给浮动和 X 原生最小提前量留余地）
   const POST_BUFFER_MS = 30 * MIN_MS; // 刚发过主帖后 30 分钟内的档自动跳过
   const MIN_FUTURE_MS = 5 * MIN_MS; // 浮动后填入的时间至少在未来 5 分钟
-  const JITTER_MIN = 5; // 无紧邻排期时的自然随机浮动下限（避开整点/半点）
-  const JITTER_MAX = 12; // 无紧邻排期时的自然随机浮动上限
+  const JITTER_MIN = 5; // 下一空档且无紧邻排期时的自然随机浮动下限（避开整点/半点）
+  const JITTER_MAX = 12; // 下一空档且无紧邻排期时的自然随机浮动上限
+  const SLOT_JITTER_MIN = 1; // 点击具体档位时的小幅浮动下限（±1–3 分钟，贴近所点时间）
+  const SLOT_JITTER_MAX = 3;
+  const CENTER_MAX_GAP_MS = 80 * MIN_MS; // 前后排期间距在 50–80 分钟内时取中点均匀居中
   const SEARCH_MAX = 15; // 围绕点击档位搜索安全分钟的最大半径（±15 分钟）
 
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -164,12 +167,16 @@ const XIRSchedule = (() => {
   }
 
   /**
-   * 点击某个空档 slotTs 后，计算实际填入 X 原生表单的安全时间（精确到分钟）：
-   * - 硬性保证：>= now + 5m、>= earliestAllowedTs、不越出 07:00–24:00、与所有已有排期至少相距 25 分钟；
-   * - 若附近 60 分钟内有已有排期，优先挑选与最近排期距离落在 30–40 分钟区间内的随机分钟（尽量避开整点/半点）；
-   * - 若周围无紧邻排期，则在 [-12..-5, +5..+12] 分钟内随机挑选（自然避开整点/半点）。
+   * 选定某个空档 slotTs 后，计算实际填入 X 原生表单的安全时间（精确到分钟）：
+   * - 硬性保证：>= now + 5m、>= earliestAllowedTs、不越出 07:00–24:00、与前后所有已有排期均相距 >= 25 分钟；
+   * - mode === 'next'（点「下一空档 →」）：
+   *   · 前后均夹着排期且总空隙在 50–80 分钟内（如正好差 1 小时）时，取正中点 ±1–3 分钟均匀居中；
+   *   · 否则若前一条参考在 60 分钟内，优先落在前一条之后 30–40 分钟内随机一分钟；
+   *   · 周围无紧邻排期时，在 [-12..-5, +5..+12] 内自然随机浮动。
+   * - mode === 'slot'（点具体档位，如 22:00）：
+   *   · 优先在 ±1–3 分钟内小幅浮动（避开整点/半点）；若不足 25 分钟安全间距，则就近微调到最贴近的安全分钟。
    */
-  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random, dayStart = null, lastPostAt = 0 } = {}) {
+  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random, dayStart = null, lastPostAt = 0, mode = 'slot' } = {}) {
     const minTs = Math.max(nowTs + MIN_FUTURE_MS, earliestAllowedTs(nowTs, lastPostAt));
     let slotDay = dayStart;
     if (!Number.isFinite(slotDay)) {
@@ -179,24 +186,60 @@ const XIRSchedule = (() => {
     }
     const dayMin = slotDay + START_MIN * MIN_MS;
     const dayMax = slotDay + END_MIN * MIN_MS;
+    const ctx = { minTs, dayMin, dayMax, scheduled };
     const pickRandom = (list) => list[Math.min(list.length - 1, Math.floor(random() * list.length))];
+    const isRoundHalfHour = (ts) => new Date(ts).getMinutes() % 30 === 0;
 
     const safeAll = [];
     for (let d = -SEARCH_MAX; d <= SEARCH_MAX; d++) {
       const ts = slotTs + d * MIN_MS;
-      if (isSafeCandidate(ts, { minTs, dayMin, dayMax, scheduled })) {
-        safeAll.push({ d, ts, gap: nearestGapMs(ts, scheduled) });
+      if (isSafeCandidate(ts, ctx)) safeAll.push({ d, ts });
+    }
+
+    if (mode === 'next') {
+      const { prev, next } = neighborSummary(slotTs, { scheduled, lastPostAt });
+      // 1) 前后夹着排期且空隙 50–80 分钟：取中点 ±1–3 分钟均匀居中
+      if (prev && next) {
+        const span = next.ts - prev.ts;
+        if (span >= 2 * MIN_GAP_MS && span <= CENTER_MAX_GAP_MS) {
+          const mid = Math.round(((prev.ts + next.ts) / 2) / MIN_MS) * MIN_MS;
+          const centered = [];
+          for (let off = -SLOT_JITTER_MAX; off <= SLOT_JITTER_MAX; off++) {
+            const ts = mid + off * MIN_MS;
+            if (isSafeCandidate(ts, ctx)) centered.push(ts);
+          }
+          const nonRound = centered.filter((ts) => !isRoundHalfHour(ts));
+          if (nonRound.length) return pickRandom(nonRound);
+          if (centered.length) return pickRandom(centered);
+        }
+      }
+      // 2) 前方有紧邻参考且后面宽裕：落在前一条之后 30–40 分钟
+      if (prev && slotTs - prev.ts <= 60 * MIN_MS) {
+        const ideal = [];
+        for (let m = IDEAL_MIN_MS / MIN_MS; m <= IDEAL_MAX_MS / MIN_MS; m++) {
+          const ts = prev.ts + m * MIN_MS;
+          if (Math.abs(ts - slotTs) <= SEARCH_MAX * MIN_MS && isSafeCandidate(ts, ctx)) ideal.push(ts);
+        }
+        const nonRound = ideal.filter((ts) => !isRoundHalfHour(ts));
+        if (nonRound.length) return pickRandom(nonRound);
+        if (ideal.length) return pickRandom(ideal);
+      }
+      // 3) 周围无紧邻排期：自然 ±5–12 分钟浮动
+      const natural = safeAll.filter((c) => Math.abs(c.d) >= JITTER_MIN && Math.abs(c.d) <= JITTER_MAX);
+      if (natural.length) return pickRandom(natural).ts;
+    } else {
+      // 点具体档位：优先 ±1–3 分钟小幅浮动（避开整点/半点）
+      const tight = safeAll.filter((c) => Math.abs(c.d) >= SLOT_JITTER_MIN && Math.abs(c.d) <= SLOT_JITTER_MAX);
+      if (tight.length) return pickRandom(tight).ts;
+      // 若 ±1–3 分钟不满足 25 分钟安全间距，就近选最贴近点击档位的安全分钟
+      if (safeAll.length) {
+        const minDist = Math.min(...safeAll.map((c) => Math.abs(c.d)));
+        const nearest = safeAll.filter((c) => Math.abs(c.d) <= minDist + 2 && c.d !== 0);
+        if (nearest.length) return pickRandom(nearest).ts;
+        return safeAll.reduce((a, b) => (Math.abs(a.d) <= Math.abs(b.d) ? a : b)).ts;
       }
     }
-    const hasTightNeighbor = nearestGapMs(slotTs, scheduled) <= 60 * MIN_MS;
-    if (hasTightNeighbor) {
-      const idealNonZero = safeAll.filter((c) => c.d !== 0 && c.gap >= IDEAL_MIN_MS && c.gap <= IDEAL_MAX_MS);
-      if (idealNonZero.length) return pickRandom(idealNonZero).ts;
-      const idealAny = safeAll.filter((c) => c.gap >= IDEAL_MIN_MS && c.gap <= IDEAL_MAX_MS);
-      if (idealAny.length) return pickRandom(idealAny).ts;
-    }
-    const natural = safeAll.filter((c) => Math.abs(c.d) >= JITTER_MIN && Math.abs(c.d) <= JITTER_MAX);
-    if (natural.length) return pickRandom(natural).ts;
+
     const nonZero = safeAll.filter((c) => c.d !== 0);
     if (nonZero.length) return pickRandom(nonZero).ts;
     if (safeAll.length) return pickRandom(safeAll).ts;

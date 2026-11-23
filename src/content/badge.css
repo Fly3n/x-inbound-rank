@@ -162,7 +162,7 @@
 .xir-sched-ref {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   margin-bottom: 8px;
   padding: 6px 10px;
   border: 1px solid var(--xir-s-bd);
@@ -173,10 +173,23 @@
 }
 
 .xir-sched-ref-line {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+}
+
+.xir-sched-ref-cell {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
+  padding-right: 10px;
+}
+
+.xir-sched-ref-cell.is-right {
+  padding-right: 0;
+  padding-left: 10px;
+  border-left: 1px solid var(--xir-s-bd);
 }
 
 .xir-sched-ref-label {

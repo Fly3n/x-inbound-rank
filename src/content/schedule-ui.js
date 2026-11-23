@@ -177,7 +177,7 @@
   }
 
   function slotTooltip(slot) {
-    if (!slot.occupied) return `点击填入 ${slot.label} 附近安全时间（与相邻排期尽量间隔 30–40 分钟）`;
+    if (!slot.occupied) return `点击填入 ${slot.label} 附近时间（±1–3 分钟微调，且距相邻排期 ≥ 25 分钟）`;
     if (slot.tooClose) {
       return slot.items
         .map((it) => `与 ${XIRSchedule.formatTime(it.executeAt)} 排期间隔不足 25 分钟${it.text ? `：${it.text}` : ''}`)
@@ -188,10 +188,10 @@
       .join('\n');
   }
 
-  async function pickSlot(slot, form, closeDrop) {
+  async function pickSlot(slot, form, closeDrop, mode = 'slot') {
     if (!slot || slot.occupied || XIRRel.session()?.account !== account || !enabled) return;
     const filledTs = XIRSchedule.pickJitteredTime(slot.ts, {
-      nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt,
+      nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt, mode,
     });
     const ok = await fillNativeForm(form, filledTs);
     if (XIRRel.session()?.account !== account || !enabled) return;
@@ -213,7 +213,7 @@
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        pickSlot(slot, form, inDropdown);
+        pickSlot(slot, form, inDropdown, 'slot');
       });
     }
     return btn;
@@ -277,31 +277,51 @@
     head.append(title, stat, refresh);
     panel.appendChild(head);
 
-    // 选定时间后，逐行展示与上一条（已有排期/刚发主帖）及下一条（有则显示、无则省略）的时间差
+    // 选定时间后，左右分栏展示「上一条（或刚发主帖）时间 | 间隔」（无数据显示「无」）；有后续排期时追加一行「下一条 | 间隔」
     if (lastPicked?.ok) {
       const { prev, next } = XIRSchedule.neighborSummary(lastPicked.filledTs, {
         scheduled: state.items,
         lastPostAt: state.lastPostAt,
       });
-      if (prev || next) {
-        const refBox = document.createElement('div');
-        refBox.className = 'xir-sched-ref';
-        const appendRefLine = (label, info) => {
-          const line = document.createElement('div');
-          line.className = 'xir-sched-ref-line';
-          const tag = document.createElement('span');
-          tag.className = 'xir-sched-ref-label';
-          tag.textContent = label;
-          const val = document.createElement('span');
-          val.className = 'xir-sched-ref-val';
-          val.textContent = `${XIRSchedule.formatRefTime(info.ts, lastPicked.filledTs)} · 隔 ${XIRSchedule.formatGap(info.gapMs)}`;
-          line.append(tag, val);
-          refBox.appendChild(line);
-        };
-        if (prev) appendRefLine(prev.kind === 'post' ? '刚发主帖' : '上一条', prev);
-        if (next) appendRefLine('下一条', next);
-        panel.appendChild(refBox);
+      const refBox = document.createElement('div');
+      refBox.className = 'xir-sched-ref';
+      const appendRefRow = (leftLabel, leftVal, rightVal) => {
+        const line = document.createElement('div');
+        line.className = 'xir-sched-ref-line';
+        const left = document.createElement('span');
+        left.className = 'xir-sched-ref-cell';
+        const lTag = document.createElement('span');
+        lTag.className = 'xir-sched-ref-label';
+        lTag.textContent = leftLabel;
+        const lVal = document.createElement('span');
+        lVal.className = 'xir-sched-ref-val';
+        lVal.textContent = leftVal;
+        left.append(lTag, lVal);
+        const right = document.createElement('span');
+        right.className = 'xir-sched-ref-cell is-right';
+        const rTag = document.createElement('span');
+        rTag.className = 'xir-sched-ref-label';
+        rTag.textContent = '间隔';
+        const rVal = document.createElement('span');
+        rVal.className = 'xir-sched-ref-val';
+        rVal.textContent = rightVal;
+        right.append(rTag, rVal);
+        line.append(left, right);
+        refBox.appendChild(line);
+      };
+      appendRefRow(
+        prev?.kind === 'post' ? '刚发主帖' : '上一条',
+        prev ? XIRSchedule.formatRefTime(prev.ts, lastPicked.filledTs) : '无',
+        prev ? XIRSchedule.formatGap(prev.gapMs) : '无',
+      );
+      if (next) {
+        appendRefRow(
+          '下一条',
+          XIRSchedule.formatRefTime(next.ts, lastPicked.filledTs),
+          XIRSchedule.formatGap(next.gapMs),
+        );
       }
+      panel.appendChild(refBox);
     }
 
     // 快捷上下空档切换：无上一档/下一档时自动置灰
@@ -320,7 +340,7 @@
     prevBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      pickSlot(prevSlot, form, false);
+      pickSlot(prevSlot, form, false, 'next');
     });
     const nextBtn = document.createElement('button');
     nextBtn.type = 'button';
@@ -331,7 +351,7 @@
     nextBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      pickSlot(nextSlot, form, false);
+      pickSlot(nextSlot, form, false, 'next');
     });
     nav.append(prevBtn, nextBtn);
     panel.appendChild(nav);
