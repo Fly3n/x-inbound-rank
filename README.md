@@ -2,7 +2,7 @@
 
 统计谁最常在我的 X 帖子下回复我，给回复者排名，并在时间线和评论区的用户名旁标出名次和次数；榜单里还能看到我在对方帖子下直接回复了几次。数据只存本机，不上传。
 
-- 功能和要求以 [REQUIREMENTS.md](REQUIREMENTS.md) 为唯一出处。
+- 功能和要求以 [docs/product.md](docs/product.md) 为唯一出处。
 - 技术事实、数据模型和维护约束见 [AGENTS.md](AGENTS.md)。
 - 当前版本和每版改动见 [CHANGELOG.md](CHANGELOG.md)，弹窗标题旁也显示版本号。
 
