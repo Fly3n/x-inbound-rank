@@ -5,17 +5,15 @@ import { ranking, badgeSnapshot } from '../rank.js';
 // 请求节奏。提及：旧接口额度实测 180 次 / 15 分钟、每页 20 条，新接口 1500 次 / 15 分钟、每页 40 条（2026-11-19）。
 // 只保留远低于额度的节奏；真实账号还要经过行为风控，不能拿「没触发 429」当作安全。
 export const PACE = {
-  pageGapMs: [25_000, 45_000], // 回填：两页之间的随机间隔
-  batchPages: 10, // 回填：每批页数
   batchRestMs: [180_000, 300_000], // 回填：批与批之间的随机休息
-  maxPagesPerRun: 600, // 回填：单次运行的页数上限，到了就暂停等用户确认
+  maxPagesPerRun: 300, // 回填（7/15 天）：单次运行的页数上限，到了就暂停等用户确认
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
   // 同一个后台事件里连续读多页时，页间等待要短于 Chrome 约 30 秒的空闲回收线。
-  incPageGapMs: [15_000, 27_000], // 增量、回填补读、出站和诊断的页间间隔
+  incPageGapMs: [15_000, 27_000], // 出站和诊断的页间间隔
   incPagesPerEvent: 6, // 增量：每个后台事件最多六页，读完休息后自动续，避免单次事件过长
+  incMaxRounds: 10, // 增量：单轮最多 10 段（60 页）安全上限
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
-  incOverlapMs: 60 * 60_000, // 增量：以上一轮读取时间为基准再向更早补 1 小时，接住 X 短时迟到放出的回复
   restMs: [180_000, 300_000], // 一次读不完、分几轮读时，轮与轮之间的休息
   manualCooldownMs: 10 * 60_000, // 手动更新：十分钟内不重复向 X 发请求
   // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），比提及的 180 次小得多，单独定节奏：
@@ -23,6 +21,7 @@ export const PACE = {
   outPages: 5,
   outRestMs: [180_000, 300_000],
   outMaxRounds: 120, // 我的回复：一次读不完时最多接着读几轮（120 × 5 页 = 600 页，和回填单次上限一样），再多就到此为止
+  outAutoGapMs: 48 * 60 * 60_000, // 可选方案 B：每 2 天低频自动同步兜底手机端回复
   diagnosePages: 5, // 手动回查默认最多五页，避免诊断变成大流量任务
 };
 
@@ -53,6 +52,24 @@ export function accountForUser(accounts, userId) {
 export const rand = ([a, b]) => a + Math.floor(Math.random() * (b - a));
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const now = () => Date.now();
+
+/** 模拟真人刷通知的非均匀页间停顿（单事件内必须低于 Chrome ~30s 空闲回收线）。 */
+export function humanIncDelay() {
+  const r = Math.random();
+  if (r < 0.35) return rand([4_000, 10_000]);
+  if (r < 0.80) return rand([12_000, 22_000]);
+  return rand([22_000, 28_000]);
+}
+
+/** 模拟真人补历史页间停顿（每页独立闹钟唤醒，允许长停顿）。 */
+export function humanBackfillDelay() {
+  const r = Math.random();
+  if (r < 0.30) return rand([15_000, 28_000]);
+  if (r < 0.75) return rand([30_000, 55_000]);
+  return rand([60_000, 110_000]);
+}
+
+export const humanBatchPages = () => rand([8, 13]); // 每批 8–12 页后休息
 
 // 模拟真人：自动任务只在本地时间 08:00–24:00 发生，凌晨不跑。
 export const ACTIVE_START_HOUR = 8;
@@ -87,6 +104,9 @@ export function nextAutoSlot(ts = now()) {
   tomorrow.setHours(0, 0, 0, 0);
   return tomorrow.getTime() + first.start * 60_000 + rand([0, (first.end - first.start) * 60_000]);
 }
+
+/** 可选方案 B：以至少 48 小时后为基准挑下一个上午或晚间随机窗口。 */
+export const nextOutAutoSlot = (ts = now()) => nextAutoSlot(ts + PACE.outAutoGapMs);
 
 export function nextActiveAt(ts = now()) {
   if (inActiveHours(ts)) {

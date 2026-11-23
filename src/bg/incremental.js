@@ -1,4 +1,4 @@
-// 别人回我：日常增量读取、1 小时延迟补漏与手动按时间回查诊断。
+// 别人回我：日常增量读取、重叠即停、免补历史直启与手动按时间回查诊断。
 import { getEvents, kvGet, keys, getSettings } from '../db.js';
 import { DAY_MS, KEEP_DAYS } from '../rank.js';
 import { record } from '../diagnostics.js';
@@ -6,7 +6,7 @@ import { queueBridgePush } from '../bridge.js';
 import { idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, INC_ALARM, alarmFor,
-  enabledAccount, now, rand, sleep, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
+  enabledAccount, now, rand, sleep, humanIncDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
   serviceWait, isBusy, tryAcquireBusy, releaseBusy, updateCursor,
   flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
 } from './runtime.js';
@@ -20,10 +20,10 @@ async function incDue(account, manual) {
   if (!await enabledAccount(account)) return blocked('请先为此账号开启插件。');
   const settings = await getSettings(account);
   const cur = await kvGet(keys.cursor(account), {});
-  if (!cur.syncedId) return blocked('请先完成「别人回我」初始化。');
+  if (!manual && !cur.incResume && cur.incLimitReached) return null;
   const job = await kvGet(keys.job(account));
-  if (job && ['running', 'waiting_tab'].includes(job.status)) return blocked('「别人回我」正在初始化，请等它结束。');
-  if (job?.status === 'paused' && job.auto) return blocked(job.message || '初始化正在退避，稍后自动继续。');
+  if (job && ['running', 'waiting_tab'].includes(job.status)) return blocked('「别人回我」正在补历史，请等它结束。');
+  if (job?.status === 'paused' && job.auto) return blocked(job.message || '补历史正在退避，稍后自动继续。');
   const t = now();
   if (!inActiveHours(t)) return blocked('读取只在每天 08:00–24:00 进行，夜间不自动发请求。');
   const until = Math.max(cur.rateUntil || 0, cur.serviceRetries ? cur.nextIncAt || 0 : 0);
@@ -50,28 +50,43 @@ export async function maybeIncremental(account, manual = false) {
     if (!due || due.error) return due || false;
     const { cur } = due;
 
-    // 每次从最新一页往回读，先接到上次成功读取的位置，再以那一轮读取时间为基准向更早补 1 小时：接住 X 短时晚放的回复。
-    // 每个后台事件最多读 6 页；没读完就记下位置，休息 3–5 分钟后继续，
-    // 直到接上、或者读到保存期限（90 天前，更早的反正要清掉）。
-    // 接上之前接续点不动；出错中断时下次重读这一段，靠主键去重。
-    const stopAt = cur.syncedId;
-    const resume = cur.incResume?.stopAt === stopAt ? cur.incResume : null;
+    // 每次从最新一页往回读：已有接续点时一发现与上次位置重叠即停（再往前都已读过）；
+    // 从未补过历史的账号直接从启用时刻建立起点（单轮最多读 2 页）。
+    // 每个后台事件最多读 6 页；没接上则休息 3–5 分钟续读，单轮最多 10 段（60 页）。
+    const stopAt = cur.syncedId || null;
+    const resume = (cur.incResume?.stopAt || null) === stopAt ? cur.incResume : null;
     const taskManual = manual || !!resume?.manual;
-    const floorTs = now() - KEEP_DAYS * DAY_MS;
-    const overlapCutoff = Math.min(cur.lastIncrementalAt || now(), now()) - PACE.incOverlapMs;
+    const run = now();
+    const floorTs = run - KEEP_DAYS * DAY_MS;
+    const me = (await kvGet(keys.accounts, {}))[account];
+    const startFloor = me?.activation || run;
     const api = resume?.api || (await mentionsApi(account)); // 接着上一轮读的，游标是哪个接口的就用哪个
     const canRequest = api !== 'gql' || !!(await kvGet(keys.tplMentions(account)));
-    const gap = PACE.incPageGapMs;
-    const maxPages = PACE.incPagesPerEvent;
+    const maxPages = stopAt ? PACE.incPagesPerEvent : Math.min(PACE.incPagesPerEvent, 2);
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
     let caughtUp = false;
     let manualMarked = false;
-    const run = now();
+    let pagesRead = 0;
     const roundStartedAt = resume?.startedAt || run;
     const batch = { read: 0, added: 0 };
+    const saveResume = (c, nextAt) => {
+      if (cursor && (c.syncedId || null) === stopAt) {
+        c.incResume = {
+          cursor,
+          topId,
+          stopAt,
+          api,
+          manual: taskManual,
+          startedAt: roundStartedAt,
+          rounds: resume?.rounds || 0,
+          pages: (resume?.pages || 0) + pagesRead,
+        };
+      }
+      c.nextIncAt = nextAt;
+    };
     for (let page = 0; page < maxPages; page++) {
-      if (page) await sleep(rand(gap));
+      if (page) await sleep(humanIncDelay());
       const trace = { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, page: page + 1 };
       const res = await pull(account, cursor, api, batch, trace);
       if (manual && canRequest && !manualMarked && !['no_tab', 'outside_window'].includes(res.kind)) {
@@ -81,28 +96,19 @@ export async function maybeIncremental(account, manual = false) {
       if (!await enabledAccount(account)) return false;
       if (res.kind === 'no_tab') {
         const when = nextActiveAt(now() + (cursor ? 60_000 : PACE.incRetryGapMs));
-        await updateCursor(account, (c) => {
-          if (cursor && c.syncedId === stopAt) c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt };
-          c.nextIncAt = when;
-        });
+        await updateCursor(account, (c) => saveResume(c, when));
         await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
         return false; // 没有本账号的 X 页面，等它重新连上
       }
       if (res.kind === 'outside_window') {
         const when = nextActiveAt(now());
-        await updateCursor(account, (c) => {
-          if (cursor && c.syncedId === stopAt) c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt };
-          c.nextIncAt = when;
-        });
+        await updateCursor(account, (c) => saveResume(c, when));
         await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
         return { message: '已到夜间休息时间，明天 08:00 后继续。' };
       }
       if (res.kind === 'backoff') {
         const when = Math.max(res.retryAt || 0, nextActiveAt(now() + PACE.incRetryGapMs));
-        await updateCursor(account, (c) => {
-          if (cursor && c.syncedId === stopAt) c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt };
-          c.nextIncAt = when;
-        });
+        await updateCursor(account, (c) => saveResume(c, when));
         await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
         return { message: '账号正在限流退避，本轮没有继续发请求。' };
       }
@@ -146,27 +152,37 @@ export async function maybeIncremental(account, manual = false) {
         return { error: res.message };
       }
       const p = res.parsed;
+      pagesRead += 1;
       if (page === 0 && !resume) topId = p.newestId;
-      const crossedCheckpoint = !stopAt || !!(p.newestId && !idGt(p.newestId, stopAt));
-      const pastOverlap = p.newestTs != null && p.newestTs < overlapCutoff;
       const repeatedCursor = !!cursor && p.bottomCursor === cursor;
-      const stopReason = !p.entryIds.length ? 'empty_page'
-        : !p.bottomCursor ? 'no_next_page'
-        : p.newestTs != null && p.newestTs < floorTs ? 'retention_boundary'
-        : p.newestTs != null ? (pastOverlap && crossedCheckpoint ? 'reached_overlap' : null)
-        : crossedCheckpoint ? 'reached_checkpoint' : null;
       if (repeatedCursor) {
-        const when = nextActiveAt(now() + rand(PACE.restMs));
+        const when = nextAutoSlot(nextActiveAt(now() + rand(PACE.restMs)));
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'repeated_cursor', checkpoint: stopAt });
         await updateCursor(account, (c) => {
           delete c.incResume;
-          c.nextIncAt = nextAutoSlot(when);
+          c.nextIncAt = when;
         });
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when: nextAutoSlot(when) });
+        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
         await setAlert(account, 'X 的提及列表返回了重复的翻页位置，本轮已停止；接续点没有前移。');
         return { error: '别人回我翻页异常，已停止本轮。' };
       }
-      const endedBeforeCheckpoint = !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint &&
+      if (!stopAt) {
+        const totalInitialPages = (resume?.pages || 0) + pagesRead;
+        if (!p.entryIds.length || !p.bottomCursor || (p.oldestTs != null && p.oldestTs <= startFloor) || totalInitialPages >= 2) {
+          await record('pagination_stop', { ...trace, source: 'mentions', reason: 'initial_anchor', checkpoint: null });
+          caughtUp = true;
+          break;
+        }
+        cursor = p.bottomCursor;
+        continue;
+      }
+      const overlapped = stopAt !== EMPTY_SYNC_ID && !!(p.oldestId && !idGt(p.oldestId, stopAt));
+      const stopReason = overlapped ? 'reached_overlap'
+        : !p.entryIds.length ? 'empty_page'
+        : !p.bottomCursor ? 'no_next_page'
+        : (p.oldestTs != null && p.oldestTs < floorTs) ? 'retention_boundary'
+        : null;
+      const endedBeforeCheckpoint = stopAt !== EMPTY_SYNC_ID && !overlapped &&
         (stopReason === 'empty_page' || stopReason === 'no_next_page');
       if (endedBeforeCheckpoint) {
         const when = nextAutoSlot(now() + rand(PACE.restMs));
@@ -187,22 +203,47 @@ export async function maybeIncremental(account, manual = false) {
       cursor = p.bottomCursor;
     }
     if (!caughtUp) {
+      const rounds = (resume?.rounds || 0) + 1;
+      if (rounds >= PACE.incMaxRounds) {
+        const when = nextAutoSlot(now());
+        await updateCursor(account, (c) => {
+          delete c.incResume;
+          c.incLimitReached = true;
+          c.nextIncAt = when;
+        });
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
+        await setAlert(account, '本轮新增回复较多，已达到安全页数上限（60 页），请稍后手动更新或补读历史');
+        await record('inc_limit_reached', { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, rounds, read: batch.read, added: batch.added });
+        return { error: '别人回我本轮达到安全页数上限，已停止。' };
+      }
       const when = nextActiveAt(now() + rand(PACE.restMs));
       await updateCursor(account, (c) => {
-        if (!c.syncedId) return; // 读的过程中被清空了
-        c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt };
+        if ((c.syncedId || null) !== stopAt) return; // 读的过程中被补历史或清空改掉了
+        c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt, rounds, pages: (resume?.pages || 0) + pagesRead };
         c.nextIncAt = when;
       });
       await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
       return { message: '别人回我已读完一批，等待续读。', deferred: true };
     }
+    let nextSyncedId = stopAt;
     const next = await updateCursor(account, (c) => {
-      // 读的过程中被清空了（没有 syncedId）就不补：清空后要重新初始化才自动抓
-      if (topId && c.syncedId && idGt(topId, c.syncedId)) c.syncedId = topId;
+      if (!c.syncedId) c.syncedId = topId || EMPTY_SYNC_ID;
+      else if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
+      nextSyncedId = c.syncedId;
       delete c.incResume;
       delete c.serviceRetries;
+      delete c.incLimitReached;
       // 手动更新已经拿到最新数据，下一次自动更新顺延到下一个上午或晚间时段，避免当天再扫一遍。
       return completeIncRound(c, roundStartedAt);
+    });
+    await record('inc_round_end', {
+      account,
+      mode: taskManual ? 'inbound_manual' : 'inbound_auto',
+      run,
+      pages: (resume?.pages || 0) + pagesRead,
+      read: batch.read,
+      added: batch.added,
+      syncedId: nextSyncedId,
     });
     if ((await getSettings(account)).fetchEnabled) await armInc(account, next);
     return { ok: true };

@@ -580,3 +580,18 @@ test('抓取层：模板识别且自有请求集合有容量上限', async () =>
   assert.equal(isOwn(sentUrls[7]), true, '第 500 个起的最新请求应保留');
   assert.equal(isOwn(sentUrls.at(-1)), true, '最近发出的请求应保留');
 });
+
+test('模拟真人节律：增量页间停顿低于空闲回收线，可选出站同步间隔不少于 48 小时', async () => {
+  const { PACE, humanIncDelay, humanBackfillDelay, humanBatchPages, nextOutAutoSlot } = await import('../src/bg/runtime.js');
+  for (let i = 0; i < 60; i++) {
+    const incDelay = humanIncDelay();
+    assert.ok(incDelay >= 4_000 && incDelay < 29_000, `增量页间停顿 ${incDelay}ms 须低于 Chrome 空闲回收线`);
+    const backfillDelay = humanBackfillDelay();
+    assert.ok(backfillDelay >= 15_000 && backfillDelay < 110_000, `补历史停顿 ${backfillDelay}ms 应在预期区间内`);
+    const batch = humanBatchPages();
+    assert.ok(batch >= 8 && batch <= 12, `补历史每批页数 ${batch} 应在 8–12 页`);
+  }
+  const base = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
+  const nextOut = nextOutAutoSlot(base);
+  assert.ok(nextOut - base >= PACE.outAutoGapMs, '可选低频出站自动同步间隔至少 48 小时');
+});

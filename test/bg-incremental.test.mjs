@@ -13,8 +13,8 @@ await send({ type: 'startBackfill', account: 'me' });
 await until(() => job().pages === 1 && job().nextAt, '基线回填第 1 页');
 while (job().status === 'running') await fireJob();
 
-test('增量更新：1 小时补漏、完整晚间窗口排期与延迟回复捞回', { timeout: 20_000 }, async () => {
-  // 增量：间隔里来了 7 条，一轮读完并在接续点之后再向更早补 1 小时
+test('增量更新：重叠即停与完整晚间窗口排期', { timeout: 20_000 }, async () => {
+  // 增量：间隔里来了 7 条，翻到第 3 页重叠上次接续点即停（不再多补 1 小时）
   for (let i = 0; i < 7; i++) feed.unshift({ ...env.mention(0, '2', '50', '50'), id_str: String(2000 + i) });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   let before = server.calls;
@@ -24,7 +24,7 @@ test('增量更新：1 小时补漏、完整晚间窗口排期与延迟回复捞
   } finally {
     env.setRandom(null);
   }
-  assert.equal(server.calls - before, 4);
+  assert.equal(server.calls - before, 3);
   assert.equal(await count(), 15);
   assert.equal(store['cursor:me'].syncedId, '2006');
 
@@ -33,23 +33,24 @@ test('增量更新：1 小时补漏、完整晚间窗口排期与延迟回复捞
   assert.ok(gap >= 8 * 60 * 60_000 && gap <= 13.5 * 60 * 60_000 + 1_000);
   assert.equal(alarms['inc:me'].when, store['cursor:me'].nextIncAt);
 
-  // 闹钟到点就跑，不用等兜底闹钟；没有新内容时仍会做每日安全回看
+  // 闹钟到点就跑，不用等兜底闹钟；没有新内容时第 1 页重叠接续点即停
   store['cursor:me'].nextIncAt = 0;
   store['cursor:me'].lastAttemptAt = 0;
   before = server.calls;
   await fire('inc');
-  assert.equal(server.calls - before, 4);
+  assert.equal(server.calls - before, 1);
 
-  // X 晚放出来的回复即使落在已经越过的接续点之后，也要靠回看窗口捞回来
-  const late = { ...env.mention(0.02, '2', '50', '50'), id_str: '1999' };
-  feed.splice(9, 0, late);
+  // 发现与接续点重叠立即停止，不再继续往更旧翻页
+  const older = { ...env.mention(0.02, '2', '50', '50'), id_str: '1999' };
+  feed.splice(9, 0, older);
   store['cursor:me'].nextIncAt = 0;
   store['cursor:me'].lastAttemptAt = 0;
-  const countBeforeLate = await count();
+  const countBeforeOverlap = await count();
+  before = server.calls;
   await fire('inc');
-  assert.equal(await count(), countBeforeLate + 1);
-  assert.ok((await send({ type: 'exportAll', account: 'me' })).inbound.some((event) => event.id === '1999'));
-  feed.splice(feed.indexOf(late), 1);
+  assert.equal(server.calls - before, 1);
+  assert.equal(await count(), countBeforeOverlap, '接续点重叠后不再往更早翻页');
+  feed.splice(feed.indexOf(older), 1);
 });
 
 test('提及模板切换与 404 自动回退旧接口', async () => {
@@ -80,7 +81,7 @@ test('并发去重、429 退避、重复游标与提前空页异常边界', asyn
   store['cursor:me'].lastAttemptAt = 0;
   let before = server.calls;
   await Promise.all([fire('inc'), fire('inc')]);
-  assert.equal(server.calls - before, 4, '同时到的两个触发只跑一轮');
+  assert.equal(server.calls - before, 1, '同时到的两个触发只跑一轮');
 
   // 增量被限流：放弃本轮，不推进下一次补漏的锚点
   {
@@ -104,10 +105,11 @@ test('并发去重、429 退避、重复游标与提前空页异常边界', asyn
   // 入站重复游标是异常：保留原接续点，不能当成已接上
   {
     const savedCursor = structuredClone(store['cursor:me']);
-    const beforeSync = savedCursor.syncedId;
+    const beforeSync = feed[4].id_str;
     const beforeAnchor = savedCursor.lastIncrementalAt;
     try {
-      Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+      Object.assign(store['cursor:me'], { syncedId: beforeSync, nextIncAt: 0, lastAttemptAt: 0 });
+      delete store['cursor:me'].incResume;
       server.repeatInboundCursor = true;
       const result = await fire('inc');
       assert.match(result.error, /翻页异常/);
@@ -211,7 +213,7 @@ test('工作时段、前台可见性、自动更新开关与旧接续点穿透',
   await until(() => job().pages === 1, '关掉自动更新后仍能手动初始化');
   await send({ type: 'pauseJob', account: 'me' });
 
-  // 接续点比 24 小时回看边界更旧：不能只看回看边界就停，必须继续读到接续点
+  // 接续点尚未重叠时：必须继续读到与接续点重叠为止
   await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
   const staleFeed = feed.splice(0, feed.length,
     { ...env.mention(25 / 24, '2', '50', '50'), id_str: '6006' },
@@ -260,9 +262,79 @@ test('多段续读：单个事件最多 6 页，分段休息后接上并固定�
     store['cursor:me'].nextIncAt = 0; // 时间到了（lastAttemptAt 还是刚才：补读不受 10 分钟间隔限制）
     await fire('inc');
   }
-  assert.equal(server.calls - before, 47, '分多个短任务接上并继续回看 1 小时');
+  assert.equal(server.calls - before, 44, '分多个短任务在重叠接续点时立即停下');
   assert.deepEqual([store['cursor:me'].syncedId, store['cursor:me'].incResume], ['3129', undefined]);
-  assert.equal(store['cursor:me'].lastIncrementalAt, incrementStartedAt, '补漏锚点固定在这一轮的起点');
+  assert.equal(store['cursor:me'].lastIncrementalAt, incrementStartedAt, '本轮起点保持在开始时刻');
   assert.equal(await count(), beforeCount + 130, '一条不丢');
   feed.splice(0, 130);
+});
+
+test('免补历史直接增量与 60 页安全上限拦截', { timeout: 20_000 }, async () => {
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+  const savedCursor = structuredClone(store['cursor:me']);
+  const savedActivation = store.accounts.me.activation;
+  const savedFeed = [...feed];
+  try {
+    // 1. 从未补过历史（无 syncedId）也能直接建起点，且单轮最多读 2 页
+    delete store['cursor:me'];
+    delete alarms['inc:me'];
+    store.accounts.me.activation = Date.now() - 2 * 60 * 60_000; // 两小时前启用
+    feed.splice(0, feed.length,
+      { ...env.mention(0.01, '2', '50', '50'), id_str: '7008' },
+      { ...env.mention(0.02, '2', '50', '50'), id_str: '7007' },
+      { ...env.mention(0.03, '2', '50', '50'), id_str: '7006' },
+      { ...env.mention(0.04, '2', '50', '50'), id_str: '7005' },
+      { ...env.mention(0.05, '2', '50', '50'), id_str: '7004' },
+      { ...env.mention(0.06, '2', '50', '50'), id_str: '7003' },
+      { ...env.mention(0.5, '2', '50', '50'), id_str: '7002' },
+    );
+    await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+    assert.ok(alarms['inc:me'], '免补历史账号开启自动更新后自动安排增量闹钟');
+    const beforeInitFree = server.calls;
+    await fire('inc');
+    assert.equal(server.calls - beforeInitFree, 2, '免补历史首轮最多读 2 页建立接续点');
+    assert.equal(store['cursor:me'].syncedId, '7008');
+
+    // 2. 单轮超过 10 段（60 页）仍未重叠接续点：触及安全上限停止，等待人工介入或补历史
+    feed.splice(0, feed.length, ...Array.from({ length: 200 }, (_, i) => (
+      { ...env.mention(0, '2', '50', '50'), id_str: String(8199 - i) }
+    )));
+    Object.assign(store['cursor:me'], { syncedId: '7008', nextIncAt: 0, lastAttemptAt: 0 });
+    delete store['cursor:me'].incResume;
+    delete store['cursor:me'].incLimitReached;
+    const beforeCap = server.calls;
+    let lastResult = await fire('inc');
+    while (store['cursor:me'].incResume) {
+      env.advanceNow(5 * 60_000);
+      store['cursor:me'].nextIncAt = 0;
+      lastResult = await fire('inc');
+    }
+    assert.equal(server.calls - beforeCap, 60, '10 段累计读取 60 页后触及安全上限');
+    assert.match(lastResult.error, /安全页数上限/);
+    assert.equal(store['cursor:me'].incLimitReached, true);
+    assert.equal(store['cursor:me'].incResume, undefined);
+    assert.equal(alarms['inc:me'], undefined, '触及上限后暂停自动定时');
+    assert.equal(store['cursor:me'].syncedId, '7008', '未接上时接续点不动');
+    assert.match(store['alert:me']?.message, /60 页/);
+
+    // 触发安全上限后自动 tick 不再发请求
+    const callsDuringPaused = server.calls;
+    store['cursor:me'].nextIncAt = 0;
+    await listeners.alarm({ name: 'tick' });
+    assert.equal(server.calls, callsDuringPaused, '触及上限后自动读取保持暂停');
+
+    // 补一次历史成功后解除锁定并清除标记
+    feed.splice(0, feed.length, { ...env.mention(0, '2', '50', '50'), id_str: '8200' });
+    await send({ type: 'startBackfill', account: 'me' });
+    await until(() => job()?.status === 'done' || job()?.nextAt, '补历史完成或进入下一页');
+    while (job()?.status === 'running') await fireJob();
+    assert.equal(store['cursor:me'].incLimitReached, undefined, '补历史完成后解除安全上限锁定');
+  } finally {
+    feed.splice(0, feed.length, ...savedFeed);
+    store['cursor:me'] = savedCursor;
+    store.accounts.me.activation = savedActivation;
+    delete store['alert:me'];
+    delete alarms['inc:me'];
+    delete store['job:me'];
+  }
 });

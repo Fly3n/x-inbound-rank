@@ -6,7 +6,8 @@ import { queueBridgePush } from '../bridge.js';
 import { idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, JOB_ALARM, alarmFor,
-  enabledAccount, now, rand, inActiveHours, nextActiveAt, serviceWait,
+  enabledAccount, now, rand, humanBackfillDelay, humanBatchPages,
+  inActiveHours, nextActiveAt, serviceWait,
   isBusy, tryAcquireBusy, releaseBusy, serial, updateCursor,
   refreshSnapshot, flushSnapshot, setAlert, completeBackfillRound, armInc,
 } from './runtime.js';
@@ -40,6 +41,7 @@ export async function startBackfill(account) {
     pages: 0,
     added: 0,
     batchPages: 0,
+    batchLimit: humanBatchPages(),
     oldestTs: null,
     startedAt: now(),
     backoffMs: PACE.backoffStartMs,
@@ -62,11 +64,13 @@ async function finishJob(account, job, { reachedEnd }) {
   await saveJob(account, job);
   const next = await updateCursor(account, (cur) => {
     cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
-    // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读到它之后，再回看一段
+    delete cur.incLimitReached;
+    // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读到它之后
     if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
     else if (reachedEnd && !job.oldestTs && !cur.syncedId) cur.syncedId = EMPTY_SYNC_ID;
     return completeBackfillRound(cur, now()); // 回填期间新来的回复留给下一次增量
   });
+  await record('backfill_finished', { account, rangeDays: job.rangeDays, pages: job.pages, added: job.added, reachedEnd, oldestTs: job.oldestTs });
   if ((await getSettings(account)).fetchEnabled) await armInc(account, next);
   await refreshSnapshot(account);
   queueBridgePush();
@@ -110,7 +114,7 @@ export async function stepBackfill(account) {
       if (job.restarted > 3) {
         job.status = 'error';
         job.message = '读取方式反复失效，已停止';
-      } else await scheduleJob(account, job, rand(PACE.pageGapMs));
+      } else await scheduleJob(account, job, humanBackfillDelay());
     } else if (res.kind === 'no_tab') {
       job.status = 'waiting_tab';
       job.message = '打开此账号的 X 页面后自动继续';
@@ -175,12 +179,13 @@ export async function stepBackfill(account) {
         job.status = 'paused';
         job.auto = false;
         job.message = `已连续翻 ${job.pages} 页，为安全起见先停下。确认账号没有异常后可点「继续」`;
-      } else if (job.batchPages >= PACE.batchPages) {
+      } else if (job.batchPages >= (job.batchLimit || 10)) {
         job.batchPages = 0;
+        job.batchLimit = humanBatchPages();
         queueBridgePush(); // 每批结束把本机数据推给开发桥，长回填期间也能看到进度
         await scheduleJob(account, job, rand(PACE.batchRestMs));
       } else {
-        await scheduleJob(account, job, rand(PACE.pageGapMs));
+        await scheduleJob(account, job, humanBackfillDelay());
       }
     }
     await saveJob(account, job);

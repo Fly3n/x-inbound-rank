@@ -19,7 +19,8 @@ test.after(() => env.restore());
 test('账号升级迁移、网页提及脱敏证据与入站回填完整流程', { timeout: 20_000 }, async () => {
   await listeners.installed();
   assert.deepEqual(await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
-  assert.equal(server.calls, 0, '识别账号不发请求；没初始化过也不自动抓');
+  assert.equal(server.calls, 0, '识别账号时不立刻向 X 发请求');
+  assert.ok(env.alarms['inc:me'], '免补历史也能直接安排日常增量闹钟');
   assert.equal(store.accounts.me.enabled, true);
   assert.equal(store.accounts.seen.enabled, false);
 
