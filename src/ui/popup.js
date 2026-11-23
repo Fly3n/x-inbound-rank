@@ -306,8 +306,19 @@ async function draw() {
       : lbIn?.oldestTs ? (lbIn.reachedEnd ? `X 列表到底，最早只到 ${fmtDay(lbIn.oldestTs)}` : `上次只读到 ${fmtDay(lbIn.oldestTs)}`)
         : lbIn?.reachedEnd ? 'X 列表到底，没有读到记录' : '';
   $('resume').disabled = !isSession;
+  if (!$('jobControls').hidden || !$('outNotice').hidden) $('backfillCard').open = true;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
+  const fmtCompactTime = (ts) => {
+    if (!ts) return '未读取';
+    const d = new Date(ts);
+    const nowD = new Date();
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const sameDay = d.getFullYear() === nowD.getFullYear() && d.getMonth() === nowD.getMonth() && d.getDate() === nowD.getDate();
+    return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  };
+  $('inLastAt').textContent = fmtCompactTime(inboundAt);
+  $('outLastAt').textContent = fmtCompactTime(outboundAt);
   $('inReadSummary').textContent = `最近读取：${readSummary(inboundAt, s.cursor.inLastReadCounts, true)}`;
   $('outReadSummary').textContent = `最近读取：${readSummary(outboundAt, out?.lastReadCounts, true)}`;
   renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts);

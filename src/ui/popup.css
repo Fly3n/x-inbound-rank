@@ -55,7 +55,11 @@ button.danger { color: var(--err-fg); }
 
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .inline-opt { display: inline-flex; align-items: center; gap: 6px; }
-.inline-opt .line { margin: 0; }
+.inline-opt .line { margin: 0; white-space: nowrap; }
+.sync-row { flex-wrap: nowrap; }
+.sync-opt { min-width: 0; flex: 1 1 auto; }
+.sync-row > button { flex-shrink: 0; }
+.read-at { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 #updateStatus:empty, #updateOutStatus:empty { display: none; }
 .sync-row + .sync-row, .tip + .sync-row, #updateStatus + .sync-row { margin-top: 6px; }
 .scope { color: var(--dim); font-size: 12px; }
