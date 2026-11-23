@@ -295,7 +295,7 @@ async function draw() {
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
-  $('jobControls').hidden = $('jobStatus').hidden && $('pause').hidden && $('resume').hidden;
+  $('jobControls').hidden = $('jobStatus').hidden;
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
   $('start').textContent = starting.has('start') ? '启动中' : inPhase || '补历史';
@@ -307,10 +307,8 @@ async function draw() {
   $('resume').disabled = !isSession;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
-  renderFields('updateSummary', [
-    ['别人回我：', readSummary(inboundAt, s.cursor.inLastReadCounts, true)],
-    ['我回别人：', readSummary(outboundAt, out?.lastReadCounts, true)],
-  ]);
+  $('inReadSummary').textContent = `最近读取：${readSummary(inboundAt, s.cursor.inLastReadCounts, true)}`;
+  $('outReadSummary').textContent = `最近读取：${readSummary(outboundAt, out?.lastReadCounts, true)}`;
   renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts);
   renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）

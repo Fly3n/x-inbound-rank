@@ -54,6 +54,8 @@ button.primary:not(:disabled) { color: #fff; background: var(--accent); border-c
 button.danger { color: var(--err-fg); }
 
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.inline-opt { display: inline-flex; align-items: center; gap: 6px; }
+.inline-opt .line { margin: 0; }
 .line { display: block; margin: 6px 0; }
 .hint { color: var(--dim); font-size: 12px; }
 .risk { color: var(--dim); font-size: 11px; margin-top: 10px; }

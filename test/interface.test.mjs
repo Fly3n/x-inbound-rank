@@ -10,6 +10,11 @@ test('弹窗不再提供固定入口和前端诊断面板且设置页收敛高�
   assert.doesNotMatch(html, /id="pin"|固定为独立窗口/);
   assert.doesNotMatch(html, /id="diagnostics"|diagnoseMentions/);
   assert.match(html, /id="advanced"/);
+  assert.match(html, /id="inReadSummary"/);
+  assert.match(html, /id="outReadSummary"/);
+  assert.doesNotMatch(html, /id="updateSummary"/);
+  assert.ok(html.indexOf('id="start"') < html.indexOf('id="advanced"'), '补历史按钮应在主卡片中、位于高级折叠区之前');
+  assert.ok(html.indexOf('id="outSync"') < html.indexOf('id="advanced"'), '我回别人补历史按钮应在主卡片中、位于高级折叠区之前');
   assert.doesNotMatch(html, /<summary>数据怎么读取<\/summary>|<summary>统计口径与读取频率<\/summary>|<summary>本机存储（两份数据合计）<\/summary>/);
   assert.doesNotMatch(popup, /pinned|openPinned/);
   assert.doesNotMatch(popup, /diagnoseMentions|getDiagnostics/);

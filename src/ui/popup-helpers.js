@@ -36,9 +36,8 @@ export function jobText(job, now = Date.now()) {
 
 export function readSummary(at, counts, exact = false) {
   if (!at) return '暂无读取记录';
-  const existing = counts ? Math.max(0, (counts.read || 0) - (counts.added || 0)) : 0;
   return (exact ? fmtExactTime(at) : fmtTime(at)) +
-    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条 · 已有 ${existing} 条` : ' · 暂无条数');
+    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
 }
 
 // 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1

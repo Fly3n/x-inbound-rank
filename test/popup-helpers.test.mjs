@@ -5,7 +5,7 @@ import {
   buildCsv, buildBoardExportRows, buildAllExportRows,
 } from '../src/ui/popup-helpers.js';
 
-test('jobText 与 readSummary：展示进行中、等待、完成和零新增已有条数', () => {
+test('jobText 与 readSummary：展示进行中、等待、完成与精确扫描/新增条数', () => {
   const now = new Date(2026, 10, 21, 10, 0, 0).getTime();
   assert.match(jobText({ status: 'running', rangeDays: 7, pages: 3, added: 15, oldestTs: now - 86_400_000, nextAt: now + 60_000 }, now), /进行中（范围 7 天）：已读 3 页、入库 15 条.*下一次请求约/);
   assert.match(jobText({ status: 'waiting_tab', message: '打开页面', pages: 1, added: 0 }), /等待中：打开页面/);
@@ -16,7 +16,7 @@ test('jobText 与 readSummary：展示进行中、等待、完成和零新增已
   assert.match(jobText({ status: 'done', reachedEnd: false, oldestTs: now, rangeDays: 7, pages: 4, added: 20 }), /已完成：回溯到/);
 
   assert.equal(readSummary(null, null), '暂无读取记录');
-  assert.match(readSummary(now, { read: 10, added: 0 }, true), /11\/21 10:00:00 · 扫描 10 条 · 新增 0 条 · 已有 10 条/);
+  assert.equal(readSummary(now, { read: 10, added: 0 }, true), '11/21 10:00:00 · 扫描 10 条 · 新增 0 条');
   assert.match(readSummary(now, null), /11\/21 10:00 · 暂无条数/);
 });
 

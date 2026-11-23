@@ -69,22 +69,66 @@
     <!-- 设置页：3 张核心功能卡 + 底部统一高级与说明折叠区 -->
     <section id="view-settings" hidden>
       <section class="card">
-        <h2>数据同步 <button class="q" data-tip="tip-data" aria-label="数据同步说明">?</button></h2>
-        <div class="tip" id="tip-data" hidden><p>开启自动更新后，别人回我无需先补历史即可按天积累，每天上午（08:00–11:30）和晚间（18:00–22:30）在当前 X 页面可见且最近 5 分钟内有真实浏览交互时各随机执行一次，发现与上次位置重叠即停（单轮安全上限 60 页）。我回别人默认通过浏览器发帖旁听实时记录，如需手机端回复兜底可勾选每 2 天低频自动同步。「立即更新」不要求先补历史，有 10 分钟冷却，成功后下一次自动更新放到下一时段。</p></div>
+        <h2>数据同步</h2>
 
         <div class="row between">
-          <label class="line"><input type="checkbox" id="fetchEnabled"> 每天两次自动更新「别人回我」（上午/晚间）</label>
+          <span class="inline-opt">
+            <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新</label>
+            <button class="q" data-tip="tip-in-auto" aria-label="自动更新说明">?</button>
+          </span>
           <button id="updateNow" aria-describedby="updateStatus">立即更新</button>
         </div>
+        <div class="tip" id="tip-in-auto" hidden>
+          <p>别人回我：开启后无需先补历史即可按天积累，每天上午（08:00–11:30）和晚间（18:00–22:30）在当前 X 页面可见且近 5 分钟有真实浏览交互时各随机执行一次，发现与上次位置重叠即停（单轮安全上限 60 页）。「立即更新」有 10 分钟冷却。</p>
+          <p id="inReadSummary"></p>
+        </div>
         <p class="hint" id="updateStatus" role="status"></p>
-        <label class="line"><input type="checkbox" id="outAutoSync"> 我回别人每 2 天低频自动同步（手机端回复兜底；电脑端发回复已自动记录）</label>
-        <dl class="data-status" id="updateSummary" aria-label="上次读取摘要"></dl>
+
+        <div class="row between">
+          <span class="inline-opt">
+            <label class="line"><input type="checkbox" id="outAutoSync"> 我回别人低频同步</label>
+            <button class="q" data-tip="tip-out-auto" aria-label="我回别人低频同步说明">?</button>
+          </span>
+        </div>
+        <div class="tip" id="tip-out-auto" hidden>
+          <p>电脑端发送回复已通过页面旁听自动实时记录（零主动请求）；勾选此项仅用于手机端回复兜底（在自动更新开启时每 2 天抽一次同步）。</p>
+          <p id="outReadSummary"></p>
+        </div>
+
+        <div class="sub-divider"></div>
+
+        <div class="row between">
+          <span class="inline-opt"><b>补历史</b><button class="q" data-tip="tip-backfill" aria-label="补历史说明">?</button></span>
+          <select id="initRange" aria-label="补历史范围">
+            <option value="7">最近 7 天</option>
+            <option value="15">最近半个月</option>
+          </select>
+        </div>
+        <div class="tip" id="tip-backfill" hidden><p>按需一次性把过去 7 天或半个月的历史补齐；不补也能靠自动更新和发帖旁听慢慢攒。仅在 X 页面前台可见时继续，切走自动暂停。</p></div>
+
+        <div class="src">
+          <div class="row between">
+            <span class="inline-opt"><span>别人回我</span><button class="q" data-tip="tip-in" aria-label="别人回我说明">?</button></span>
+            <span class="row">
+              <span id="inReason" class="init-reason" role="status"></span>
+              <button aria-describedby="inReason" id="start" class="primary">补历史</button>
+              <button id="pause" hidden>暂停</button>
+              <button id="resume" hidden>继续</button>
+            </span>
+          </div>
+          <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
+        </div>
+
+        <div class="src">
+          <div class="row between">
+            <span class="inline-opt"><span>我回别人</span><button class="q" data-tip="tip-out" aria-label="我回别人说明">?</button></span>
+            <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">补历史</button></span>
+          </div>
+          <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回 N」。默认通过浏览器发帖旁听实时记录（零主动请求），也可按需手动补历史。</p></div>
+        </div>
+
         <div id="jobControls" class="sync-notice" hidden>
           <p id="jobStatus" hidden></p>
-          <div class="row">
-            <button id="pause" hidden>暂停</button>
-            <button id="resume" hidden>继续</button>
-          </div>
         </div>
         <div id="outNotice" class="sync-notice" hidden>
           <p class="hint" id="outIssue" role="status" hidden></p>
@@ -131,34 +175,13 @@
         <summary>高级设置与说明</summary>
 
         <details class="sub-fold">
-          <summary>补读历史与数据详情</summary>
-          <div class="row field">
-            <span>补历史范围</span>
-            <select id="initRange">
-              <option value="7">最近 7 天</option>
-              <option value="15">最近半个月</option>
-            </select>
-          </div>
-          <p class="hint">仅按需使用：开启自动更新即可直接攒新数据；点「补历史」才会把过去 7 天或半个月补齐。仅在页面前台显示时继续，切走自动暂停。</p>
-
+          <summary>数据详情</summary>
           <div class="src">
-            <div class="row between">
-              <span><b>别人回我</b> <button class="q" data-tip="tip-in" aria-label="别人回我说明">?</button></span>
-              <span class="row">
-                <span id="inReason" class="init-reason" role="status"></span>
-                <button aria-describedby="inReason" id="start" class="primary">补历史</button>
-              </span>
-            </div>
-            <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
+            <div><b>别人回我</b></div>
             <dl class="data-status" id="coverage"></dl>
           </div>
-
           <div class="src">
-            <div class="row between">
-              <span><b>我回别人</b> <button class="q" data-tip="tip-out" aria-label="我回别人说明">?</button></span>
-              <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">补历史</button></span>
-            </div>
-            <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回 N」。默认仅通过浏览器发帖旁听实时记录（零主动请求），也可手动补历史。</p></div>
+            <div><b>我回别人</b></div>
             <dl class="data-status" id="outStatus"></dl>
           </div>
         </details>
