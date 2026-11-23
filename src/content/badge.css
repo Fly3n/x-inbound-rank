@@ -159,6 +159,37 @@
   cursor: default;
 }
 
+.xir-sched-ref {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--xir-s-bd);
+  border-radius: 8px;
+  background: var(--xir-s-slot-bg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.xir-sched-ref-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xir-sched-ref-label {
+  color: var(--xir-s-muted);
+  white-space: nowrap;
+}
+
+.xir-sched-ref-val {
+  color: var(--xir-s-fg);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .xir-sched-nav {
   display: flex;
   align-items: center;

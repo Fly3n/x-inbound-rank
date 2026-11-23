@@ -576,6 +576,25 @@ test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–4
     nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45), random: () => 0,
   });
   assert.ok(boundaryPicked >= at(13, 15), '浮动后不能早于最近主帖 30 分钟');
+
+  // 前后参考时间差计算：有上一条和下一条都返回；后面无排期时 next 为 null；刚发主帖比更早排期近时优先显示刚发主帖
+  const { neighborSummary, formatGap } = globalThis.XIRSchedule;
+  const both = neighborSummary(at(22, 8), {
+    scheduled: [{ id: '1', executeAt: at(21, 32) }, { id: '2', executeAt: at(22, 45) }],
+  });
+  assert.equal(both.prev.kind, 'scheduled');
+  assert.equal(formatGap(both.prev.gapMs), '36 分钟');
+  assert.equal(both.next.kind, 'scheduled');
+  assert.equal(formatGap(both.next.gapMs), '37 分钟');
+
+  const onlyPrevPost = neighborSummary(at(22, 8), {
+    scheduled: [{ id: '1', executeAt: at(20, 0) }],
+    lastPostAt: at(21, 30),
+  });
+  assert.equal(onlyPrevPost.prev.kind, 'post');
+  assert.equal(formatGap(onlyPrevPost.prev.gapMs), '38 分钟');
+  assert.equal(onlyPrevPost.next, null);
+  assert.equal(formatGap(95 * 60_000), '1 小时 35 分钟');
 });
 
 test('抓取层：模板识别且自有请求集合有容量上限', async () => {

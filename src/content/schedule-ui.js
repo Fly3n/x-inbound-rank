@@ -277,6 +277,33 @@
     head.append(title, stat, refresh);
     panel.appendChild(head);
 
+    // 选定时间后，逐行展示与上一条（已有排期/刚发主帖）及下一条（有则显示、无则省略）的时间差
+    if (lastPicked?.ok) {
+      const { prev, next } = XIRSchedule.neighborSummary(lastPicked.filledTs, {
+        scheduled: state.items,
+        lastPostAt: state.lastPostAt,
+      });
+      if (prev || next) {
+        const refBox = document.createElement('div');
+        refBox.className = 'xir-sched-ref';
+        const appendRefLine = (label, info) => {
+          const line = document.createElement('div');
+          line.className = 'xir-sched-ref-line';
+          const tag = document.createElement('span');
+          tag.className = 'xir-sched-ref-label';
+          tag.textContent = label;
+          const val = document.createElement('span');
+          val.className = 'xir-sched-ref-val';
+          val.textContent = `${XIRSchedule.formatRefTime(info.ts, lastPicked.filledTs)} · 隔 ${XIRSchedule.formatGap(info.gapMs)}`;
+          line.append(tag, val);
+          refBox.appendChild(line);
+        };
+        if (prev) appendRefLine(prev.kind === 'post' ? '刚发主帖' : '上一条', prev);
+        if (next) appendRefLine('下一条', next);
+        panel.appendChild(refBox);
+      }
+    }
+
     // 快捷上下空档切换：无上一档/下一档时自动置灰
     const freeSlots = XIRSchedule.availableSlots(plan);
     const pickedIdx = lastPicked ? freeSlots.findIndex((s) => s.ts === lastPicked.slotTs) : -1;

@@ -205,6 +205,49 @@ const XIRSchedule = (() => {
     return Math.max(slotTs, fallback);
   }
 
+  /** 格式化时间差（精确到分钟），供选定档期后展示与前后排期间隔。 */
+  function formatGap(diffMs) {
+    const mins = Math.max(0, Math.round(Math.abs(diffMs) / MIN_MS));
+    if (mins < 60) return `${mins} 分钟`;
+    const hours = Math.floor(mins / 60);
+    const rem = mins % 60;
+    if (hours < 24) return rem ? `${hours} 小时 ${rem} 分钟` : `${hours} 小时`;
+    const days = Math.floor(hours / 24);
+    const remH = hours % 24;
+    return remH ? `${days} 天 ${remH} 小时` : `${days} 天`;
+  }
+
+  /** 相对于 targetTs 格式化参考时间：同一天只显示 HH:MM，跨天带 M/D HH:MM。 */
+  function formatRefTime(ts, targetTs) {
+    const t = formatTime(ts);
+    if (startOfDay(ts) === startOfDay(targetTs)) return t;
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${t}`;
+  }
+
+  /**
+   * 计算目标时间 targetTs 的前一条参考（已有排期或 24 小时内刚发主帖）与后一条已有排期。
+   * @returns {{ prev: { ts, gapMs, kind: 'scheduled'|'post' }|null, next: { ts, gapMs, kind: 'scheduled' }|null }}
+   */
+  function neighborSummary(targetTs, { scheduled = [], lastPostAt = 0 } = {}) {
+    let prev = null;
+    let next = null;
+    for (const item of scheduled) {
+      if (!item || !Number.isFinite(item.executeAt)) continue;
+      if (item.executeAt < targetTs && (!prev || item.executeAt > prev.ts)) {
+        prev = { ts: item.executeAt, gapMs: targetTs - item.executeAt, kind: 'scheduled' };
+      } else if (item.executeAt > targetTs && (!next || item.executeAt < next.ts)) {
+        next = { ts: item.executeAt, gapMs: item.executeAt - targetTs, kind: 'scheduled' };
+      }
+    }
+    if (lastPostAt > 0 && lastPostAt < targetTs && targetTs - lastPostAt <= 24 * 3_600_000) {
+      if (!prev || lastPostAt > prev.ts) {
+        prev = { ts: lastPostAt, gapMs: targetTs - lastPostAt, kind: 'post' };
+      }
+    }
+    return { prev, next };
+  }
+
   return {
     STEP_MIN,
     START_MIN,
@@ -217,12 +260,15 @@ const XIRSchedule = (() => {
     POST_BUFFER_MS,
     formatSlotLabel,
     formatTime,
+    formatGap,
+    formatRefTime,
     formatDayTitle,
     conflictsFor,
     earliestAllowedTs,
     buildDaySlots,
     buildSchedulePlan,
     availableSlots,
+    neighborSummary,
     pickJitteredTime,
   };
 })();
