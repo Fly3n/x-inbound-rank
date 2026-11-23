@@ -145,7 +145,7 @@ Chrome 会随时回收扩展的后台 Service Worker。插件不靠内存里的�
 
 ## 代码结构
 
-| 文件 | 职责 |
+| 文件 / 目录 | 职责 |
 |---|---|
 | `src/x/fetcher.js` | 抓取层：接口路径、参数和请求头。读提及、我的回复列表和已排期列表，返回原始 JSON |
 | `src/x/parser.js` | 解析层：提及和我的回复列表 → 统计事件与翻页游标；结构不符抛 `ParseError` |
@@ -155,11 +155,11 @@ Chrome 会随时回收扩展的后台 Service Worker。插件不靠内存里的�
 | `src/content/schedule.js` | 发帖排期的纯逻辑：半小时档位、±15 分钟冲突、随机浮动 |
 | `src/content/schedule-ui.js` | 在 X 原生排期弹窗里画快捷档期并填入原生下拉框 |
 | `src/content/content.js` | 账号识别、代后台发请求、注入名次/关系/M 标签。页面选择器集中在顶部 `SEL` |
-| `src/background.js` | 调度：初始化、自动更新、限流退避、账号隔离、消息处理。节奏参数集中在顶部 `PACE` |
+| `src/background.js` + `src/bg/` | 后台 Service Worker 入口与领域模块：回填、增量、出站、排期、退避、账号隔离、消息路由 |
 | `src/rank.js` | 纯函数：统计口径、榜单、标签快照、颜色分档和规则合法化 |
 | `src/db.js` | IndexedDB 和 `chrome.storage.local` 键名 |
 | `src/diagnostics.js` | 诊断日志写入、读取和 7 天过期清理 |
-| `src/ui/` | 弹窗界面 |
+| `src/ui/` | 弹窗界面与纯逻辑辅助（`popup.js` / `popup-helpers.js`） |
 
 隔离原则：只有 `fetcher.js` 和 `parser.js` 知道主动请求的 X 接口字段，只有 `content.js` 和 `schedule-ui.js` 知道 X 页面选择器。`rel.js` 是明确例外，它只解析旁听到的页面返回，不发请求、不落候选数据。其他文件不直接依赖 X 的 DOM 或接口结构。
 
@@ -169,18 +169,19 @@ Chrome 会随时回收扩展的后台 Service Worker。插件不靠内存里的�
 
 ```bash
 npm install
-npm test
+npm run check
 ```
 
-- `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色、解析边界、账号只有数字 ID 的情况。
-- `test/flow.test.mjs`：用假 chrome API 和假接口跑后台全流程，包括初始化、429 退避、续跑、去重、增量、开关、我回别人覆盖状态、诊断和清空。
+- `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色、解析边界、抓取模板与集合上限、账号只有数字 ID 的情况。
+- `test/bg-backfill.test.mjs` / `bg-incremental.test.mjs` / `bg-outbound.test.mjs` / `bg-manual-and-maintenance.test.mjs` / `bg-accounts-and-tabs.test.mjs`：基于复用测试环境 `test/helpers/bg-env.mjs`，按主题独立覆盖回填、增量补漏、出站同步、立即更新、诊断、清理、多账号隔离和旧页刷新全流程。
 - `test/db.test.mjs`：重复写入的合并规则，空值不覆盖已知的根帖归属、正文和头像。
 - `test/session.test.mjs`：账号会话切换和页面缓存隔离。
 - `test/interface.test.mjs`：弹窗入口和标签悬浮信息的静态约束。
+- `test/popup-helpers.test.mjs` / `test/popup-preview.test.mjs`：弹窗纯函数与本地 mock 预览服务。
 - `test/snapshot.test.mjs`：本机快照的结构、文件名和摘要。
 - `test/bridge.test.mjs`：本机桥的健康检查、快照落盘和来源校验。
 
-假数据按预期接口形态写成，能证明逻辑自洽，不能证明 X 当前真实返回一定长这样。弹窗和排期界面没有浏览器级自动测试，改完要在 Chrome 里实际看一眼。
+假数据按预期接口形态写成，能证明逻辑自洽，不能证明 X 当前真实返回一定长这样。日常也可用 `npm run popup:preview` 在浏览器里直接预览弹窗改动，改完后在 Chrome 里实际确认一次。
 
 ## 实测与现状
 

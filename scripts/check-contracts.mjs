@@ -389,11 +389,30 @@ function checkBgModules() {
   for (const node of graph.keys()) visit(node, []);
 }
 
+function checkDocs() {
+  const agents = readText('AGENTS.md');
+  const bytes = Buffer.byteLength(agents, 'utf8');
+  assert.ok(bytes <= 12_288, `AGENTS.md 体积超出 12 KB 上限（当前 ${bytes} 字节），请将细节迁入 docs/`);
+
+  const docRefs = new Set();
+  for (const m of agents.matchAll(/\[[^\]]+\]\(([^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
+    if (!/^https?:\/\//.test(m[1])) docRefs.add(m[1]);
+  }
+  for (const m of agents.matchAll(/`(docs\/[^`\s]+\.md)(?:#[^`]*)?`/g)) {
+    docRefs.add(m[1]);
+  }
+  assert.ok(docRefs.size > 0, 'AGENTS.md 应引用 docs/ 或根文档导航链接');
+  for (const ref of docRefs) {
+    assert.ok(existsSync(join(ROOT, ref)), `AGENTS.md 引用的文档不存在: ${ref}`);
+  }
+}
+
 export async function runContracts() {
   const checkedFiles = checkSyntax();
   checkManifestAndVersions();
   checkModuleIsolation();
   checkBgModules();
+  checkDocs();
   await checkMessageContracts();
   checkStorageKeyContracts();
   checkTplAlignment();
