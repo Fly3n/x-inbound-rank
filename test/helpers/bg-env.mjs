@@ -37,6 +37,7 @@ export async function createBgEnv({
   const staleTabs = new Set();
   const loadingTabs = new Set();
   const hiddenTabs = new Set();
+  const idleTabs = new Set();
   const reloadCalls = [];
   let activeTab = initialActiveTab;
   const listeners = {};
@@ -191,7 +192,7 @@ export async function createBgEnv({
       onUpdated: hook('updated'),
       sendMessage: async (id, msg) => {
         const session = sessions.get(id);
-        if (msg.type === 'xir:ping') return session ? { ok: true, version: staleTabs.has(id) ? 'old-version' : version, visible: !hiddenTabs.has(id), ...session } : null;
+        if (msg.type === 'xir:ping') return session ? { ok: true, version: staleTabs.has(id) ? 'old-version' : version, visible: !hiddenTabs.has(id), lastActiveAt: idleTabs.has(id) ? activeNow - 10 * 60_000 : activeNow, ...session } : null;
         if (session?.userId !== msg.userId) throw new Error('向错误的标签页发出了请求');
         if (msg.kind === 'out') return { ...respondOut(msg), userId: session.userId };
         server.mentionTpl = msg.tpl;
@@ -241,6 +242,7 @@ export async function createBgEnv({
     staleTabs,
     loadingTabs,
     hiddenTabs,
+    idleTabs,
     reloadCalls,
     listeners,
     feed,

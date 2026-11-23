@@ -91,6 +91,14 @@ export const handlers = {
     return {};
   },
   'xir:outbound:tap': handleOutboundTap,
+  async 'xir:active'(msg, sender) {
+    const account = await senderAccount(msg, sender);
+    if (!account) return {};
+    await maybeIncremental(account);
+    const settings = await getSettings(account);
+    if (settings.fetchEnabled && settings.outAutoSync) await syncOut(account);
+    return { ok: true };
+  },
   'xir:scheduled:tap': handleScheduledTap,
   'xir:postEvent': handlePostEvent,
   'xir:scheduled:sync': handleScheduledSync,

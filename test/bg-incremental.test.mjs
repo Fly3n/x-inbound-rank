@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv();
-const { store, server, alarms, listeners, feed, hiddenTabs, send, pageSend, fire, fireJob, job, until, count } = env;
+const { store, server, alarms, listeners, feed, hiddenTabs, idleTabs, send, pageSend, fire, fireJob, job, until, count } = env;
 
 test.after(() => env.restore());
 
@@ -336,5 +336,41 @@ test('免补历史直接增量与 60 页安全上限拦截', { timeout: 20_000 }
     delete store['alert:me'];
     delete alarms['inc:me'];
     delete store['job:me'];
+  }
+});
+
+test('近期真实交互门控：亮屏离座不自动抓，手动更新不受限，回来交互顺带唤醒', { timeout: 20_000 }, async () => {
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+  const savedCursor = structuredClone(store['cursor:me']);
+  try {
+    // 1. 两个前台标签页虽 visible 但均已空闲超过 5 分钟：自动 tick 和闹钟都不发请求
+    idleTabs.add(1);
+    idleTabs.add(4);
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0, lastManualAt: 0 });
+    delete store['cursor:me'].incResume;
+    const beforeIdle = server.calls;
+    await listeners.alarm({ name: 'tick' });
+    await fire('inc');
+    assert.equal(server.calls, beforeIdle, '亮屏但超过 5 分钟无交互时不自动发请求');
+
+    // 2. 手动「立即更新」不受 5 分钟交互门槛限制（只要页面前台可见即可）
+    const manualRes = await send({ type: 'updateNowWithReceipt', account: 'me' });
+    assert.equal(manualRes.ok, true, '手动立即更新不受空闲交互门控拦截');
+    assert.ok(server.calls > beforeIdle);
+
+    // 3. 回到 X 页面产生真实交互：窗口内已有到期任务时经 xir:active 顺带完成，完成后再发不重复抓
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+    const beforeWake = server.calls;
+    idleTabs.delete(1);
+    await pageSend({ type: 'xir:active' }, 1);
+    assert.ok(server.calls > beforeWake, '恢复交互后顺带唤醒并完成到期增量');
+    const afterWake = server.calls;
+    await pageSend({ type: 'xir:active' }, 1);
+    assert.equal(server.calls, afterWake, '本轮已推至下一时段后，后续交互唤醒不重复发请求');
+  } finally {
+    idleTabs.delete(1);
+    idleTabs.delete(4);
+    store['cursor:me'] = savedCursor;
+    delete alarms['inc:me'];
   }
 });

@@ -4,7 +4,7 @@ import { readDiagnostics } from '../src/diagnostics.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv();
-const { store, server, alarms, listeners, outFeed, mine, send, pageSend, fire, fireJob, job, until, boardRows, setSettings, setWindow } = env;
+const { store, server, alarms, listeners, idleTabs, outFeed, mine, send, pageSend, fire, fireJob, job, until, boardRows, setSettings, setWindow } = env;
 
 test.after(() => env.restore());
 
@@ -82,9 +82,17 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
   assert.equal(server.outCalls, outBefore, '默认关闭低频同步时，自动闹钟不请求回复栏');
 
   await setSettings({ initDays: 15, outAutoSync: true });
+  // 即使开启方案 B，页面亮屏但超过 5 分钟无真实交互也不自动请求；恢复交互后由 xir:active 顺带唤醒
+  idleTabs.add(1);
+  idleTabs.add(4);
   outBefore = server.outCalls;
   store['cursor:me'].out.nextAutoAt = 0;
   await fire('out');
+  assert.equal(server.outCalls, outBefore, '出站自动同步同样受 5 分钟真实交互门控约束');
+  idleTabs.delete(1);
+  idleTabs.delete(4);
+  store['cursor:me'].nextIncAt = Date.now() + 60 * 60_000; // 入站未到期，只测试出站被交互唤醒
+  await pageSend({ type: 'xir:active' }, 1);
   assert.equal(server.outCalls - outBefore, 1);
   assert.equal((await boardRows())[0].replied, 4);
   assert.equal(store['cursor:me'].out.lastFullDays, 7, '还是上次初始化的范围');

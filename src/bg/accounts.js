@@ -3,7 +3,7 @@ import { kvGet, kvSet, kvRemove, keys } from '../db.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
 import {
-  serial, now, inActiveHours, nextActiveAt, accountForUser, refreshSnapshot,
+  PACE, serial, now, inActiveHours, nextActiveAt, accountForUser, refreshSnapshot,
   STALE_TABS_ALARM, JOB_ALARM, INC_ALARM, OUT_ALARM, X_TABS, STALE_TABS_RETRY,
 } from './runtime.js';
 import { clearAccountAlarms, recoverAlarms } from './alarms.js';
@@ -151,11 +151,23 @@ export async function pingPages() {
   return (await Promise.all(tabs.map(pingTab))).filter(Boolean);
 }
 
-/** 只有正在前台显示的已登录 X 页面才接受自动读取；隐藏标签页不发请求。 */
+/** 只有正在前台显示的已登录 X 页面才接受读取；隐藏标签页不发请求。 */
 export async function hasVisiblePage(account) {
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me?.enabled || !me.userId) return false;
   return (await pingPages()).some((page) => page.userId === me.userId && page.visible !== false);
+}
+
+/** 自动更新除前台可见外，还要求该页面最近几分钟内有真实浏览交互，避免白天亮屏挂机空发请求。 */
+export async function hasActivePage(account, maxIdleMs = PACE.activeInteractionMs) {
+  const me = (await kvGet(keys.accounts, {}))[account];
+  if (!me?.enabled || !me.userId) return false;
+  const t = now();
+  return (await pingPages()).some((page) =>
+    page.userId === me.userId
+    && page.visible !== false
+    && Number.isFinite(page.lastActiveAt)
+    && t - page.lastActiveAt <= maxIdleMs);
 }
 
 export async function setAccountEnabled({ userId, account, enabled }) {

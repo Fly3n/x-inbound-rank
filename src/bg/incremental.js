@@ -11,7 +11,7 @@ import {
   flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { hasVisiblePage } from './accounts.js';
+import { hasVisiblePage, hasActivePage } from './accounts.js';
 import { mentionsApi, pull } from './transport.js';
 
 /** 自动任务未到期返回 null，手动任务受阻时返回具体原因。 */
@@ -36,7 +36,7 @@ async function incDue(account, manual) {
   if (!manual && !resumeManual && !settings.fetchEnabled) return null;
   if (!manual && !resumeManual && !inAutoSlot(t)) return null;
   if (!manual && !cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
-  if (!manual && !(await hasVisiblePage(account))) return null;
+  if (!manual && !(await (resumeManual ? hasVisiblePage(account) : hasActivePage(account)))) return null;
   return { account, cur, settings };
 }
 

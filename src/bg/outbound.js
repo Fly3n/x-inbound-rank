@@ -10,7 +10,7 @@ import {
   temporaryUnavailable, serviceWait, tryAcquireBusy, releaseBusy, updateCursor, refreshSnapshot,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { hasVisiblePage, senderAccount } from './accounts.js';
+import { hasVisiblePage, hasActivePage, senderAccount } from './accounts.js';
 import { fetchViaTab } from './transport.js';
 
 export const saveOut = (account, patch) =>
@@ -106,7 +106,7 @@ export async function syncOut(account, manual = false) {
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
       return;
     }
-    if (!manual && !(await hasVisiblePage(account))) return;
+    if (!manual && !(await (taskManual ? hasVisiblePage(account) : hasActivePage(account)))) return;
     const initDays = prev.initDays ?? settings.initDays;
     const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
     // 第一次必须手动点「补历史」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）

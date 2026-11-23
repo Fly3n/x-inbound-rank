@@ -71,8 +71,25 @@
 
   // ---------- 代后台抓取 ----------
 
+  const ACTIVE_WAKE_GAP_MS = 5 * 60_000;
+  let lastActiveAt = document.visibilityState === 'visible' ? Date.now() : 0;
+  let lastWakeAt = 0;
+
+  function noteInteraction() {
+    if (!alive || document.visibilityState !== 'visible') return;
+    const t = Date.now();
+    lastActiveAt = t;
+    if (XIRRel.session() && t - lastWakeAt >= ACTIVE_WAKE_GAP_MS) {
+      lastWakeAt = t;
+      sendForSession({ type: 'xir:active' });
+    }
+  }
+  for (const type of ['pointerdown', 'wheel', 'keydown']) {
+    window.addEventListener(type, noteInteraction, { passive: true, capture: true });
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    // 后台问：这个页面连着插件吗、是哪一版、见过哪些接口请求（认不出「回复」列表时拿来诊断）
+    // 后台问：这个页面连着插件吗、是哪一版、是否前台可见及最近一次交互时间
     if (msg?.type === 'xir:ping') {
       sendResponse({
         ok: true,
@@ -80,6 +97,7 @@
         userId: XIRFetcher.sessionUserId(),
         handle: detectHandle(),
         visible: document.visibilityState === 'visible',
+        lastActiveAt,
       });
       return false;
     }
@@ -99,10 +117,11 @@
     return true;
   });
 
-  // 切回 X 页面时只唤醒后台检查是否有到期任务；是否真正请求仍由后台的时段和可见性门控决定。
+  // 切回 X 页面时刷新最近交互时间并唤醒后台检查；是否真正请求仍由后台的时段和活跃门控决定。
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && XIRRel.session()) {
-      sendForSession({ type: 'xir:hello', handle: detectHandle() });
+    if (document.visibilityState === 'visible') {
+      lastActiveAt = Date.now();
+      if (XIRRel.session()) sendForSession({ type: 'xir:hello', handle: detectHandle() });
     }
   });
 
