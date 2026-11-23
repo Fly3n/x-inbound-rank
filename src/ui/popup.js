@@ -473,7 +473,7 @@ $('updateNow').addEventListener('click', async () => {
     const result = await call('updateNowWithReceipt', { account });
     const receipt = result?.readAt;
     if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
-      message = '两份数据已读取，结果见下方。';
+      message = '两份数据已读取，点对应「?」可看最近记录。';
     } else if (receipt?.inbound >= startedAt && result?.outboundPassive) {
       message = '别人回我已读取；我回别人已启用浏览器发帖旁听，本次未额外请求。';
     } else {
