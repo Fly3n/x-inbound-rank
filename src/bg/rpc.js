@@ -117,7 +117,7 @@ export const handlers = {
     return {};
   },
 
-  // 弹窗
+  // 弹窗：别人回我独立立即更新
   async updateNowWithReceipt({ account }) {
     const startedAt = now();
     if (!account) return { error: '请先选择已登录的 X 账号。' };
@@ -129,27 +129,31 @@ export const handlers = {
     const result = await maybeIncremental(account, true);
     if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
     if (!result?.ok && !result?.deferred) return result;
-    const inboundMessage = result?.deferred ? result.message : '';
-
-    const settings = await getSettings(account);
-    const before = (await kvGet(keys.cursor(account), {})).out;
-    const shouldSyncOut = !!(settings.outAutoSync || before?.lastAt || before?.syncedId);
-    if (!shouldSyncOut) {
-      if (inboundMessage) return { message: `${inboundMessage}我回别人已由浏览器发帖旁听自动记录。` };
-      const { inLastReadAt } = await kvGet(keys.cursor(account), {});
-      if (inLastReadAt >= startedAt) return { ok: true, readAt: { inbound: inLastReadAt, outbound: null }, outboundPassive: true };
-      return { message: '别人回我已处理，我回别人已由浏览器发帖旁听自动记录。' };
+    if (result?.deferred) return { message: result.message };
+    const { inLastReadAt } = await kvGet(keys.cursor(account), {});
+    if (inLastReadAt >= startedAt) return { ok: true, readAt: { inbound: inLastReadAt } };
+    return { message: '别人回我暂未读取，请查看数据状态。' };
+  },
+  // 弹窗：我回别人独立立即更新
+  async updateOutNowWithReceipt({ account }) {
+    const startedAt = now();
+    if (!account) return { error: '请先选择已登录的 X 账号。' };
+    if (!inActiveHours()) return { error: '读取只在每天 08:00–24:00 进行，夜间不运行。' };
+    if (!(await hasVisiblePage(account))) return { error: '请切到该账号的 X 页面后再更新。' };
+    const beforeManual = await kvGet(keys.cursor(account), {});
+    const wait = PACE.manualCooldownMs - (now() - (beforeManual.out?.lastManualAt || 0));
+    if (wait > 0) return { error: `刚刚更新过，请 ${Math.ceil(wait / 60_000)} 分钟后再试。` };
+    const blockedUntil = Math.max(beforeManual.rateUntil || 0, beforeManual.out?.retryAt || 0);
+    if (blockedUntil > now()) {
+      return { error: `接口正在退避，请在 ${new Date(blockedUntil).toLocaleTimeString()} 后再试。` };
     }
     await syncOut(account, true);
     const after = (await kvGet(keys.cursor(account), {})).out;
-    if (after?.message) return { message: `${inboundMessage ? `${inboundMessage}；` : ''}我回别人：${after.message}` };
-    if (after?.resume) return { message: `${inboundMessage ? `${inboundMessage}；` : ''}我回别人还有数据等待续读。` };
-    if (inboundMessage) return { message: `${inboundMessage}我回别人已更新。` };
-    if (after?.lastReadAt >= startedAt) {
-      const { inLastReadAt } = await kvGet(keys.cursor(account), {});
-      if (inLastReadAt >= startedAt) return { ok: true, readAt: { inbound: inLastReadAt, outbound: after.lastReadAt } };
-    }
-    return { message: `${inboundMessage ? `${inboundMessage}；` : ''}我回别人暂未读取，请查看数据状态。` };
+    if (after?.status === 'need_tpl') return { message: after.message };
+    if (after?.message) return { message: after.message };
+    if (after?.resume) return { message: '我回别人已读取本批，剩余数据等待续读。' };
+    if (after?.lastReadAt >= startedAt) return { ok: true, readAt: { outbound: after.lastReadAt } };
+    return { message: '正在进行另一项读取或暂未读取，请稍后再试。' };
   },
   setAccountEnabled,
   async getState() {

@@ -354,16 +354,16 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
   assert.ok(logs.some((e) => e.event === 'outbound_tap_unmatched' && e.reason === 'missing_tweet_result'));
   assert.ok(logs.some((e) => e.event === 'outbound_tap' && e.postId === '9901' && e.added === 1));
 
-  // 4. 手动「立即更新」在方案 A 默认下只刷新别人回我，不再强求先初始化我回别人
+  // 4. 别人回我手动「立即更新」只刷新入站，绝不顺带请求回复栏
   Object.assign(store['cursor:me'], { lastManualAt: 0, nextIncAt: 0, lastAttemptAt: 0 });
   const receipt = await send({ type: 'updateNowWithReceipt', account: 'me' });
   assert.equal(receipt.ok, true);
-  assert.equal(receipt.outboundPassive, true);
-  assert.equal(receipt.readAt.outbound, null);
+  assert.ok(receipt.readAt.inbound > 0);
+  assert.equal(receipt.readAt.outbound, undefined);
   assert.equal(server.outCalls, beforeOutCalls);
 });
 
-test('我回别人免补历史直接建起点：新账号开启低频同步自动排期并最多读 2 页建立接续点', { timeout: 20_000 }, async () => {
+test('我回别人免补历史直接建起点：新账号开启低频同步与独立立即更新均最多读 2 页建立接续点', { timeout: 20_000 }, async () => {
   assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
   delete alarms['out:me'];
@@ -377,4 +377,14 @@ test('我回别人免补历史直接建起点：新账号开启低频同步自�
   assert.ok(out.syncedId, '首次免补历史读取后应建立接续点');
   assert.equal(out.lastFullAt, undefined, '免补历史建起点不冒充已完成补历史');
   assert.ok(server.outCalls - beforeCalls >= 1 && server.outCalls - beforeCalls <= 2, '首次建起点最多读 2 页');
+
+  // 未补历史的新账号直接点「我回别人」独立立即更新，也能直接建立接续点
+  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  const beforeManualOut = server.outCalls;
+  const manualOut = await send({ type: 'updateOutNowWithReceipt', account: 'me' });
+  assert.equal(manualOut.ok, true);
+  assert.ok(manualOut.readAt.outbound > 0);
+  assert.ok(store['cursor:me'].out.syncedId, '手动立即更新也能为新账号建立出站接续点');
+  assert.ok(server.outCalls - beforeManualOut >= 1 && server.outCalls - beforeManualOut <= 2);
 });

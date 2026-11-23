@@ -49,26 +49,40 @@ test('立即更新收据、冷却、退避与切后台续读', { timeout: 20_000
   const countBeforeManual = await count();
   Object.assign(store['cursor:me'], { nextIncAt: Date.now() + 45 * 60_000, lastAttemptAt: 0 });
   const before = server.calls;
+  const beforeOut = server.outCalls;
   const receipt = await send({ type: 'updateNowWithReceipt', account: 'me' });
   assert.deepEqual(receipt, {
     ok: true,
     readAt: {
       inbound: store['cursor:me'].inLastReadAt,
-      outbound: store['cursor:me'].out.lastReadAt,
     },
   });
   const firstManualCalls = server.calls - before;
-  assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取');
+  assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取别人回我');
+  assert.equal(server.outCalls, beforeOut, '别人回我立即更新不顺带请求我回别人');
   const nextAutoGap = store['cursor:me'].nextIncAt - Date.now();
   assert.ok(nextAutoGap >= 8 * 60 * 60_000 && nextAutoGap <= 13.5 * 60 * 60_000 + 1_000,
     '立即更新后顺延到下一个自动时段');
   assert.equal(alarms['inc:me'], undefined, '自动更新关闭时不安排自动读取');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
-  assert.ok(store['cursor:me'].out.lastReadAt > 1, '手动更新返回前已成功读取出站数据');
+  assert.equal(store['cursor:me'].out.lastReadAt, 1, '别人回我立即更新不改动出站读取时间');
   assert.ok(store['cursor:me'].inLastReadCounts.read > 0);
   assert.equal(store['cursor:me'].inLastReadCounts.added, 0, '没有新记录也显示读到的条数');
+
+  // 我回别人独立立即更新：只请求出站、有独立 10 分钟冷却、遵循账号级退避
+  const outReceipt = await send({ type: 'updateOutNowWithReceipt', account: 'me' });
+  assert.deepEqual(outReceipt, {
+    ok: true,
+    readAt: {
+      outbound: store['cursor:me'].out.lastReadAt,
+    },
+  });
+  assert.equal(server.calls, before + firstManualCalls, '我回别人立即更新不请求入站接口');
+  assert.equal(server.outCalls, beforeOut + 1);
+  assert.ok(store['cursor:me'].out.lastReadAt > 1);
   assert.ok(store['cursor:me'].out.lastReadCounts.read > 0);
+  assert.match((await send({ type: 'updateOutNowWithReceipt', account: 'me' })).error, /刚刚更新过/);
 
   const beforeSecond = [server.calls, server.outCalls];
   assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /刚刚更新过/);
@@ -76,15 +90,18 @@ test('立即更新收据、冷却、退避与切后台续读', { timeout: 20_000
 
   env.advanceNow(11 * 60_000);
   assert.ok((await send({ type: 'updateNowWithReceipt', account: 'me' })).ok, '完成后可再次立即更新');
-  assert.deepEqual([server.calls - beforeSecond[0], server.outCalls - beforeSecond[1]], [firstManualCalls, 1]);
+  assert.deepEqual([server.calls - beforeSecond[0], server.outCalls - beforeSecond[1]], [firstManualCalls, 0]);
 
   const afterSecond = [server.calls, server.outCalls];
   env.advanceNow(11 * 60_000);
   store['cursor:me'].rateUntil = Date.now() + 60_000;
   const lastManualAt = store['cursor:me'].lastManualAt;
+  const lastOutManualAt = store['cursor:me'].out.lastManualAt;
   assert.match((await send({ type: 'updateNowWithReceipt', account: 'me' })).error, /退避/);
+  assert.match((await send({ type: 'updateOutNowWithReceipt', account: 'me' })).error, /退避/);
   assert.deepEqual([server.calls, server.outCalls], afterSecond, '接口退避时不发请求');
   assert.equal(store['cursor:me'].lastManualAt, lastManualAt, '没有发出请求就不记冷却');
+  assert.equal(store['cursor:me'].out.lastManualAt, lastOutManualAt, '出站退避未发请求也不记冷却');
   delete store['cursor:me'].rateUntil;
 
   // 手动更新第一页后切到后台：保存续读位置并在一分钟内重新排队，恢复前台后接着读

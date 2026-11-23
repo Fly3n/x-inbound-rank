@@ -12,6 +12,8 @@ test('弹窗不再提供固定入口和前端诊断面板且设置页收敛高�
   assert.match(html, /id="advanced"/);
   assert.match(html, /id="inReadSummary"/);
   assert.match(html, /id="outReadSummary"/);
+  assert.match(html, /id="updateNow"/);
+  assert.match(html, /id="updateOutNow"/);
   assert.doesNotMatch(html, /id="updateSummary"/);
   assert.ok(html.indexOf('id="start"') < html.indexOf('id="advanced"'), '补历史按钮应在主卡片中、位于高级折叠区之前');
   assert.ok(html.indexOf('id="outSync"') < html.indexOf('id="advanced"'), '我回别人补历史按钮应在主卡片中、位于高级折叠区之前');

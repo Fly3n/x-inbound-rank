@@ -184,6 +184,7 @@ async function draw() {
   }
   if (view.account !== view.selected) {
     $('updateStatus').textContent = '';
+    $('updateOutStatus').textContent = '';
   }
   view.account = view.selected;
   view.activationUserId = inactivePage ? g.active.userId : null;
@@ -320,6 +321,8 @@ async function draw() {
   $('outAutoSync').checked = !!rules.outAutoSync;
   $('updateNow').disabled = !isSession || updatingNow;
   $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
+  $('updateOutNow').disabled = !isSession || updatingOutNow;
+  $('updateOutNow').textContent = updatingOutNow ? '更新中…' : '立即更新';
   for (const k of SHOW_KEYS) $(k).checked = rules[k];
 
   // 设置页：口径与颜色
@@ -455,12 +458,13 @@ async function initialize(id, type) {
 }
 
 let updatingNow = false;
-$('updateNow').addEventListener('click', async () => {
-  const button = $('updateNow');
+let updatingOutNow = false;
+async function runManualUpdate({ buttonId, statusId, isBusy, setBusy, send, readKey, okText }) {
+  const button = $(buttonId);
   const { account } = view;
-  const status = $('updateStatus');
-  if (updatingNow || button.disabled) return;
-  updatingNow = true;
+  const status = $(statusId);
+  if (isBusy() || button.disabled) return;
+  setBusy(true);
   button.disabled = true;
   button.textContent = '更新中…';
   button.setAttribute('aria-busy', 'true');
@@ -470,12 +474,10 @@ $('updateNow').addEventListener('click', async () => {
   let message;
   try {
     const startedAt = Date.now();
-    const result = await call('updateNowWithReceipt', { account });
+    const result = await send(account);
     const receipt = result?.readAt;
-    if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
-      message = '两份数据已读取，点对应「?」可看最近记录。';
-    } else if (receipt?.inbound >= startedAt && result?.outboundPassive) {
-      message = '别人回我已读取；我回别人已启用浏览器发帖旁听，本次未额外请求。';
+    if (receipt?.[readKey] >= startedAt) {
+      message = okText;
     } else {
       message = result?.error || result?.message || '未收到本次读取时间，请重新加载扩展再试。';
     }
@@ -485,10 +487,28 @@ $('updateNow').addEventListener('click', async () => {
     await visible;
     if (view.account === account) status.textContent = message;
     button.removeAttribute('aria-busy');
-    updatingNow = false;
+    setBusy(false);
     await render();
   }
-});
+}
+$('updateNow').addEventListener('click', () => runManualUpdate({
+  buttonId: 'updateNow',
+  statusId: 'updateStatus',
+  isBusy: () => updatingNow,
+  setBusy: (v) => { updatingNow = v; },
+  send: (account) => call('updateNowWithReceipt', { account }),
+  readKey: 'inbound',
+  okText: '别人回我已读取，点「?」可看最近记录。',
+}));
+$('updateOutNow').addEventListener('click', () => runManualUpdate({
+  buttonId: 'updateOutNow',
+  statusId: 'updateOutStatus',
+  isBusy: () => updatingOutNow,
+  setBusy: (v) => { updatingOutNow = v; },
+  send: (account) => call('updateOutNowWithReceipt', { account }),
+  readKey: 'outbound',
+  okText: '我回别人已读取，点「?」可看最近记录。',
+}));
 $('start').addEventListener('click', () => initialize('start', 'startBackfill'));
 $('outSync').addEventListener('click', () => initialize('outSync', 'syncOutNow'));
 $('keepExport').addEventListener('click', () => $('exportAll').click());
