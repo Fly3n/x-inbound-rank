@@ -44,7 +44,7 @@
 | `settings:<账号>` | `{ fetchEnabled, outAutoSync, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }` |
 | `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
 | `scheduled:<账号>` | `{ items, syncedAt, retryAt, errorCount }`：已排期列表缓存与失败退避 |
-| `lastPostAt:<账号>` | 最近发帖或新建排期时间戳 |
+| `lastPostAt:<账号>` | 最近一次电脑端原创/引用主帖时间戳（由 `CreateTweet` 旁听记录，不含回复评论） |
 | `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, incLimitReached, rateUntil, rate429Count, out }` |
 | `job:<账号>` | 入站历史补读任务状态 |
 | `snap:<账号>` | 标签快照 `{ at, windowDays, show, users }`；抓取期节流 30 秒，结束时补算，内容不变不写入 |
@@ -63,8 +63,8 @@
 ### 出站同步（`cursor.out` 与浏览器旁听）
 
 - **默认方案 A（浏览器发帖旁听）**：`tap.js` → `rel.js` → `content.js` 捕获 `CreateTweet` 响应，由 `handleOutboundTap` 校验后写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched` 日志；不动 `cur.out.syncedId` 与 `cur.out.lastAt`，避免遮蔽手机端回复。
-- **可选方案 B（手动补历史与 2 天低频自动同步）**：`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
-- 当 `!syncedId`、`fullFor === 0` 或 `schema < OUT_SCHEMA` 时做完整读；达到 `PACE.outMaxRounds`（120 轮 × 5 页 = 600 页）记 `error` + `limitReached: true` 并阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。日常自动同步仅在 `fetchEnabled && outAutoSync`（默认 `outAutoSync: false`）同时为真时按 `nextOutAutoSlot()`（至少 48 小时）调度。
+- **可选方案 B（手动补历史、独立立即更新与 2 天低频自动同步）**：`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastManualAt`（独立 10 分钟冷却）、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
+- 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」或开启 `outAutoSync` 时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（120 轮 × 5 页 = 600 页）记 `error` + `limitReached: true` 并阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。日常自动同步仅在 `fetchEnabled && outAutoSync`（默认 `outAutoSync: false`）同时为真时按 `nextOutAutoSlot()`（至少 48 小时）调度。
 - **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。
 
 ### 增量与分页异常边界
@@ -82,6 +82,6 @@
 | 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时 | 回填、入站、出站、手动更新、排期同步共用，到期成功读取后清零 |
 | 入站每日自动 | 08:00–11:30 与 18:00–22:30 完整窗口各随机 1 次 | 页间 `humanIncDelay()`（4–28 秒三档，低于 30 秒回收线），单事件最多 6 页；分段记 `incResume` 休 3–5 分钟，单轮最多 10 段（60 页） |
 | 出站日常同步 | 默认关闭（浏览器 `CreateTweet` 实时旁听）；开启 `outAutoSync` 后按 `nextOutAutoSlot()` 每 2 天（≥ 48 小时）在活跃窗口抽 1 次 | 页间 `humanIncDelay()`，单轮最多 5 页（受 50 次/15 分钟额度限制），不与入站互相触发 |
-| 手动立即更新 | 10 分钟冷却 | 成功后顺延下一次自动时段；`fetchEnabled` 不限制补历史与手动更新 |
+| 手动立即更新 | 入站（`updateNowWithReceipt`）与出站（`updateOutNowWithReceipt`）各自独立 10 分钟冷却 | 彼此互不触发；入站成功后顺延下一次自动时段；`fetchEnabled` 不限制补历史与手动更新 |
 | 时段与前台门控 | 本地 08:00–24:00、同账号页面 `visible`；自动更新额外要求 `activeInteractionMs`（5 分钟内有真实交互） | `fetchViaTab` 统一拦截夜间与后台标签页；`hasActivePage` 拦住白天亮屏挂机空发，窗口内回到页面交互时经 `xir:active` 顺带唤醒 |
 | 并发与串行队列 | 全局 `busy` 锁 + `serial` 排队更新 `cursor` | 固定写法：先检查 → `tryAcquireBusy()`（无 `await`）→ 占住后再核对一次 |
