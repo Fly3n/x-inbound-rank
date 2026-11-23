@@ -36,21 +36,21 @@
   ```
   在 `check` 基础上检查无维护期 `127.0.0.1` 权限、无 `.local` 跟踪文件、工作区干净。
 - **测试文件说明**（依赖仅 `fake-indexeddb`，假数据按预期接口形态编写，验证调度/解析自洽性，不证明 X 真实返回结构）：
-  - `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色分档、解析边界、抓取层模板与集合上限
+  - `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色分档、解析边界（含 `parseCreatedReply`）、抓取模板与集合上限、`PACE` 真人节律
   - `test/bg-backfill.test.mjs`：账号迁移、提及脱敏证据、回填状态机、重复游标与可信空列表
-  - `test/bg-incremental.test.mjs`：1 小时补漏、双窗口、模板切换与 404 回退、并发锁、时段与多段续读
-  - `test/bg-outbound.test.mjs`：出站初始化、范围切换、429 退避、轮数上限与列表到底
-  - `test/bg-manual-and-maintenance.test.mjs`：立即更新收据、冷却、只读诊断回查、清空保护与 90 天清理
-  - `test/bg-accounts-and-tabs.test.mjs`：多账号隔离、排期同步退避与旧内容脚本前台刷新
+  - `test/bg-incremental.test.mjs`：重叠即停、免补历史直启、60 页安全上限、双窗口、模板切换与 404 回退、并发锁与多段续读
+  - `test/bg-outbound.test.mjs`：方案 A 默认浏览器旁听、方案 B 每 2 天低频同步开关、手动补历史、范围切换、429 退避、轮数上限与列表到底
+  - `test/bg-manual-and-maintenance.test.mjs`：立即更新收据、冷却、退避、切后台续读、清空保护与 90 天清理
+  - `test/bg-accounts-and-tabs.test.mjs`：多账号隔离、排期同步退避与多窗口/跨窗口聚焦旧内容脚本刷新（含 `stale_tab_refresh` 日志）
   - `test/db.test.mjs`：IndexedDB 主键去重与 `mergeKnown` 空值不覆盖
-  - `test/session.test.mjs`：页面仅旁听已启用会话与切号清空缓存
-  - `test/interface.test.mjs`：弹窗无固定入口、名次标签无悬浮说明的静态约束
+  - `test/session.test.mjs`：页面仅旁听已启用会话、`CreateTweet` 旁听触发与切号清空缓存
+  - `test/interface.test.mjs`：弹窗无固定入口和诊断面板、名次标签无悬浮说明的静态约束
   - `test/popup-helpers.test.mjs` / `test/popup-preview.test.mjs`：弹窗纯函数与本地预览服务
   - `test/snapshot.test.mjs` / `test/bridge.test.mjs`：本机快照结构与桥接服务
 
 ## 运行排查
 
-- **后台日志**：`chrome://extensions` → 本插件 →「Service Worker」。
+- **后台日志**：`chrome://extensions` → 本插件 →「Service Worker」（最近 7 天后台静默日志亦随开发桥落盘到 `.local/xir-live.json`）。
 - **页面日志**：`x.com` 页面 DevTools 控制台。
 - **查看存储**：在 Service Worker 控制台执行 `chrome.storage.local.get(null).then(console.log)`。
-- **核对零请求**：打开 `x.com` DevTools Network 面板确认时间线标签渲染期无新请求；扩展更新后插件会在 08:00–24:00 自动刷新当前前台 X 常规页面，后台页切回前台再补。
+- **核对零请求**：打开 `x.com` DevTools Network 面板确认时间线标签渲染及浏览器发帖旁听期间无额外请求；扩展更新后插件会在 08:00–24:00 自动刷新各窗口当前前台 X 常规页面，后台页切回前台或跨窗口切换焦点时再补。

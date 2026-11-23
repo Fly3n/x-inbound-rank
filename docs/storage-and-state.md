@@ -41,12 +41,12 @@
 | 键 | 内容 |
 |---|---|
 | `accounts` | `{ [dataKey]: { handle, userId, enabled, activation } }`；以 `userId` 为唯一身份基准 |
-| `settings:<账号>` | `{ fetchEnabled, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }` |
+| `settings:<账号>` | `{ fetchEnabled, outAutoSync, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }` |
 | `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
 | `scheduled:<账号>` | `{ items, syncedAt, retryAt, errorCount }`：已排期列表缓存与失败退避 |
 | `lastPostAt:<账号>` | 最近发帖或新建排期时间戳 |
-| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, rateUntil, rate429Count, out }` |
-| `job:<账号>` | 入站历史回填任务状态 |
+| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, incLimitReached, rateUntil, rate429Count, out }` |
+| `job:<账号>` | 入站历史补读任务状态 |
 | `snap:<账号>` | 标签快照 `{ at, windowDays, show, users }`；抓取期节流 30 秒，结束时补算，内容不变不写入 |
 | `alert:<账号>` | 最近一次抓取/解析错误，下次成功后清除 |
 | `domWarning:<账号>` | 内容脚本结构自检异常标记 |
@@ -56,19 +56,21 @@
 
 ### 回填任务（`job:<账号>`）
 
-- `status`：`running` → `done`，中途可进入 `paused`（`auto: true` 为限流/503/夜间自动恢复，`auto: false` 为手动暂停或到达 600 页上限）、`waiting_tab`、`error`（登录失效、结构变更或重复游标）。
-- 一步一页通过 `job:<账号>` 闹钟接力，避免 Service Worker 回收丢定时；30 分钟 `tick` 闹钟兜底接续、算榜与检查增量。
+- `status`：`running` → `done`，中途可进入 `paused`（`auto: true` 为限流/503/夜间自动恢复，`auto: false` 为手动暂停或到达 300 页上限）、`waiting_tab`、`error`（登录失效、结构变更或重复游标）。
+- 一步一页通过 `job:<账号>` 闹钟接力，避免 Service Worker 回收丢定时；30 分钟 `tick` 闹钟兜底接续、算榜与检查增量；完成后清除 `incLimitReached`。
 - 结束判定：本页 `newestTs < targetTs` 正常完成；无 `bottomCursor` 或空页记 `reachedEnd: true`；首屏可信空列表记哨兵 `syncedId = '0'`；新接口模板 400/404 删模板并退回旧 REST 从最新一页重来；翻页返回相同 `bottomCursor` 报 `error` 不推进接续点。
 
-### 出站同步（`cursor.out`）
+### 出站同步（`cursor.out` 与浏览器旁听）
 
-- 核心字段：`status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
-- 当 `!syncedId`、`fullFor === 0` 或 `schema < OUT_SCHEMA` 时做完整读；达到 `PACE.outMaxRounds`（120 轮 × 5 页 = 600 页）记 `error` + `limitReached: true` 並阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。
-- `outboundCountable(out)` 只要 `lastAt` 存在且 `schema >= OUT_SCHEMA` 即按窗口已有记录计数；`outboundReady` 仅用于初始化完成态与界面提示。
+- **默认方案 A（浏览器发帖旁听）**：`tap.js` → `rel.js` → `content.js` 捕获 `CreateTweet` 响应，由 `handleOutboundTap` 校验后写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched` 日志；不动 `cur.out.syncedId` 与 `cur.out.lastAt`，避免遮蔽手机端回复。
+- **可选方案 B（手动补历史与 2 天低频自动同步）**：`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
+- 当 `!syncedId`、`fullFor === 0` 或 `schema < OUT_SCHEMA` 时做完整读；达到 `PACE.outMaxRounds`（120 轮 × 5 页 = 600 页）记 `error` + `limitReached: true` 并阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。日常自动同步仅在 `fetchEnabled && outAutoSync`（默认 `outAutoSync: false`）同时为真时按 `nextOutAutoSlot()`（至少 48 小时）调度。
+- **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。
 
 ### 增量与分页异常边界
 
-- 入站增量先接到 `syncedId`，再回看至 `lastIncrementalAt - 1h`（`PACE.incOverlapMs`）；两条件必须同时满足才停，防止接续点较旧或首页滞后提前结束。
+- **免补历史直启与重叠即停**：尚未补过历史（无 `syncedId`）的账号在启用自动更新或手动点「立即更新」时，可直接以启用时间 `activation` 为起点最多翻 2 页建立接续点；已有 `syncedId` 时只要本页 `oldestId` 已与 `syncedId` 重叠（`!idGt(p.oldestId, stopAt)`）或越过 `KEEP_DAYS` 即停，不再强制向更早补 1 小时。
+- **单轮 60 页安全上限**：入站单轮最多续读 `PACE.incMaxRounds = 10` 段（`10 × 6 = 60` 页）。第 10 段仍未重叠接续点时清除 `incResume`、置位 `cur.incLimitReached = true`、记录 `inc_limit_reached` 并停掉自动定时，等用户手动更新或补读历史后解除。
 - 入站或出站增量在接上旧接续点前遇到空页、无下一页或重复 `bottomCursor` 一律按分页异常中止，**绝不推进** `syncedId` / `lastIncrementalAt` / `coverTs`。
 - 解析层遇到已删除/受保护等不可用单条回复只跳过该条；结构未知或作者数字 ID 缺失则整页抛 `ParseError`。
 
@@ -76,10 +78,10 @@
 
 | 机制 | 当前值 | 说明 |
 |---|---|---|
-| 回填页间隔 / 批休 | 随机 25–45 秒；每 10 页休 3–5 分钟 | 单次上限 600 页后暂停等确认 |
-| 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时 | 回填、入站、出站、手动更新、诊断、排期同步共用，到期成功读取后清零 |
-| 入站每日自动 | 08:00–11:30 与 18:00–22:30 完整窗口各随机 1 次 | 页间 15–27 秒，单事件最多 6 页；分段记 `incResume` 休 3–5 分钟，跨窗口留待下个窗口 |
-| 出站每日自动 | 上述两窗口各随机 1 次，仅读到接续点 | 页间 15–27 秒，单轮最多 5 页（受 50 次/15 分钟额度限制），不与入站互相触发 |
+| 回填页间隔 / 批休 | `humanBackfillDelay()`（15–110 秒三档非均匀）；每 `humanBatchPages()`（8–12 页）休 3–5 分钟 | 单次上限 **300 页**后暂停等确认 |
+| 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时 | 回填、入站、出站、手动更新、排期同步共用，到期成功读取后清零 |
+| 入站每日自动 | 08:00–11:30 与 18:00–22:30 完整窗口各随机 1 次 | 页间 `humanIncDelay()`（4–28 秒三档，低于 30 秒回收线），单事件最多 6 页；分段记 `incResume` 休 3–5 分钟，单轮最多 10 段（60 页） |
+| 出站日常同步 | 默认关闭（浏览器 `CreateTweet` 实时旁听）；开启 `outAutoSync` 后按 `nextOutAutoSlot()` 每 2 天（≥ 48 小时）在活跃窗口抽 1 次 | 页间 `humanIncDelay()`，单轮最多 5 页（受 50 次/15 分钟额度限制），不与入站互相触发 |
 | 手动立即更新 | 10 分钟冷却 | 成功后顺延下一次自动时段；`fetchEnabled` 不限制初始化与手动更新 |
 | 时段与前台门控 | 本地 08:00–24:00 且同账号页面 `visible` | `fetchViaTab` 统一拦截夜间与后台标签页 |
 | 并发与串行队列 | 全局 `busy` 锁 + `serial` 排队更新 `cursor` | 固定写法：先检查 → `tryAcquireBusy()`（无 `await`）→ 占住后再核对一次 |
