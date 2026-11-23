@@ -42,16 +42,18 @@ test('导出构造：CSV BOM 转义、榜单导出和全量导出过滤 own 并�
   const inbound = [
     { id: '1', actor_id: '2', actor_handle: 'alice', actor_name: 'Alice', created_at: ts, target_post_id: '10', conversation_id: '10', root_mine: true, text: '你好' },
     { id: '2', actor_id: '3', actor_handle: 'bob', actor_name: 'Bob', created_at: ts - 1000, target_post_id: '20', conversation_id: '20', root_mine: false, text: '他帖下' },
+    { id: '5', actor_id: '4', actor_handle: '', actor_name: '', created_at: ts - 2000, target_post_id: '25', conversation_id: '25', root_mine: true, text: '缺ID名' },
   ];
   const outAll = [
     { id: '3', created_at: ts + 1000, reply_to_id: '30', conversation_id: '30', root_user_id: '2', text: '我回Alice' },
     { id: '4', created_at: ts + 2000, reply_to_id: '10', conversation_id: '10', root_user_id: '1', own: true, text: '自回复' },
   ];
   const all = buildAllExportRows(inbound, outAll);
-  assert.equal(all.length, 4, '含表头共 4 行，已过滤 own 记录');
+  assert.equal(all.length, 5, '含表头共 5 行，已过滤 own 记录');
   assert.equal(all[1][0], '我回别人');
   assert.equal(all[1][3], '@alice');
   assert.equal(all[1][4], '是');
   assert.equal(all[2][4], '是');
   assert.equal(all[3][4], '否');
+  assert.equal(all[4][3], '用户编号 4', '入站记录缺少 handle 时导出数字 ID 而非空 @');
 });

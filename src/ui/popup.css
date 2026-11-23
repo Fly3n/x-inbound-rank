@@ -66,12 +66,21 @@ button.danger { color: var(--err-fg); }
 .src { border-top: 1px solid var(--line); border-bottom: 0; margin-top: 8px; }
 .src p { margin: 4px 0 0; }
 
-/* 默认折叠的块：帮助、清空数据 */
-.fold summary { cursor: pointer; font-weight: 600; }
-.fold[open] summary { margin-bottom: 6px; }
+/* 默认折叠的高级与说明区 */
+.fold > summary { cursor: pointer; font-weight: 600; }
+.fold[open] > summary { margin-bottom: 6px; }
 .fold h3 { margin: 10px 0 2px; font-size: 12px; }
 .fold p { margin: 4px 0; font-size: 12px; color: var(--dim); }
 .fold p b { color: var(--fg); }
+
+.sub-divider { border-top: 1px solid var(--line); margin: 10px 0; }
+.sync-notice { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.sync-notice p { margin: 0 0 6px; font-size: 12px; color: var(--dim); }
+.sub-fold { margin-top: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.sub-fold > summary { cursor: pointer; font-weight: 600; font-size: 12px; color: var(--fg); }
+.sub-fold[open] > summary { margin-bottom: 6px; }
+.sub-fold ul { margin: 4px 0 0; padding-left: 16px; font-size: 12px; color: var(--dim); }
+.sub-fold li + li { margin-top: 4px; }
 
 .banner { border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
 .banner.warn { background: var(--warn-bg); color: var(--warn-fg); }

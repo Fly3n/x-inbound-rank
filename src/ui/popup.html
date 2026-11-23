@@ -66,67 +66,35 @@
       <ol id="list"></ol>
     </section>
 
-    <!-- 设置页：常用的在前，说明和清空在最后、默认折叠 -->
+    <!-- 设置页：3 张核心功能卡 + 底部统一高级与说明折叠区 -->
     <section id="view-settings" hidden>
       <section class="card">
-        <h2>数据读取 <button class="q" data-tip="tip-data" aria-label="数据读取说明">?</button></h2>
-        <div class="tip" id="tip-data" hidden><p>开启自动更新后，别人回我无需先补历史即可按天慢慢积累，每天上午（08:00–11:30）和晚间（18:00–22:30）在当前 X 页面可见且最近 5 分钟内有真实浏览交互时各随机执行一次，发现与上次位置重叠即停（单轮安全上限 60 页）。我回别人默认通过浏览器发帖旁听实时记录，如需手机端回复兜底可在下方开启每 2 天低频自动同步。「立即更新」同样不要求先补历史，有 10 分钟冷却，成功后下一次自动更新放到下一时段。</p></div>
+        <h2>数据同步 <button class="q" data-tip="tip-data" aria-label="数据同步说明">?</button></h2>
+        <div class="tip" id="tip-data" hidden><p>开启自动更新后，别人回我无需先补历史即可按天积累，每天上午（08:00–11:30）和晚间（18:00–22:30）在当前 X 页面可见且最近 5 分钟内有真实浏览交互时各随机执行一次，发现与上次位置重叠即停（单轮安全上限 60 页）。我回别人默认通过浏览器发帖旁听实时记录，如需手机端回复兜底可勾选每 2 天低频自动同步。「立即更新」不要求先补历史，有 10 分钟冷却，成功后下一次自动更新放到下一时段。</p></div>
 
         <div class="row between">
           <label class="line"><input type="checkbox" id="fetchEnabled"> 每天两次自动更新「别人回我」（上午/晚间）</label>
           <button id="updateNow" aria-describedby="updateStatus">立即更新</button>
         </div>
         <p class="hint" id="updateStatus" role="status"></p>
+        <label class="line"><input type="checkbox" id="outAutoSync"> 我回别人每 2 天低频自动同步（手机端回复兜底；电脑端发回复已自动记录）</label>
         <dl class="data-status" id="updateSummary" aria-label="上次读取摘要"></dl>
-
-        <div class="row field">
-          <span>补历史范围</span>
-          <select id="initRange">
-            <option value="7">最近 7 天</option>
-            <option value="15">最近半个月</option>
-          </select>
-        </div>
-        <p class="hint">点「补历史」时往回读多远。榜单看多久在榜单页单独选。补读只在 X 页面可见时继续，切走就暂停；不补历史也能直接开启自动更新慢慢攒。</p>
-
-        <div class="src">
-          <div class="row between">
-            <span><b>别人回我</b> <button class="q" data-tip="tip-in" aria-label="别人回我说明">?</button></span>
-            <span class="row">
-              <span id="inReason" class="init-reason" role="status"></span>
-              <button aria-describedby="inReason" id="start" class="primary">补历史</button>
-              <button id="pause" hidden>暂停</button>
-              <button id="resume" hidden>继续</button>
-            </span>
-          </div>
-
+        <div id="jobControls" class="sync-notice" hidden>
           <p id="jobStatus" hidden></p>
-          <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
-          <dl class="data-status" id="coverage"></dl>
-        </div>
-
-        <div class="src">
-          <div class="row between">
-            <span><b>我回别人</b> <button class="q" data-tip="tip-out" aria-label="我回别人说明">?</button></span>
-            <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">补历史</button></span>
+          <div class="row">
+            <button id="pause" hidden>暂停</button>
+            <button id="resume" hidden>继续</button>
           </div>
-
-          <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回 N」。默认仅通过浏览器发帖旁听实时记录（零主动请求）；也可按需点「补历史」或开启低频同步兜底。</p></div>
-          <label class="line"><input type="checkbox" id="outAutoSync"> 每 2 天低频自动同步（手机端回复兜底；电脑端发回复已自动记录）</label>
-          <dl class="data-status" id="outStatus"></dl>
+        </div>
+        <div id="outNotice" class="sync-notice" hidden>
           <p class="hint" id="outIssue" role="status" hidden></p>
           <a id="outRepliesLink" target="_blank" rel="noreferrer" hidden>打开我的回复页</a>
         </div>
-
       </section>
 
-      <details class="card fold">
-        <summary>本机存储（两份数据合计）</summary>
-        <p class="hint" id="storage"></p>
-      </details>
-
       <section class="card">
-        <h2>时间线和发帖时显示什么 <button class="q" data-tip="tip-show" aria-label="时间线和发帖时显示什么说明">?</button></h2>
-        <div class="tip" id="tip-show" hidden><p>选择名字旁显示的标签，以及排期弹窗里的快捷档期。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。排期开关不受自动更新开关影响。</p></div>
+        <h2>页面显示 <button class="q" data-tip="tip-show" aria-label="页面显示说明">?</button></h2>
+        <div class="tip" id="tip-show" hidden><p>选择 X 页面名字旁显示的标签，以及排期弹窗里的快捷档期。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。排期开关不受自动更新开关影响。</p></div>
         <label class="line"><input type="checkbox" id="showRank"> 名次标签（名次 + 回复次数）</label>
         <label class="line"><input type="checkbox" id="showOut"> 名次标签里带上「我回他几次」</label>
         <label class="line"><input type="checkbox" id="showRel"> 关系（互 / 粉）</label>
@@ -135,8 +103,8 @@
       </section>
 
       <section class="card">
-        <h2>榜单口径 <button class="q" data-tip="tip-rules" aria-label="榜单口径说明">?</button></h2>
-        <div class="tip" id="tip-rules" hidden><p>先按回复次数筛选，再取前几名。榜单和时间线标签共用这两个设置。</p></div>
+        <h2>榜单口径与标签颜色 <button class="q" data-tip="tip-rules" aria-label="榜单口径与标签颜色说明">?</button></h2>
+        <div class="tip" id="tip-rules" hidden><p>先按回复次数筛选，再取前几名；颜色按回复次数从最高门槛向下匹配。榜单和时间线标签共用这些设置。</p></div>
         <div class="row field">
           <span>最多到第</span>
           <span class="stepper" data-key="topN"><button data-dir="-1">−</button><input type="number" id="topN" min="10" max="500"><button data-dir="1">+</button></span>
@@ -147,59 +115,77 @@
           <span class="stepper" data-key="minCount"><button data-dir="-1">−</button><input type="number" id="minCount" min="1" max="99"><button data-dir="1">+</button></span>
           <span>次才上榜</span>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>标签颜色 <button class="q" data-tip="tip-colors" aria-label="标签颜色说明">?</button></h2>
-        <div class="tip" id="tip-colors" hidden><p>颜色按回复次数分档，从最高门槛向下匹配。</p></div>
+        <div class="sub-divider"></div>
         <div id="tiers"></div>
         <div class="row">
           <button id="addTier">＋ 加一档</button>
         </div>
         <p class="hint">效果预览：</p>
         <div class="row" id="preview"></div>
+        <div class="row actions">
+          <button id="reset">恢复默认</button>
+        </div>
       </section>
 
-      <div class="row actions">
-        <button id="reset">口径和颜色恢复默认</button>
-      </div>
+      <details class="card fold" id="advanced">
+        <summary>高级设置与说明</summary>
 
-      <details class="card fold">
-        <summary>数据怎么读取</summary>
-        <ul>
-          <li>别人回我：读取 X 的「通知 → 提及」。日常打开通知页后可用新版读取方式。</li>
-          <li>我回别人：默认通过浏览器发帖实时旁听记录（零主动请求）；开启低频自动同步或点「补历史」时才读取回复栏，首次缺少读取参数时按提示打开回复页一次即可自动继续。</li>
-          <li>不补历史也能直接开启自动更新慢慢攒；补读只在页面前台显示时继续，切走就暂停。所有主动读取只在本地时间 08:00–24:00 进行。</li>
-          <li>自动更新每天上午、晚间各随机一次，已有记录按帖子 ID 去重。X 页面必须在前台显示且近期有浏览交互；白天亮屏离座、后台标签页和最小化窗口不会发请求。</li>
-          <li>关闭自动更新不会影响「补历史」或「立即更新」；手动读取同样只在页面前台显示时发出请求。</li>
-        </ul>
-      </details>
+        <details class="sub-fold">
+          <summary>补读历史与数据详情</summary>
+          <div class="row field">
+            <span>补历史范围</span>
+            <select id="initRange">
+              <option value="7">最近 7 天</option>
+              <option value="15">最近半个月</option>
+            </select>
+          </div>
+          <p class="hint">仅按需使用：开启自动更新即可直接攒新数据；点「补历史」才会把过去 7 天或半个月补齐。仅在页面前台显示时继续，切走自动暂停。</p>
 
-      <details class="card fold">
-        <summary>统计口径与读取频率</summary>
-        <ul>
-          <li>别人回我：在我自己的帖子下直接回复我的都算，各层都计入。</li>
-          <li>我回别人：只算我直接评论对方根帖的第一层。</li>
-          <li>别人回我每天上午、晚间各随机检查一次，发现与上次接续点重叠即停（单轮安全上限 60 页）；我回别人默认零主动请求实时旁听，启用低频同步时每 2 天抽一次检查。</li>
-          <li>后台页间停顿与补历史批间隔均按非均匀间隔模拟真人操作；手动更新有十分钟冷却。</li>
-        </ul>
-      </details>
+          <div class="src">
+            <div class="row between">
+              <span><b>别人回我</b> <button class="q" data-tip="tip-in" aria-label="别人回我说明">?</button></span>
+              <span class="row">
+                <span id="inReason" class="init-reason" role="status"></span>
+                <button aria-describedby="inReason" id="start" class="primary">补历史</button>
+              </span>
+            </div>
+            <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
+            <dl class="data-status" id="coverage"></dl>
+          </div>
 
-      <details class="card fold">
-        <summary>风险说明</summary>
-        <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。插件按人的作息设计：只在本地时间 08:00–24:00、X 页面前台可见时请求；每天低频读取，夜间和后台标签页零自动请求。全程只读，不点赞、不关注、不发帖；数据只存在本机。风险仍无法保证为零。</p>
-      </details>
+          <div class="src">
+            <div class="row between">
+              <span><b>我回别人</b> <button class="q" data-tip="tip-out" aria-label="我回别人说明">?</button></span>
+              <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">补历史</button></span>
+            </div>
+            <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回 N」。默认仅通过浏览器发帖旁听实时记录（零主动请求），也可手动补历史。</p></div>
+            <dl class="data-status" id="outStatus"></dl>
+          </div>
+        </details>
 
-      <details class="card fold">
-        <summary>清空数据</summary>
-        <p class="hint">清掉该账号在本机的两份回复数据和读取进度，榜单和时间线标签都会消失，不可恢复。账号绑定和设置保留。</p>
-        <button id="clear" class="danger">清空该账号的数据</button>
+        <details class="sub-fold">
+          <summary>本机存储与清空数据</summary>
+          <p class="hint" id="storage"></p>
+          <p class="hint">清空会删掉该账号在本机的两份回复数据和读取进度，榜单和时间线标签都会消失，不可恢复。账号绑定和设置保留。</p>
+          <button id="clear" class="danger">清空该账号的数据</button>
+        </details>
+
+        <details class="sub-fold">
+          <summary>账号管理</summary>
+          <button id="disableAccount">关闭 X 友</button>
+          <p class="hint">按 X 的数字用户 ID 识别账号，改 @用户名 不会改变数据归属。关闭会暂停此账号的功能和更新，保留本机数据。</p>
+        </details>
+
+        <details class="sub-fold">
+          <summary>口径与风险说明</summary>
+          <ul>
+            <li><b>别人回我</b>：根帖是我的帖子，直接回复我的每一条都算（不分层），决定榜单排名。</li>
+            <li><b>我回别人</b>：只算我直接评论对方根帖的第一层。默认在电脑浏览器发帖时实时旁听（零主动请求），可选每 2 天低频同步兜底手机端。</li>
+            <li><b>安全节律</b>：主动读取仅在本地时间 08:00–24:00 且 X 页面前台可见时执行；自动更新额外要求近 5 分钟内有真实页面交互，发现重叠即停（单轮最多 60 页）、非均匀停顿。</li>
+            <li><b>隐私与风险</b>：全程只读 GET，不点赞、不关注、不发帖，数据仅存本机（滚动保留最近 90 天）。使用网页内部接口仍无法保证风险为零。</li>
+          </ul>
+        </details>
       </details>
-      <section class="card">
-        <h2>账号</h2>
-        <button id="disableAccount">关闭 X 友</button>
-        <p class="hint">按 X 的数字用户 ID 识别账号，改 @用户名 不会改变数据归属。关闭会暂停此账号的功能和更新，保留本机数据。</p>
-      </section>
     </section>
   </main>
 

@@ -269,6 +269,7 @@ async function draw() {
     ? `我回别人 · ${outProgress}${outBad}`
     : '';
   $('outLine').hidden = !$('outLine').textContent;
+  $('outNotice').hidden = $('outIssue').hidden && outLink.hidden;
   $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
     : outCoveredNow && !outPending
       ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : 'X 列表到底，没有读到记录') : '已覆盖所选范围')
@@ -294,6 +295,7 @@ async function draw() {
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
+  $('jobControls').hidden = $('jobStatus').hidden && $('pause').hidden && $('resume').hidden;
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
   $('start').textContent = starting.has('start') ? '启动中' : inPhase || '补历史';
@@ -412,12 +414,13 @@ $('reset').addEventListener('click', () => {
 function download(name, lines) {
   const csv = buildCsv(lines);
   const d = new Date();
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
   const a = el('a', {
-    href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
+    href: url,
     download: `${name}_${view.handle || 'X'}_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.csv`,
   });
   a.click();
-  URL.revokeObjectURL(a.href);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
   $('exportMenu').open = false;
 }
 

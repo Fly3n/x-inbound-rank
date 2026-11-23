@@ -63,12 +63,12 @@ export function buildBoardExportRows(rows, outCountable) {
 export function buildAllExportRows(inbound, outAll) {
   const counted = new Set(underMyPosts(inbound, outAll).map((e) => e.id)); // 计入回复榜的（在我帖子下回我的）
   const out = outAll.filter((o) => !o.own); // 我在自己帖子下的回复只用来认对话，不导出
-  const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
+  const handleOf = new Map(inbound.filter((e) => e.actor_handle).map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
   const link = (id) => `https://x.com/i/status/${id}`;
   const rows = [
     ...inbound.map((e) => ({
       ts: e.created_at,
-      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, counted.has(e.id) ? '是' : '否', e.text || '', link(e.id)],
+      line: ['别人回我', fullTime(e.created_at), e.actor_name, e.actor_handle ? `@${e.actor_handle}` : `用户编号 ${e.actor_id}`, counted.has(e.id) ? '是' : '否', e.text || '', link(e.id)],
     })),
     ...out.map((e) => {
       const h = e.root_handle || handleOf.get(e.root_user_id);
