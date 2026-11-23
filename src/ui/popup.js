@@ -1,25 +1,20 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
 import {
   COLORS, LIMITS, DEFAULT_RULES, KEEP_DAYS, WARN_DAYS, DAY_MS,
-  colorOf, underMyPosts, countsFromMe, outboundReady, outboundCountable,
+  colorOf, outboundReady, outboundCountable,
   inboundInitCovered, outboundInitCovered,
 } from '../rank.js';
+import {
+  COLOR_NAMES, SHOW_KEYS, STORAGE_WATCH,
+  pad, fmtDay, fmtShortDay, fmtTime, fullTime, windowLabel,
+  jobText, readSummary, formatDiagnosticRow, formatDiagnosisResult, stepRuleValue,
+  buildCsv, buildBoardExportRows, buildAllExportRows, buildDiagnosticReport,
+} from './popup-helpers.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
 const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outCountable: false }; // open：榜单里点开的那个人
-
-const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
-const pad = (n) => String(n).padStart(2, '0');
-const fmtDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1} 月 ${d.getDate()} 日`; };
-const fmtShortDay = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; };
-const fmtTime = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fmtExactTime = (ts) => {
-  const d = new Date(ts);
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-};
-const windowLabel = (days) => ({ 15: '半个月', 30: '一个月', 60: ' 2 个月', 90: ' 3 个月' })[days] || ` ${days} 天`;
 
 function el(tag, props = {}, children = []) {
   const { dataset, ...rest } = props;
@@ -36,23 +31,6 @@ function banners(items) {
 /** 用户正在输入的框不去覆盖它的值。 */
 function setValue(input, value) {
   if (document.activeElement !== input) input.value = String(value);
-}
-
-function jobText(job) {
-  const reached = job.oldestTs ? `，已回溯到 ${fmtDay(job.oldestTs)}` : '';
-  const progress = `已读 ${job.pages} 页、入库 ${job.added} 条${reached}`;
-  const next = job.nextAt && job.nextAt > Date.now() ? `，下一次请求约 ${fmtTime(job.nextAt)}` : '';
-  return {
-    running: `进行中（范围 ${job.rangeDays} 天）：${progress}${next}`,
-    waiting_tab: `等待中：${job.message}。${progress}`,
-    paused: `已暂停：${job.message}。${progress}${job.auto ? next : ''}`,
-    error: `出错停止：${job.message}。${progress}`,
-    done: job.reachedEnd
-      ? job.oldestTs
-        ? `已完成，但没翻到 ${job.rangeDays} 天前：X 的提及列表到底了，最早只拿到 ${fmtDay(job.oldestTs)}。共入库 ${job.added} 条`
-        : '已完成：X 的提及列表是空的，没有可回填的数据'
-      : `已完成：回溯到 ${fmtDay(job.oldestTs)}（范围 ${job.rangeDays} 天），共读 ${job.pages} 页、入库 ${job.added} 条`,
-  }[job.status];
 }
 
 // ---------- 榜单页 ----------
@@ -350,19 +328,12 @@ async function draw() {
   $('fetchEnabled').checked = rules.fetchEnabled;
   $('updateNow').disabled = !isSession || !s.cursor.syncedId || updatingNow;
   $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
-  for (const k of SHOW) $(k).checked = rules[k];
+  for (const k of SHOW_KEYS) $(k).checked = rules[k];
 
   // 设置页：口径与颜色
   setValue($('topN'), rules.topN);
   setValue($('minCount'), rules.minCount);
   renderTiers(rules);
-}
-
-function readSummary(at, counts, exact = false) {
-  if (!at) return '暂无读取记录';
-  const existing = counts ? Math.max(0, (counts.read || 0) - (counts.added || 0)) : 0;
-  return (exact ? fmtExactTime(at) : fmtTime(at)) +
-    (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条 · 已有 ${existing} 条` : ' · 暂无条数');
 }
 
 function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
@@ -421,16 +392,12 @@ $('list').addEventListener('click', async (e) => {
 });
 
 // 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1；也可以直接输入，越界的由后台夹回范围
-const STEP = {
-  topN: (v, dir) => (dir > 0 ? (v < 50 ? 50 : v + 50) : v <= 50 ? LIMITS.topN[0] : v - 50),
-  minCount: (v, dir) => v + dir,
-};
 for (const box of document.querySelectorAll('.stepper')) {
   const key = box.dataset.key;
   const input = box.querySelector('input');
   box.addEventListener('click', (e) => {
     const dir = Number(e.target.dataset.dir);
-    if (dir) saveRules({ [key]: STEP[key](view.rules[key], dir) });
+    if (dir) saveRules({ [key]: stepRuleValue(key, view.rules[key], dir) });
   });
   input.addEventListener('change', async () => {
     await saveRules({ [key]: Number(input.value) });
@@ -451,8 +418,7 @@ $('reset').addEventListener('click', () => {
 
 // 导出为 CSV（带 BOM，Excel 直接打开不乱码）。纯本地生成文件，不发请求。
 function download(name, lines) {
-  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const csv = '\uFEFF' + lines.map((l) => l.map(cell).join(',')).join('\r\n');
+  const csv = buildCsv(lines);
   const d = new Date();
   const a = el('a', {
     href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
@@ -462,19 +428,6 @@ function download(name, lines) {
   URL.revokeObjectURL(a.href);
   $('exportMenu').open = false;
 }
-const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN', { hour12: false });
-
-const diagnosticNames = {
-  diagnostic_start: '开始回查', diagnostic_page: '回查一页', diagnostic_end: '回查结束',
-  web_mentions_response: '网页提及响应', save_failed: '本机写入失败',
-  pagination_stop: '结束翻页', updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
-  retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
-  pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据', scheduled_sync: '同步排期',
-};
-const diagnosticSources = {
-  'mentions-graphql': '别人回我 · 新接口', 'mentions-rest': '别人回我 · 旧接口',
-  mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新', scheduled: '发帖排期',
-};
 
 async function loadDiagnostics(account) {
   let timer;
@@ -502,23 +455,15 @@ async function showDiagnostics(exportAll = false) {
     if (!Array.isArray(rows)) throw new Error();
     status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
     $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
-      textContent: [fmtTime(r.at), diagnosticNames[r.event] || r.event, diagnosticSources[r.source],
-        r.status ? `HTTP ${r.status}` : r.event === 'request' ? ({ no_tab: 'X 页面未连接', network: '网络请求失败', no_session: '未登录', bad_tpl: '读取参数失效' }[r.outcome] || '读取未成功')
-          : r.event === 'scheduled_sync' ? ({ ok: '成功', need_tpl: '等待首次连接', tpl_expired: '参数已过期' }[r.outcome] || r.outcome || '') : '',
-        r.count != null && `共 ${r.count} 条`,
-        r.added != null && `新增 ${r.added} 条`,
-        r.waitMs && `${r.waitMs / 60_000} 分钟后`].filter(Boolean).join(' · '),
+      textContent: formatDiagnosticRow(r),
     })));
     if (!exportAll || !rows.length) return;
-    const report = {
-      schemaVersion: 4,
-      exportedAt: new Date().toISOString(),
+    const report = buildDiagnosticReport(rows, {
       extensionVersion: chrome.runtime.getManifest().version,
       platform: navigator.platform,
       browser: navigator.userAgent.match(/(?:Chrome|Chromium|Edg|Firefox|Version)\/[0-9.]+/g) || [],
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      events: rows,
-    };
+    });
     const link = el('a', {
       href: URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })),
       download: 'X 友-诊断日志.json',
@@ -559,15 +504,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
       status.textContent = result?.error || '回查未返回结果，请重载扩展后重试。';
       return;
     }
-    const reasons = {
-      post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
-      page_limit: '已达到单次回查页数上限，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
-      no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
-      account_disabled: '此账号已关闭插件', backoff: '账号正在限流退避',
-    };
-    const outcome = result.target
-      ? `；解析判定 ${result.target.reason}，本机${result.stored ? '已有' : '没有'}这条记录` : '';
-    status.textContent = `尝试 ${result.pages} 页，窗口内解析出 ${result.matches} 条。${reasons[result.reason] || `停止原因：${result.reason}`}${outcome}。可导出日志查看细节。`;
+    status.textContent = formatDiagnosisResult(result);
     await showDiagnostics();
   } catch {
     status.textContent = '回查未能完成，可刷新日志查看已记录的页。';
@@ -578,10 +515,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
 
 // 导出榜单：当前榜上的人，一人一行
 $('exportBoard').addEventListener('click', () =>
-  download(`回复榜_${view.rules.windowDays}天`, [
-    ['名次', '名字', 'ID', '回复次数', '我回他次数', '最近一次回复', '主页'],
-    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outCountable ? r.replied : '', fullTime(r.last), `https://x.com/${r.handle}`]),
-  ]),
+  download(`回复榜_${view.rules.windowDays}天`, buildBoardExportRows(view.rows, view.outCountable)),
 );
 
 // 导出全量数据：本机保存的全部统计相关回复，一条一行，两份数据放在同一张表里用「类型」区分
@@ -589,21 +523,7 @@ $('exportAll').addEventListener('click', async () => {
   const { account } = view;
   const { inbound, out: outAll } = await call('exportAll', { account });
   if (view.account !== account || !Array.isArray(inbound) || !Array.isArray(outAll)) return;
-  const counted = new Set(underMyPosts(inbound, outAll).map((e) => e.id)); // 计入回复榜的（在我帖子下回我的）
-  const out = outAll.filter((o) => !o.own); // 我在自己帖子下的回复只用来认对话，不导出
-  const handleOf = new Map(inbound.map((e) => [e.actor_id, e.actor_handle])); // 我回别人那份只存了用户编号，能对上的补成 @ID
-  const link = (id) => `https://x.com/i/status/${id}`;
-  const rows = [
-    ...inbound.map((e) => ({
-      ts: e.created_at,
-      line: ['别人回我', fullTime(e.created_at), e.actor_name, `@${e.actor_handle}`, counted.has(e.id) ? '是' : '否', e.text || '', link(e.id)],
-    })),
-    ...out.map((e) => {
-      const h = e.root_handle || handleOf.get(e.root_user_id);
-      return { ts: e.created_at, line: ['我回别人', fullTime(e.created_at), '', h ? `@${h}` : e.root_user_id ? `用户编号 ${e.root_user_id}` : '未知', countsFromMe(e) ? '是' : '否', e.text || '', link(e.id)] };
-    }),
-  ].sort((x, y) => y.ts - x.ts);
-  download('全量数据', [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入统计', '内容摘要', '链接'], ...rows.map((r) => r.line)]);
+  download('全量数据', buildAllExportRows(inbound, outAll));
 });
 
 $('account').addEventListener('change', (e) => { view.selected = e.target.value || null; view.tab = null; view.open = null; render(); });
@@ -663,8 +583,7 @@ $('outSync').addEventListener('click', () => initialize('outSync', 'syncOutNow')
 $('keepExport').addEventListener('click', () => $('exportAll').click());
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
-const SHOW = ['showRank', 'showOut', 'showRel', 'showPlace', 'showSchedule']; // 时间线上几种标签与排期辅助的开关
-for (const k of SHOW) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
+for (const k of SHOW_KEYS) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
 $('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空此账号在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
@@ -700,10 +619,9 @@ $('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
 // 任务状态、快照变化时自动刷新。读取过程中一页要写好几次存储，攒 200 毫秒再画；
 // 只看和界面有关的键（tplTry 这类后台自用的不管）
-const WATCH = /^(accounts|tpl:(replies|mentions)|(domWarning|settings|cursor|job|snap|alert):)/;
 let redrawTimer = null;
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !Object.keys(changes).some((k) => WATCH.test(k))) return;
+  if (area !== 'local' || !Object.keys(changes).some((k) => STORAGE_WATCH.test(k))) return;
   clearTimeout(redrawTimer);
   redrawTimer = setTimeout(render, 200);
 });

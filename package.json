@@ -9,6 +9,7 @@
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check-contracts.mjs && npm test",
     "release:check": "node scripts/release-check.mjs",
+    "popup:preview": "node scripts/popup-preview.mjs",
     "bridge": "node scripts/live-bridge.mjs",
     "bridge:install": "node scripts/install-bridge.mjs",
     "bridge:uninstall": "node scripts/install-bridge.mjs uninstall"
