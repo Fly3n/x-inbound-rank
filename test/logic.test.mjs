@@ -2,6 +2,8 @@
 // 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import '../src/content/rel.js';
 import '../src/content/schedule.js';
 import {
@@ -548,4 +550,39 @@ test('排期冲突与随机浮动：±15 分钟半开区间判定，大范围浮
   });
   assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于当前时间 10 分钟');
   assert.ok(boundaryPicked >= at(13, 0), '浮动后不能早于最近发帖 15 分钟');
+});
+
+test('抓取层：模板识别且自有请求集合有容量上限', async () => {
+  const fetcherCode = readFileSync(new URL('../src/x/fetcher.js', import.meta.url), 'utf8');
+  const sentUrls = [];
+  const ctx = {
+    location: { origin: 'https://x.com' },
+    URL,
+    URLSearchParams,
+    document: { cookie: 'twid=u%3D1; ct0=tok', documentElement: { lang: 'en' } },
+    fetch: async (url) => {
+      sentUrls.push(url);
+      return { ok: true, status: 200, headers: new Map(), text: async () => '{}' };
+    },
+  };
+  runInNewContext(fetcherCode, ctx);
+  const { tplKind, fetchMentions, fetchMyReplies, fetchScheduled, isOwn } = ctx.XIRFetcher;
+
+  assert.equal(tplKind('https://x.com/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D'), 'replies');
+  assert.equal(tplKind('https://x.com/i/api/graphql/Q2/NotificationsTimeline?variables=%7B%7D'), 'mentions');
+  assert.equal(tplKind('https://x.com/i/api/graphql/Q3/FetchScheduledTweets'), 'scheduled');
+  assert.equal(tplKind('https://evil.example/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D'), null);
+  assert.equal(tplKind('https://x.com/i/api/graphql/Q4/HomeTimeline?variables=%7B%7D'), null);
+
+  for (let i = 0; i < 505; i++) {
+    await fetchMentions(`c${i}`);
+  }
+  await fetchMyReplies('https://x.com/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D', 'c_out');
+  await fetchScheduled('https://x.com/i/api/graphql/Q3/FetchScheduledTweets');
+
+  assert.equal(sentUrls.length, 507);
+  assert.equal(isOwn(sentUrls[0]), false, '最早的请求应被淘汰');
+  assert.equal(isOwn(sentUrls[6]), false, '超出 500 上限的早期请求应被淘汰');
+  assert.equal(isOwn(sentUrls[7]), true, '第 500 个起的最新请求应保留');
+  assert.equal(isOwn(sentUrls.at(-1)), true, '最近发出的请求应保留');
 });

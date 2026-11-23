@@ -6,7 +6,6 @@
 // 每页 40 条，照模板重发不需要 x-client-transaction-id）。它的查询 ID 和 features 随 X 发版变，所以照着页面发过的请求（模板）发；
 // 还没有模板时用旧版 REST mentions.json（2026-11-13 实测 200，额度 180 次 / 15 分钟，不需要 x-client-transaction-id）。
 
-// eslint-disable-next-line no-unused-vars
 const XIRFetcher = (() => {
   const ENDPOINT = '/i/api/2/notifications/mentions.json';
   const PAGE_SIZE = 20; // 旧接口和「回复」栏：与网页版自己翻页的大小一致
@@ -52,6 +51,12 @@ const XIRFetcher = (() => {
   }
 
   const own = new Set(); // 我们自己发出的请求地址，内容脚本据此不把它们当成 X 页面的请求
+  const MAX_OWN = 500;
+  function rememberOwn(url) {
+    own.delete(url);
+    own.add(url);
+    while (own.size > MAX_OWN) own.delete(own.values().next().value);
+  }
 
   /** 用当前会话发一个只读 GET。返回 { ok, status, body, rateResetAt, userId, error }，不抛异常。 */
   async function get(url, extraHeaders = {}, diagnose = false) {
@@ -60,7 +65,7 @@ const XIRFetcher = (() => {
     const request = diagnose ? { requestUrl: url } : {};
     if (!csrf) return { ...request, ok: false, status: 0, userId, error: 'no_session' };
 
-    own.add(url);
+    rememberOwn(url);
     let res;
     try {
       res = await fetch(url, {
