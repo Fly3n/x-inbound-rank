@@ -78,4 +78,30 @@ test('页面仅旁听已启用会话，切号丢弃迟到响应和页面缓存',
   isolated.XIRRel.session();
   storageChanged({ accounts: { newValue: { 'uid-1': { enabled: false, userId: '1', activation: 6 } } } }, 'local');
   assert.equal(isolated.XIRRel.session(), null);
+
+  // CreateTweet 回复旁听仅对已启用账号触发，未启用或切号期间丢弃
+  storageChanged({ accounts: { newValue: { 'uid-1': { enabled: true, userId: '1', activation: 7 } } } }, 'local');
+  doc.cookie = 'twid=u%3D1';
+  const createTaps = [];
+  isolated.XIRRel.onCreateTweetTap = (text) => createTaps.push(text);
+  isolated.XIRRel.session();
+  const createUrl = origin + '/i/api/graphql/ct1/CreateTweet';
+  pending = window.fetch(createUrl, { method: 'POST' });
+  settle({
+    status: 200, headers: new Map(),
+    clone: () => ({ text: async () => '{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"9"}}}}}' }),
+  });
+  await pending;
+  await flush();
+  assert.equal(createTaps.length, 1, '已启用账号的 CreateTweet 响应触发旁听回调');
+
+  doc.cookie = 'twid=u%3D9';
+  pending = window.fetch(createUrl, { method: 'POST' });
+  settle({
+    status: 200, headers: new Map(),
+    clone: () => ({ text: async () => '{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"10"}}}}}' }),
+  });
+  await pending;
+  await flush();
+  assert.equal(createTaps.length, 1, '未启用账号的 CreateTweet 响应不触发旁听回调');
 });

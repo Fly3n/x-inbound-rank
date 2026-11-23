@@ -66,7 +66,7 @@ const XIRRel = (() => {
   const tweets = new Map(); // 帖子 ID -> { uid, conv, rtoStatus, rtoUser }
   const ops = new Set(); // 这个页面发过的接口请求的名字，只留最近 40 个（诊断用）
   // tpls：页面读「回复」列表、读通知、读已排期列表的请求地址（content.js 就绪之前来的先存着）；onTpl：content.js 就绪后接手
-  const api = { extract, relOf, placeOf, rel, tweets, ops, tpls: [], mentionsEvidence: [], onMentionsEvidence: null, onChange: null, onTpl: null, onScheduledTap: null, onPostEvent: null };
+  const api = { extract, relOf, placeOf, rel, tweets, ops, tpls: [], mentionsEvidence: [], onMentionsEvidence: null, onChange: null, onTpl: null, onCreateTweetTap: null, onScheduledTap: null, onPostEvent: null };
 
   // 页面开久了会越攒越多，超了就把最早的一批丢掉
   const trim = (map, max) => {
@@ -168,6 +168,13 @@ const XIRRel = (() => {
       if (e.data.xirTapOp === 'FetchScheduledTweets') {
         try {
           api.onScheduledTap?.(e.data.xirTap);
+        } catch {
+          // 忽略
+        }
+      }
+      if (e.data.xirTapOp === 'CreateTweet') {
+        try {
+          api.onCreateTweetTap?.(e.data.xirTap);
         } catch {
           // 忽略
         }

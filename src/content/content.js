@@ -121,6 +121,7 @@
   XIRRel.onMentionsEvidence = ({ url, status, metadata, text }) => {
     if (alive && !XIRFetcher.isOwn(url)) sendForSession({ type: 'xir:mentions:evidence', url, status, metadata, text });
   };
+  XIRRel.onCreateTweetTap = (text) => { if (alive) sendForSession({ type: 'xir:outbound:tap', text }); };
   XIRRel.onScheduledTap = (text) => { if (alive) sendForSession({ type: 'xir:scheduled:tap', text }); };
   XIRRel.onPostEvent = (ev) => { if (alive) sendForSession({ type: 'xir:postEvent', ...ev }); };
 

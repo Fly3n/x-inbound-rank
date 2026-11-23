@@ -40,10 +40,10 @@ test('我回别人：首次手动初始化、模板获取、范围切换与规�
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
   assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
 
-  // 下一次自动时间未到时，遗留闹钟也不会发请求
+  // 下一次自动时间未到时，遗留闹钟也不会发请求；若启用低频同步，间距至少 48 小时
   await fire('out');
   assert.equal(server.outCalls, 3);
-  assert.ok(store['cursor:me'].out.nextAutoAt - Date.now() >= 8 * 60 * 60_000);
+  assert.ok(store['cursor:me'].out.nextAutoAt - Date.now() >= 48 * 60 * 60_000);
 
   // 榜单范围切到半个月、一个月：榜单和标签快照立刻按新范围重算，不发请求
   assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
@@ -74,9 +74,14 @@ test('我回别人：首次手动初始化、模板获取、范围切换与规�
 });
 
 test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界', { timeout: 20_000 }, async () => {
-  // 改了初始化范围也不会自己去读：到点后的日常更新只接到接续点
-  await setSettings({ initDays: 15 });
+  // 默认方案 A（outAutoSync: false）下：就算次日窗口到了也不自动发回复栏请求；手动开启方案 B 才定时同步
   let outBefore = server.outCalls;
+  store['cursor:me'].out.nextAutoAt = 0;
+  await fire('out');
+  assert.equal(server.outCalls, outBefore, '默认关闭低频同步时，自动闹钟不请求回复栏');
+
+  await setSettings({ initDays: 15, outAutoSync: true });
+  outBefore = server.outCalls;
   store['cursor:me'].out.nextAutoAt = 0;
   await fire('out');
   assert.equal(server.outCalls - outBefore, 1);
@@ -266,8 +271,85 @@ test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeou
     delete alarms['out:me'];
     await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
     assert.equal(alarms['out:me'], undefined, '达到上限后页面上线也不再安排自动读取');
+    await send({ type: 'setSettings', account: 'me', patch: { outAutoSync: false } });
+    await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+    assert.equal(alarms['out:me'], undefined, '关闭低频同步且无上限挂起时不安排自动出站闹钟');
   } finally {
     outFeed.splice(0, outFeed.length, ...savedFeed);
     store['cursor:me'].out = savedOutState;
   }
+});
+
+test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留日志且不动手机端游标', { timeout: 20_000 }, async () => {
+  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
+  await setSettings({ fetchEnabled: true, outAutoSync: false, windowDays: 15 });
+  await send({ type: 'startBackfill', account: 'me' });
+  await until(() => job()?.status === 'done' || job()?.nextAt, '重新放入入站基线');
+  while (job()?.status === 'running') await fireJob();
+
+  const beforeOutCalls = server.outCalls;
+  await fire('out');
+  assert.equal(server.outCalls, beforeOutCalls, '方案 A 默认自动更新不请求出站接口');
+
+  const createPayload = ({ id, replyTo, toUid, toHandle, conv, text }) => JSON.stringify({
+    data: {
+      create_tweet: {
+        tweet_results: {
+          result: {
+            rest_id: id,
+            core: { user_results: { result: { rest_id: '1', core: { screen_name: 'Me' } } } },
+            legacy: {
+              id_str: id,
+              user_id_str: '1',
+              created_at: new Date(Date.now()).toUTCString(),
+              full_text: text,
+              in_reply_to_status_id_str: replyTo,
+              in_reply_to_user_id_str: toUid,
+              in_reply_to_screen_name: toHandle,
+              conversation_id_str: conv,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // 1. 直接评论 Fan：实时记入并显示「我回 1」，同时不写入 cur.out.lastAt/syncedId
+  const tapRes = await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9901', replyTo: '50', toUid: '2', toHandle: 'Fan', conv: '50', text: '@Fan 来了' }),
+  });
+  assert.deepEqual(tapRes, { ok: true, added: 1 });
+  assert.equal((await boardRows())[0].replied, 1);
+  assert.equal(store['snap:me'].users.fan.replied, 1);
+  assert.equal(store['cursor:me'].out, undefined, '旁听入库不伪造回复栏同步游标或时间');
+
+  // 2. 重复同一条帖子编号与二层/自帖回复：不重复计入
+  assert.deepEqual(await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9901', replyTo: '50', toUid: '2', toHandle: 'Fan', conv: '50', text: '@Fan 来了' }),
+  }), { ok: true, added: 0 });
+  await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9902', replyTo: '599', toUid: '9', toHandle: 'Other', conv: '50', text: '二层' }),
+  });
+  await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9903', replyTo: '100', toUid: '1', toHandle: 'Me', conv: '100', text: '自回复' }),
+  });
+  assert.equal((await boardRows())[0].replied, 1, '重复 ID、二级回复和自己帖子下回复都不误算');
+
+  // 3. 异常载荷记入后台诊断日志，不污染数据
+  await pageSend({ type: 'xir:outbound:tap', text: JSON.stringify({ data: { unexpected: true } }) });
+  const logs = await send({ type: 'getDiagnostics', account: 'me' });
+  assert.ok(logs.some((e) => e.event === 'outbound_tap_unmatched' && e.reason === 'missing_tweet_result'));
+  assert.ok(logs.some((e) => e.event === 'outbound_tap' && e.postId === '9901' && e.added === 1));
+
+  // 4. 手动「立即更新」在方案 A 默认下只刷新别人回我，不再强求先初始化我回别人
+  Object.assign(store['cursor:me'], { lastManualAt: 0, nextIncAt: 0, lastAttemptAt: 0 });
+  const receipt = await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.outboundPassive, true);
+  assert.equal(receipt.readAt.outbound, null);
+  assert.equal(server.outCalls, beforeOutCalls);
 });

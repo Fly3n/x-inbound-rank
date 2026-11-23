@@ -170,7 +170,7 @@ test('入站和出站可信空列表初始化', { timeout: 20_000 }, async () =>
     assert.equal(store['cursor:me'].syncedId, '0');
     assert.equal(inboundInitCovered(store['cursor:me'].lastBackfill, store['cursor:me'].syncedId, 7), true);
 
-    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true, outAutoSync: true } });
     await send({ type: 'syncOutNow', account: 'me' });
     await until(() => store['cursor:me'].out?.lastAt, '空的我回别人初始化完成');
     const emptyOut = store['cursor:me'].out;

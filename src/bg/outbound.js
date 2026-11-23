@@ -1,16 +1,16 @@
-// 我回别人：读取我自己主页「回复」栏的同步、初始化与限流分段续跑。
+// 我回别人：日常浏览器发帖实时旁听入库，以及按需补历史 / 低频自动兜底同步。
 import { putEvents, kvGet, kvRemove, keys, getSettings, OUT } from '../db.js';
 import { DAY_MS, OUT_SCHEMA } from '../rank.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
-import { parseMyReplies, ParseError, idGt } from '../x/parser.js';
+import { parseCreatedReply, parseMyReplies, ParseError, idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, OUT_ALARM, alarmFor,
-  enabledAccount, now, rand, sleep, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
+  enabledAccount, now, rand, sleep, humanIncDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot, nextOutAutoSlot,
   temporaryUnavailable, serviceWait, tryAcquireBusy, releaseBusy, updateCursor, refreshSnapshot,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { hasVisiblePage } from './accounts.js';
+import { hasVisiblePage, senderAccount } from './accounts.js';
 import { fetchViaTab } from './transport.js';
 
 export const saveOut = (account, patch) =>
@@ -18,7 +18,42 @@ export const saveOut = (account, patch) =>
     cur.out = { ...cur.out, ...patch };
   });
 
-/** 读取已排队的初始化，或更新已经初始化过的账号。 */
+/** 旁听浏览器发回复响应，实时写入 OUT（不推 syncedId / lastAt，避免遮蔽手机端回复）。 */
+export async function handleOutboundTap(msg, sender) {
+  const account = await senderAccount(msg, sender);
+  const { text } = msg;
+  if (!account || typeof text !== 'string' || text.length > 8_000_000) return {};
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    await record('outbound_tap_unmatched', { account, reason: 'invalid_json' });
+    return {};
+  }
+  const me = (await kvGet(keys.accounts, {}))[account];
+  if (!me?.enabled) return {};
+  const parsed = parseCreatedReply(body, me);
+  if (!parsed.ok) {
+    await record('outbound_tap_unmatched', { account, reason: parsed.reason });
+    return {};
+  }
+  if (!parsed.event) return {};
+  const added = await putEvents(account, [parsed.event], OUT);
+  await record('outbound_tap', {
+    account,
+    postId: parsed.event.id,
+    own: !!parsed.event.own,
+    direct: parsed.event.reply_to_id === parsed.event.conversation_id,
+    added,
+  });
+  if (added > 0) {
+    await refreshSnapshot(account).catch(() => {});
+    queueBridgePush();
+  }
+  return { ok: true, added };
+}
+
+/** 读取已排队的补历史，或更新已经同步过的账号。 */
 export async function syncOut(account, manual = false) {
   if (!await enabledAccount(account)) return;
   const settings = await getSettings(account);
@@ -31,9 +66,9 @@ export async function syncOut(account, manual = false) {
 
     const prev = cur.out || {};
     const pending = !!prev.resume || !!prev.retryAt || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(prev.status);
-    // 手动读取一旦开始，就允许跨分段续完；自动读取只受开关和上午窗口约束。
+    // 手动读取一旦开始，就允许跨分段续完；自动读取仅在同时打开自动更新与低频同步开关时才启动。
     const taskManual = manual || (!!prev.manualTask && pending);
-    if (!taskManual && !settings.fetchEnabled) return;
+    if (!taskManual && (!settings.fetchEnabled || !settings.outAutoSync)) return;
     if (!taskManual && !pending && !inAutoSlot()) return;
     if (!inActiveHours()) {
       if (!manual) {
@@ -62,9 +97,9 @@ export async function syncOut(account, manual = false) {
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when });
       return;
     }
-    // 达到单次上限后已经明确报错停下：自动闹钟不要继续烧额度，等用户手动点初始化或立即更新再试
+    // 达到单次上限后已经明确报错停下：自动闹钟不要继续烧额度，等用户手动点补历史或立即更新再试
     if (!manual && prev.status === 'error' && prev.limitReached) return;
-    const autoDue = prev.nextAutoAt ?? (prev.lastAt ? nextAutoSlot(prev.lastAt) : 0);
+    const autoDue = prev.nextAutoAt ?? (prev.lastAt ? nextOutAutoSlot(prev.lastAt) : 0);
     const recovering = pending || prev.status === 'need_tpl';
     const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0, !manual && !recovering ? autoDue : 0);
     if (nextAt > now()) {
@@ -74,15 +109,14 @@ export async function syncOut(account, manual = false) {
     if (!manual && !(await hasVisiblePage(account))) return;
     const initDays = prev.initDays ?? settings.initDays;
     const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
-    // 第一次必须手动点「初始化」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
+    // 第一次必须手动点「补历史」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
     if (!prev.lastAt && !prev.syncedId && prev.fullFor !== 0) return;
-    // 完整读：手动初始化（fullFor 被清成 0）、或本机数据是旧版本存的——读到初始化范围的起点。否则读到上次位置之后再回看一段。
+    // 完整读：手动补历史（fullFor 被清成 0）、或本机数据是旧版本存的——读到补历史范围的起点。否则读到与上次位置重叠即停。
     const full = !prev.syncedId || prev.fullFor === 0 || (prev.schema || 1) < OUT_SCHEMA;
     // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
     const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
     const stopAt = full ? null : resume?.stopAt || prev.syncedId;
-    // 这个接口一轮最多读五页；页间等待保持在 Chrome 的空闲回收线以内。
-    const gap = PACE.incPageGapMs;
+    // 这个接口一轮最多读五页；页间使用非均匀停顿且低于 Chrome 空闲回收线。
     const maxPages = PACE.outPages; // 这个接口额度小，不管哪种读法一轮都只读几页
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
@@ -105,9 +139,10 @@ export async function syncOut(account, manual = false) {
     const run = now();
     const batch = { read: 0, added: 0 };
     for (; pages < maxPages; pages++) {
-      if (pages) await sleep(rand(gap));
+      if (pages) await sleep(humanIncDelay());
       if (!await enabledAccount(account)) return;
-      if (!taskManual && !(await getSettings(account)).fetchEnabled) return saveOut(account, { status: 'error', message: '自动更新已关闭，读取已暂停。' });
+      const curSettings = await getSettings(account);
+      if (!taskManual && (!curSettings.fetchEnabled || !curSettings.outAutoSync)) return saveOut(account, { status: 'error', message: '自动更新已关闭，读取已暂停。' });
       const trace = { account, mode: full ? 'outbound_backfill' : manual ? 'outbound_manual' : 'outbound_auto', run, page: pages + 1 };
       const r = await fetchViaTab(account, { kind: 'out', tpl: tpl.url, cursor }, trace);
       // 没有 X 标签页、或登录的不是这个账号：自动读的时候悄悄等下一轮，手动点的要说清楚为什么没读
@@ -177,7 +212,7 @@ export async function syncOut(account, manual = false) {
       }
       const ended = !p.oldestId || !p.bottomCursor; // 列表到底了
       const reachedTarget = p.newestTs != null && p.newestTs < targetTs;
-      const crossedCheckpoint = !stopAt || !!(p.newestId && !idGt(p.newestId, stopAt));
+      const crossedCheckpoint = !stopAt || !!(p.oldestId && !idGt(p.oldestId, stopAt));
       const stoppedByTime = full ? reachedTarget : crossedCheckpoint;
       const endedBeforeCheckpoint = ended && !full && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
       if (endedBeforeCheckpoint) {
@@ -185,7 +220,7 @@ export async function syncOut(account, manual = false) {
         await saveOut(account, {
           status: 'error', retryAt: null, running: null, resume: null, pages,
           message: 'X 的回复列表在接上上次位置前提前结束，本轮已停止；接续点没有前移。',
-          limitReached: false, manualTask: false, nextAutoAt: nextAutoSlot(now()),
+          limitReached: false, manualTask: false, nextAutoAt: nextOutAutoSlot(now()),
         });
         return;
       }
@@ -225,7 +260,7 @@ export async function syncOut(account, manual = false) {
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId))
       ? topId
       : prev.syncedId || topId || (full && reachedEnd && !reachedTs ? EMPTY_SYNC_ID : null);
-    const nextAutoAt = nextAutoSlot(now());
+    const nextAutoAt = nextOutAutoSlot(now());
     const done = { status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId, resume: null, lastAt: now(), nextAutoAt, manualTask: false };
     await saveOut(account, full ? {
       ...done,
@@ -240,7 +275,8 @@ export async function syncOut(account, manual = false) {
       initDays: null,
       targetTs: null,
     } : done);
-    if ((await getSettings(account)).fetchEnabled) {
+    const latestSettings = await getSettings(account);
+    if (latestSettings.fetchEnabled && latestSettings.outAutoSync) {
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAutoAt });
     }
   } catch (e) {

@@ -14,7 +14,7 @@ import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled
 import { mentionsApi } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
 import { maybeIncremental, diagnoseMentions } from './incremental.js';
-import { syncOut, syncOutNow } from './outbound.js';
+import { handleOutboundTap, syncOut, syncOutNow } from './outbound.js';
 import { handleScheduledTap, handlePostEvent, handleScheduledSync } from './scheduled.js';
 
 export async function maybePrune(account) {
@@ -90,6 +90,7 @@ export const handlers = {
     }
     return {};
   },
+  'xir:outbound:tap': handleOutboundTap,
   'xir:scheduled:tap': handleScheduledTap,
   'xir:postEvent': handlePostEvent,
   'xir:scheduled:sync': handleScheduledSync,
@@ -124,9 +125,14 @@ export const handlers = {
     if (!result?.ok && !result?.deferred) return result;
     const inboundMessage = result?.deferred ? result.message : '';
 
+    const settings = await getSettings(account);
     const before = (await kvGet(keys.cursor(account), {})).out;
-    if (!before?.lastAt && !before?.syncedId) {
-      return { message: `${inboundMessage ? `${inboundMessage}；` : ''}请先初始化「我回别人」。` };
+    const shouldSyncOut = !!(settings.outAutoSync || before?.lastAt || before?.syncedId);
+    if (!shouldSyncOut) {
+      if (inboundMessage) return { message: `${inboundMessage}我回别人已由浏览器发帖旁听自动记录。` };
+      const { inLastReadAt } = await kvGet(keys.cursor(account), {});
+      if (inLastReadAt >= startedAt) return { ok: true, readAt: { inbound: inLastReadAt, outbound: null }, outboundPassive: true };
+      return { message: '别人回我已处理，我回别人已由浏览器发帖旁听自动记录。' };
     }
     await syncOut(account, true);
     const after = (await kvGet(keys.cursor(account), {})).out;

@@ -10,7 +10,7 @@ import {
   ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
   cleanRules, colorOf, DEFAULT_RULES, DAY_MS, inboundInitCovered, outboundInitCovered,
 } from '../src/rank.js';
-import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
+import { parseCreatedReply, parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
 
@@ -594,4 +594,58 @@ test('模拟真人节律：增量页间停顿低于空闲回收线，可选出�
   const base = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
   const nextOut = nextOutAutoSlot(base);
   assert.ok(nextOut - base >= PACE.outAutoGapMs, '可选低频出站自动同步间隔至少 48 小时');
+});
+
+test('parseCreatedReply：实时旁听 CreateTweet 回复解析（直评/深层/自回复/异常结构）', () => {
+  const meRef = { userId: '1', handle: 'Me' };
+  const makeCreate = ({ id = '9100', uid = '1', handle = 'Me', replyTo, toUid, toHandle, conv, text = '@u2 说得对', createdAt = 'Thu Nov 12 08:00:00 +0000 2026', visibility = false } = {}) => {
+    const inner = {
+      rest_id: id,
+      core: { user_results: { result: { rest_id: uid, core: { screen_name: handle } } } },
+      legacy: {
+        id_str: id, user_id_str: uid, created_at: createdAt, full_text: text,
+        ...(replyTo ? { in_reply_to_status_id_str: replyTo, in_reply_to_user_id_str: toUid, in_reply_to_screen_name: toHandle } : {}),
+        ...(conv ? { conversation_id_str: conv } : {}),
+      },
+    };
+    return {
+      data: {
+        create_tweet: {
+          tweet_results: {
+            result: visibility ? { __typename: 'TweetWithVisibilityResults', tweet: inner } : inner,
+          },
+        },
+      },
+    };
+  };
+
+  // 1. 直接评论他人根帖：记入 root_user_id，计入我回 N
+  const direct = parseCreatedReply(makeCreate({ replyTo: '100', toUid: '2', toHandle: 'Fan', conv: '100', visibility: true }), meRef);
+  assert.equal(direct.ok, true);
+  assert.equal(direct.event.root_user_id, '2');
+  assert.equal(direct.event.root_handle, 'Fan');
+  assert.equal(direct.event.text, '说得对');
+  assert.equal(countsFromMe(direct.event), true);
+
+  // 2. 二级回复（replyTo !== conv）：保留记录但 root_user_id 为 null，不计入我回 N
+  const deep = parseCreatedReply(makeCreate({ id: '9101', replyTo: '201', toUid: '4', toHandle: 'Other', conv: '200' }), meRef);
+  assert.equal(deep.ok, true);
+  assert.equal(deep.event.root_user_id, null);
+  assert.equal(countsFromMe(deep.event), false);
+
+  // 3. 在自己帖子下回复别人：标 own: true，不计入我回 N
+  const ownThread = parseCreatedReply(makeCreate({ id: '9102', replyTo: '300', toUid: '1', toHandle: 'Me', conv: '300' }), meRef);
+  assert.equal(ownThread.ok, true);
+  assert.equal(ownThread.event.own, true);
+  assert.equal(countsFromMe(ownThread.event), false);
+
+  // 4. 原创帖 & 他人帖 & X 接口错：安全忽略
+  assert.deepEqual(parseCreatedReply(makeCreate(), meRef), { ok: true, event: null, reason: 'not_reply' });
+  assert.deepEqual(parseCreatedReply(makeCreate({ uid: '9', handle: 'Else', replyTo: '100', toUid: '2', toHandle: 'Fan', conv: '100' }), meRef), { ok: true, event: null, reason: 'not_me' });
+  assert.deepEqual(parseCreatedReply({ errors: [{ message: 'rate limit' }] }, meRef), { ok: true, event: null, reason: 'api_error' });
+
+  // 5. 结构缺失：明确返回 ok: false 以便写入日志
+  assert.deepEqual(parseCreatedReply({ data: {} }, meRef), { ok: false, reason: 'missing_tweet_result' });
+  assert.deepEqual(parseCreatedReply(makeCreate({ replyTo: '100', toUid: '2', toHandle: 'Fan', conv: null }), meRef), { ok: false, reason: 'missing_conversation_id' });
+  assert.deepEqual(parseCreatedReply(makeCreate({ replyTo: '100', toUid: '2', toHandle: 'Fan', conv: '100', createdAt: 'bad-date' }), meRef), { ok: false, reason: 'missing_created_at' });
 });

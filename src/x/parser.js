@@ -231,6 +231,67 @@ function collectTweets(node, out, info) {
   for (const [k, v] of Object.entries(node)) if (!NESTED.has(k)) collectTweets(v, out, info);
 }
 
+const isAuthorOf = (me, userId, screenName) => {
+  if (me?.userId && userId) return userId === me.userId;
+  const myHandle = (me?.handle || '').toLowerCase();
+  return !!myHandle && !!screenName && screenName.toLowerCase() === myHandle;
+};
+
+function buildOutboundEvent({ id, createdAt, replyToId, toUserId, rootUser, rootScreen, conversationId, rawText }, me) {
+  const own = rootUser ? isAuthorOf(me, rootUser, rootScreen) : !me?.userId && isAuthorOf(me, null, rootScreen);
+  return {
+    ...(own ? { own: true } : {}),
+    id,
+    created_at: createdAt,
+    reply_to_id: replyToId,
+    to_user_id: toUserId || null,
+    root_user_id: rootUser || null,
+    root_handle: rootScreen || null,
+    conversation_id: conversationId,
+    text: snippet(rawText),
+  };
+}
+
+/** 解析网页端 CreateTweet 回复响应；仅在我本人发出的回复时返回可入库记录，结构不符则返回错误原因。 */
+export function parseCreatedReply(body, me = {}) {
+  if (!body || typeof body !== 'object') return { ok: false, reason: 'invalid_body' };
+  if (Array.isArray(body.errors) && body.errors.length && !body?.data?.create_tweet) {
+    return { ok: true, event: null, reason: 'api_error' };
+  }
+  let raw = body?.data?.create_tweet?.tweet_results?.result;
+  if (raw?.__typename === 'TweetWithVisibilityResults') raw = raw.tweet;
+  const l = raw?.legacy;
+  const id = l?.id_str || raw?.rest_id;
+  if (!raw || !l || typeof id !== 'string' || !id) {
+    return { ok: false, reason: 'missing_tweet_result' };
+  }
+  const u = raw.core?.user_results?.result;
+  const userId = l.user_id_str || u?.rest_id || null;
+  const screen = u?.core?.screen_name ?? u?.legacy?.screen_name ?? null;
+  if (!isAuthorOf(me, userId, screen)) return { ok: true, event: null, reason: 'not_me' };
+  if (!l.in_reply_to_status_id_str) return { ok: true, event: null, reason: 'not_reply' };
+  const conv = l.conversation_id_str;
+  if (!conv) return { ok: false, reason: 'missing_conversation_id' };
+  const parsedTs = Date.parse(l.created_at);
+  const createdAt = !Number.isNaN(parsedTs) ? parsedTs
+    : /^\d{15,24}$/.test(id) ? Number((BigInt(id) >> 22n) + SNOWFLAKE_EPOCH) : NaN;
+  if (!Number.isFinite(createdAt)) return { ok: false, reason: 'missing_created_at' };
+  const direct = conv === l.in_reply_to_status_id_str;
+  return {
+    ok: true,
+    event: buildOutboundEvent({
+      id,
+      createdAt,
+      replyToId: l.in_reply_to_status_id_str,
+      toUserId: l.in_reply_to_user_id_str,
+      rootUser: direct ? l.in_reply_to_user_id_str : null,
+      rootScreen: direct ? l.in_reply_to_screen_name : null,
+      conversationId: conv,
+      rawText: l.full_text ?? l.text,
+    }, me),
+  };
+}
+
 /**
  * @returns {{
  *   events: Array,   // 我在别人帖子下的回复：{ id, created_at, reply_to_id, to_user_id, root_user_id, root_handle, conversation_id, text }
@@ -247,11 +308,6 @@ export function parseMyReplies(body, me) {
     const err = body?.errors?.[0]?.message;
     throw new ParseError(err ? `X 返回错误：${String(err).slice(0, 200)}` : '返回里找不到时间线（instructions）');
   }
-
-  const myHandle = (me.handle || '').toLowerCase();
-  const isMe = (userId, screenName) =>
-    me.userId && userId ? userId === me.userId
-      : !!myHandle && !!screenName && screenName.toLowerCase() === myHandle;
 
   const byId = new Map(); // 本页出现过的所有帖子，用来查对话根帖是谁发的
   const mine = new Map(); // 我发的
@@ -284,7 +340,7 @@ export function parseMyReplies(body, me) {
       let last = null;
       for (const t of found) {
         byId.set(t.id_str, t);
-        if (isMe(t.user_id_str, t.screen)) {
+        if (isAuthorOf(me, t.user_id_str, t.screen)) {
           mine.set(t.id_str, t);
           last = t;
         }
@@ -327,18 +383,16 @@ export function parseMyReplies(body, me) {
     if (conv === t.in_reply_to_status_id_str) [rootUser, rootScreen] = [t.in_reply_to_user_id_str || null, t.in_reply_to_screen_name];
     else if (root) [rootUser, rootScreen] = [root.user_id_str, root.screen];
     // 我自己帖子下的回复：不计数，只记下「这个对话是我的」，帮别人回我的那份认出深层回复是不是在我帖子下
-    const own = (rootUser && isMe(rootUser, rootScreen)) || (!rootUser && !me.userId && !!rootScreen && rootScreen.toLowerCase() === myHandle);
-    events.push({
-      ...(own ? { own: true } : {}),
+    events.push(buildOutboundEvent({
       id: t.id_str,
-      created_at: tweetTime(t),
-      reply_to_id: t.in_reply_to_status_id_str, // 回的是哪条帖子；等于 conversation_id 就是直接评论根帖
-      to_user_id: t.in_reply_to_user_id_str || null,
-      root_user_id: rootUser, // null = 这一页里看不出根帖是谁的
-      root_handle: rootScreen || null, // 只给导出时显示用
-      conversation_id: conv,
-      text: snippet(t.full_text ?? t.text),
-    });
+      createdAt: tweetTime(t),
+      replyToId: t.in_reply_to_status_id_str, // 回的是哪条帖子；等于 conversation_id 就是直接评论根帖
+      toUserId: t.in_reply_to_user_id_str,
+      rootUser,
+      rootScreen,
+      conversationId: conv,
+      rawText: t.full_text ?? t.text,
+    }, me));
   }
 
   return { events, newestId, newestTs, oldestId, oldestTs, bottomCursor };

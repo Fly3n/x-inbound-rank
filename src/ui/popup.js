@@ -75,7 +75,7 @@ function renderList() {
   const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
   const rows = q ? view.rows.filter((r) => `${r.handle || ''} ${r.name || ''}`.toLowerCase().includes(q)) : view.rows;
   const empty = !eventCount
-    ? '还没有数据，到「设置」页点「初始化」'
+    ? '还没有数据，可在「设置」开启自动更新或点「补历史」'
     : q
       ? '榜上没有匹配的人'
       : `这个范围内还没有人回复我 ${view.rules.minCount} 次及以上`;
@@ -277,7 +277,7 @@ async function draw() {
       ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : 'X 列表到底，没有读到记录') : '已覆盖所选范围')
       : outHasData && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
   $('outSync').disabled = !isSession || outPending || outCoveredNow || starting.has('outSync');
-  $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
+  $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '补历史');
   $('window').value = String(rules.windowDays);
   $('initRange').value = String(rules.initDays);
   $('exportBoard').disabled = !rows.length;
@@ -299,7 +299,7 @@ async function draw() {
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
-  $('start').textContent = starting.has('start') ? '启动中' : inPhase || '初始化';
+  $('start').textContent = starting.has('start') ? '启动中' : inPhase || '补历史';
   $('start').disabled = !isSession || !!inPhase || inCovered || starting.has('start');
   $('inReason').textContent = !isSession ? '打开此账号的 X 页面'
     : inPhase ? '' : inCovered ? (lbIn?.reachedEnd && !lbIn?.oldestTs ? 'X 列表到底，没有读到记录' : '已覆盖所选范围')
@@ -320,7 +320,8 @@ async function draw() {
     () => {},
   );
   $('fetchEnabled').checked = rules.fetchEnabled;
-  $('updateNow').disabled = !isSession || !s.cursor.syncedId || updatingNow;
+  $('outAutoSync').checked = !!rules.outAutoSync;
+  $('updateNow').disabled = !isSession || updatingNow;
   $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
   for (const k of SHOW_KEYS) $(k).checked = rules[k];
 
@@ -334,7 +335,7 @@ function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
   renderFields(id, [
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtShortDay(data.from)} – ${fmtShortDay(data.to)}` : '暂无记录'],
-    ['上次初始化', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未完成'],
+    ['上次补历史', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未补历史'],
     ['上次读取', readSummary(readAt, counts)],
   ]);
 }
@@ -532,7 +533,7 @@ async function initialize(id, type) {
     const result = await call(type, { account: view.account });
     if (result?.error) alert(result.error);
   } catch {
-    alert('未能启动初始化，请重新打开弹窗再试。');
+    alert('未能启动补历史，请重新打开弹窗再试。');
   } finally {
     starting.delete(id);
     await render();
@@ -559,6 +560,8 @@ $('updateNow').addEventListener('click', async () => {
     const receipt = result?.readAt;
     if (receipt?.inbound >= startedAt && receipt?.outbound >= startedAt) {
       message = '两份数据已读取，结果见下方。';
+    } else if (receipt?.inbound >= startedAt && result?.outboundPassive) {
+      message = '别人回我已读取；我回别人已启用浏览器发帖旁听，本次未额外请求。';
     } else {
       message = result?.error || result?.message || '未收到本次读取时间，请重新加载扩展再试。';
     }
@@ -579,6 +582,7 @@ $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 for (const k of SHOW_KEYS) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
 $('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
+$('outAutoSync').addEventListener('change', (e) => saveRules({ outAutoSync: e.target.checked }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空此账号在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });
