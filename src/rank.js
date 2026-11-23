@@ -2,7 +2,7 @@
 
 export const DAY_MS = 86400000;
 export const WINDOWS = [7, 15, 30, 60, 90]; // 榜单范围（天）：榜单、「我回 N」、时间线标签都按它
-export const INIT_WINDOWS = [7, 15, 30]; // 初始化范围（天）：点「初始化」时往回读多远，和榜单范围分开（2026-11-19 定）
+export const INIT_WINDOWS = [7, 15]; // 补历史范围（天）：手动补读往回翻多远，和榜单范围分开
 export const KEEP_DAYS = 90; // 本机数据保存多久，和最长的榜单范围一致；更早的每天自动清掉
 export const WARN_DAYS = 80; // 最早的数据存满这么多天时，榜单上方提示「快到期了，先导出」
 export const COLORS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray']; // 色值在 content/badge.css
@@ -11,31 +11,14 @@ export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // ma
 // 本机数据低于这个版本时，「我回 N」先不显示，后台自动重新读一遍补上。
 export const OUT_SCHEMA = 2;
 
-/**
- * 「我回别人」是否已经完整覆盖当前窗口。只用于初始化状态和覆盖提示，不用于隐藏窗口内的已有计数。
- */
-export function outboundReady(out, windowDays, now = Date.now()) {
-  if (!out?.lastAt || (out.schema || 1) < OUT_SCHEMA) return false;
-  if (out.coverTs) return out.coverTs <= now - windowDays * DAY_MS;
-  return !!out.reachedEnd;
-}
-
-/**
- * 「我回 N」有没有可用的本机记录：读过一次且是本机当前格式即可。
- * 没读完整个窗口时也照常按窗口内已有记录计数，覆盖到哪天由界面单独说明。
- */
-export function outboundCountable(out) {
-  return !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA;
-}
-
-/** 入站初始化是否覆盖所选范围；X 列表可信地到底且一条都没有，也算覆盖。 */
+/** 入站补历史是否覆盖所选范围；X 列表可信地到底且一条都没有，也算覆盖。 */
 export function inboundInitCovered(lastBackfill, syncedId, initDays, now = Date.now()) {
   if (!lastBackfill || !syncedId) return false;
   if (lastBackfill.oldestTs) return lastBackfill.oldestTs <= now - initDays * DAY_MS;
   return !!lastBackfill.reachedEnd;
 }
 
-/** 出站初始化是否覆盖所选范围；提前到底不算覆盖所选范围，空列表到底才算。 */
+/** 出站补历史是否覆盖所选范围；提前到底不算覆盖所选范围，空列表到底才算。 */
 export function outboundInitCovered(out, initDays, now = Date.now()) {
   if (!out || (out.schema || 1) < OUT_SCHEMA) return false;
   if (out.coverTs) return out.coverTs <= now - initDays * DAY_MS;
@@ -50,7 +33,8 @@ export function outboundInitCovered(out, initDays, now = Date.now()) {
  */
 export const DEFAULT_RULES = {
   windowDays: 7, // 榜单范围
-  initDays: 7, // 初始化范围
+  initDays: 7, // 补历史范围
+  outAutoSync: false, // 我回别人默认走浏览器实时旁听，不定时刷个人回复栏
   topN: 100,
   minCount: 2,
   tiers: [
@@ -84,8 +68,15 @@ export function cleanRules(raw = {}) {
     .slice(0, LIMITS.maxTiers);
   return {
     windowDays: WINDOWS.includes(raw.windowDays) ? raw.windowDays : d.windowDays,
-    // 0.11.0 之前只有一个范围（7/15/30）：没存过初始化范围的，沿用当时那个
-    initDays: INIT_WINDOWS.includes(raw.initDays) ? raw.initDays : INIT_WINDOWS.includes(raw.windowDays) ? raw.windowDays : d.initDays,
+    // 旧设置选了 30 天时平滑降级到 15 天；0.11.0 之前无 initDays 的沿用当时统计范围
+    initDays: INIT_WINDOWS.includes(raw.initDays)
+      ? raw.initDays
+      : raw.initDays === 30
+        ? 15
+        : INIT_WINDOWS.includes(raw.windowDays)
+          ? raw.windowDays
+          : d.initDays,
+    outAutoSync: raw.outAutoSync === true,
     topN: clampInt(raw.topN, LIMITS.topN, d.topN),
     minCount: clampInt(raw.minCount, LIMITS.minCount, d.minCount),
     tiers,

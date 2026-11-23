@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inboundInitCovered, outboundReady, outboundInitCovered } from '../src/rank.js';
+import { inboundInitCovered, outboundInitCovered } from '../src/rank.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv({
@@ -174,7 +174,6 @@ test('入站和出站可信空列表初始化', { timeout: 20_000 }, async () =>
     await until(() => store['cursor:me'].out?.lastAt, '空的我回别人初始化完成');
     const emptyOut = store['cursor:me'].out;
     assert.deepEqual([emptyOut.reachedEnd, emptyOut.coverTs, emptyOut.syncedId], [true, null, '0']);
-    assert.equal(outboundReady(emptyOut, 7), true);
     assert.equal(outboundInitCovered(emptyOut, 7), true);
 
     emptyOut.nextAutoAt = 0;

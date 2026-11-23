@@ -1,8 +1,7 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
 import {
   COLORS, LIMITS, DEFAULT_RULES, KEEP_DAYS, WARN_DAYS, DAY_MS,
-  colorOf, outboundReady, outboundCountable,
-  inboundInitCovered, outboundInitCovered,
+  colorOf, inboundInitCovered, outboundInitCovered,
 } from '../rank.js';
 import {
   COLOR_NAMES, SHOW_KEYS, STORAGE_WATCH,
@@ -232,11 +231,9 @@ async function draw() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  const outDataReady = outboundCountable(out);
-  const outWindowCovered = outboundReady(out, rules.windowDays);
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outCountable: outDataReady });
-  // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
-  // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
+  const outHasData = s.db.out.count > 0 || !!out?.lastAt;
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outCountable: outHasData });
+  // 本机数据是不是已经覆盖了所选的补历史范围（覆盖了就把按钮置灰）：
   const initStart = Date.now() - rules.initDays * DAY_MS;
   const lbIn = s.cursor.lastBackfill;
   const inCovered = inboundInitCovered(lbIn, s.cursor.syncedId, rules.initDays);
@@ -271,17 +268,14 @@ async function draw() {
   const outLink = $('outRepliesLink');
   outLink.hidden = !(isSession && out?.status === 'need_tpl' && /^[A-Za-z0-9_]{1,15}$/.test(handle || ''));
   if (!outLink.hidden) outLink.href = `https://x.com/${handle}/with_replies`;
-  $('outLine').hidden = false;
   $('outLine').textContent = outProgress || outBad
-    ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
-    : outDataReady && !outWindowCovered
-      ? `我回别人 · 本机已有记录从 ${out?.coverTs ? fmtDay(out.coverTs) : '未完整读取'} 开始，榜单按窗口内已有记录计算。`
-      : outDataReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
+    ? `我回别人 · ${outProgress}${outBad}`
+    : '';
   $('outLine').hidden = !$('outLine').textContent;
   $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
     : outCoveredNow && !outPending
       ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : 'X 列表到底，没有读到记录') : '已覆盖所选范围')
-      : outDataReady && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
+      : outHasData && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
   $('outSync').disabled = !isSession || outPending || outCoveredNow || starting.has('outSync');
   $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '初始化');
   $('window').value = String(rules.windowDays);

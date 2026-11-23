@@ -175,7 +175,7 @@ export const handlers = {
   resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
     if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '榜单范围只能是 7 天、15 天、30 天、2 个月或 3 个月' };
-    if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '初始化范围只能是 7 天、15 天或 30 天' };
+    if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '补历史范围只能是 7 天或 15 天' };
     const merged = { ...(await getSettings(account)), ...patch };
     const next = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) }; // 其余越界的值夹回范围
     await kvSet(keys.settings(account), next);
@@ -186,8 +186,14 @@ export const handlers = {
       const out = cur.out;
       const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);
       if (!outPending) await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+    } else {
+      if ('outAutoSync' in patch && !next.outAutoSync) {
+        const out = (await kvGet(keys.cursor(account), {})).out;
+        const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);
+        if (!outPending) await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+      }
+      if ('fetchEnabled' in patch || ('outAutoSync' in patch && next.outAutoSync)) await recoverAlarms(account);
     }
-    else if ('fetchEnabled' in patch) await recoverAlarms(account);
     await refreshSnapshot(account); // 口径或颜色变了，标签立刻跟着变
     queueBridgePush();
     return { ok: true };

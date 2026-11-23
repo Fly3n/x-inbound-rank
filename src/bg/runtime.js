@@ -1,6 +1,6 @@
 // 后台共用常量、时间窗口、并发锁、串行 cursor 队列与快照计算。
 import { getEvents, kvGet, kvSet, keys, getSettings, OUT } from '../db.js';
-import { ranking, badgeSnapshot, outboundCountable } from '../rank.js';
+import { ranking, badgeSnapshot } from '../rank.js';
 
 // 请求节奏。提及：旧接口额度实测 180 次 / 15 分钟、每页 20 条，新接口 1500 次 / 15 分钟、每页 40 条（2026-11-19）。
 // 只保留远低于额度的节奏；真实账号还要经过行为风控，不能拿「没触发 429」当作安全。
@@ -136,8 +136,9 @@ export const board = async (account) => {
   const settings = await getSettings(account);
   const cur = await kvGet(keys.cursor(account), {});
   const out = await getEvents(account, OUT);
-  // 按当前窗口内本机已有的记录计数；覆盖是否完整只影响提示，不应把已经读到的数字藏掉。
-  return ranking(await getEvents(account), settings, now(), out, outboundCountable(cur.out));
+  // 有本机记录或至少同步过一次，就按当前榜单窗口直接聚合显示
+  const hasOutData = out.some((o) => !o.own) || !!cur.out?.lastAt;
+  return ranking(await getEvents(account), settings, now(), out, hasOutData);
 };
 
 // 快照每写一次，每个 x.com 标签页都要把标签重画一遍、弹窗也要重画，所以抓取过程中最多每 30 秒重算一次，
@@ -152,13 +153,13 @@ export async function refreshSnapshot(account) {
   snapDirty.delete(account);
   snapAt.set(account, now());
   const rules = await getSettings(account);
-  // 「我回别人」读到过数据之后，标签里就按已有记录带「我回他几次」
   const o = (await kvGet(keys.cursor(account), {})).out;
-  const outCountable = outboundCountable(o); // 覆盖不完整也显示已有记录，窗口内没有记录才是 0
+  const out = await getEvents(account, OUT);
+  const hasOutData = out.some((item) => !item.own) || !!o?.lastAt;
   const snap = {
     windowDays: rules.windowDays,
     show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace, schedule: rules.showSchedule },
-    users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outCountable),
+    users: badgeSnapshot(await getEvents(account), rules, now(), out, hasOutData),
   };
   // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
   const prev = await kvGet(keys.snap(account));

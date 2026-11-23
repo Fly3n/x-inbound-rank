@@ -8,7 +8,7 @@ import '../src/content/rel.js';
 import '../src/content/schedule.js';
 import {
   ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
-  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, outboundReady, outboundCountable, inboundInitCovered, outboundInitCovered,
+  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, inboundInitCovered, outboundInitCovered,
 } from '../src/rank.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
 
@@ -44,34 +44,28 @@ test('回复榜：名次上限可调，默认 100', () => {
 
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  assert.equal(DEFAULT_RULES.outAutoSync, false);
+  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', outAutoSync: true, showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
   // 显示开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, initDays: 7, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  assert.deepEqual(r, { windowDays: 7, initDays: 7, outAutoSync: true, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
 });
 
-test('两个范围：榜单范围可到 3 个月，初始化范围只有 7/15/30；老设置没有初始化范围时沿用当时的统计范围', () => {
+test('两个范围：榜单范围可到 3 个月，补历史范围只有 7/15；旧 30 天降级到 15，老设置沿用当时统计范围', () => {
   assert.deepEqual([60, 90].map((d) => cleanRules({ windowDays: d }).windowDays), [60, 90]);
   assert.equal(cleanRules({ initDays: 60 }).initDays, 7);
-  assert.equal(cleanRules({ initDays: 30 }).initDays, 30);
-  assert.equal(cleanRules({ windowDays: 15 }).initDays, 15, '0.10 存的设置：统计范围 15 天，初始化也按 15 天');
+  assert.equal(cleanRules({ initDays: 30 }).initDays, 15, '旧版 30 天设置平滑降级为 15 天');
+  assert.equal(cleanRules({ windowDays: 15 }).initDays, 15, '0.10 存的设置：统计范围 15 天，补历史也按 15 天');
   assert.equal(cleanRules({ windowDays: 90 }).initDays, 7);
-  // 榜单范围比初始化长：照常按榜单范围算
+  // 榜单范围比补历史长：照常按榜单范围算
   const evs = [ev(1, 'a', 50), ev(2, 'a', 80), ev(3, 'a', 95)];
   assert.equal(board(evs, rules({ windowDays: 90, minCount: 1 }), NOW)[0].count, 2);
 });
 
 test('覆盖判定：提前到底不冒充覆盖，完整到底才算数', () => {
   const out = (patch) => ({ lastAt: NOW, schema: 2, ...patch });
-  assert.equal(outboundReady(out({ coverTs: NOW - 8 * DAY_MS, reachedEnd: false }), 7, NOW), true);
-  assert.equal(outboundReady(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: true }), 7, NOW), false, '只读到 3 天不能填满 7 天窗口');
-  assert.equal(outboundReady(out({ coverTs: null, reachedEnd: true }), 7, NOW), true, '可信的空列表是 0');
-  assert.equal(outboundReady(out({ coverTs: NOW - 8 * DAY_MS, schema: 1 }), 7, NOW), false, '旧数据口径不显示');
-  assert.equal(outboundCountable(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: false })), true, '没覆盖整个窗口也应显示已读记录');
-  assert.equal(outboundCountable(out({ lastAt: null, coverTs: null, reachedEnd: false })), false, '从没读取过时不显示');
-  assert.equal(outboundCountable(out({ coverTs: NOW - 8 * DAY_MS, schema: 1 })), false, '旧数据口径不显示');
 
   assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, '100', 7, NOW), true);
   assert.equal(inboundInitCovered({ oldestTs: NOW - 3 * DAY_MS, reachedEnd: true }, '100', 7, NOW), false);

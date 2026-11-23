@@ -47,7 +47,8 @@ test('我回别人：首次手动初始化、模板获取、范围切换与规�
 
   // 榜单范围切到半个月、一个月：榜单和标签快照立刻按新范围重算，不发请求
   assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
-  assert.ok((await setSettings({ initDays: 60 })).error, '初始化范围只接受 7、15、30');
+  assert.ok((await setSettings({ initDays: 30 })).error, '补历史范围只接受 7、15');
+  assert.ok((await setSettings({ initDays: 60 })).error, '补历史范围只接受 7、15');
   const callsBeforeSwitch = server.calls;
   await setWindow(15);
   assert.equal(server.calls, callsBeforeSwitch);
@@ -220,16 +221,22 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
 });
 
 test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeout: 20_000 }, async () => {
-  await setSettings({ fetchEnabled: true, initDays: 30 });
+  await setSettings({ fetchEnabled: true, initDays: 15 });
+  Object.assign(store['cursor:me'].out, { coverTs: null, lastFullDays: null, lastFullAt: null });
+  const removedOldest = outFeed.pop(); // 剩下最早一条是 13 天前，会在 15 天前到底
   let outBefore = server.outCalls;
-  await send({ type: 'syncOutNow', account: 'me' });
-  const reachedBottom = () => store['cursor:me'].out?.lastFullDays === 30 && store['cursor:me'].out?.status === 'ok';
-  for (let i = 0; i < 10 && !reachedBottom(); i++) await until(reachedBottom, '读到回复列表底部').catch(() => {});
-  assert.ok(reachedBottom());
-  await new Promise((r) => setTimeout(r, 20)); // 等上一轮 finally 释放读取锁
-  assert.ok(server.outCalls > outBefore);
-  assert.equal(store['cursor:me'].out.reachedEnd, true);
-  assert.ok(store['cursor:me'].out.coverTs <= Date.now() - 20 * env.DAY + 60_000, '记下实际读到的最早时间');
+  try {
+    await send({ type: 'syncOutNow', account: 'me' });
+    const reachedBottom = () => store['cursor:me'].out?.lastFullDays === 15 && store['cursor:me'].out?.status === 'ok';
+    for (let i = 0; i < 10 && !reachedBottom(); i++) await until(reachedBottom, '读到回复列表底部').catch(() => {});
+    assert.ok(reachedBottom());
+    await new Promise((r) => setTimeout(r, 20)); // 等上一轮 finally 释放读取锁
+    assert.ok(server.outCalls > outBefore);
+    assert.equal(store['cursor:me'].out.reachedEnd, true);
+    assert.ok(store['cursor:me'].out.coverTs > Date.now() - 15 * env.DAY, '记下实际读到的最早时间（未满 15 天）');
+  } finally {
+    outFeed.push(removedOldest);
+  }
 
   // 单次读取达到轮数上限：不能把失败写成「初始化完成」，但要留下实际读到的最早时间
   const savedOutState = structuredClone(store['cursor:me'].out);
@@ -239,7 +246,7 @@ test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeou
     ...savedOutState,
     status: 'ok', message: null, limitReached: null, attemptCoverTs: null,
     coverTs: null,
-    fullFor: 0, initDays: 30, targetTs: Date.now() - 40 * env.DAY,
+    fullFor: 0, initDays: 15, targetTs: Date.now() - 20 * env.DAY,
     resume: { cursor: '0', topId: null, rounds: 119, full: true, stopAt: null, nextAt: 0 },
   };
   try {
