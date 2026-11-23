@@ -7,6 +7,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check-contracts.mjs && npm test",
+    "release:check": "node scripts/release-check.mjs",
     "bridge": "node scripts/live-bridge.mjs",
     "bridge:install": "node scripts/install-bridge.mjs",
     "bridge:uninstall": "node scripts/install-bridge.mjs uninstall"
