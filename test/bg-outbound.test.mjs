@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readDiagnostics } from '../src/diagnostics.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv();
@@ -341,7 +342,7 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
 
   // 3. 异常载荷记入后台诊断日志，不污染数据
   await pageSend({ type: 'xir:outbound:tap', text: JSON.stringify({ data: { unexpected: true } }) });
-  const logs = await send({ type: 'getDiagnostics', account: 'me' });
+  const logs = (await readDiagnostics()).filter((e) => e.account === 'me');
   assert.ok(logs.some((e) => e.event === 'outbound_tap_unmatched' && e.reason === 'missing_tweet_result'));
   assert.ok(logs.some((e) => e.event === 'outbound_tap' && e.postId === '9901' && e.added === 1));
 

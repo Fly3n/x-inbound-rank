@@ -3,26 +3,6 @@ import { LIMITS, underMyPosts, countsFromMe } from '../rank.js';
 
 export const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 
-export const DIAGNOSTIC_NAMES = {
-  diagnostic_start: '开始回查', diagnostic_page: '回查一页', diagnostic_end: '回查结束',
-  web_mentions_response: '网页提及响应', save_failed: '本机写入失败',
-  pagination_stop: '结束翻页', updateNow: '手动更新', updateNowWithReceipt: '手动更新', request: '读取请求', page_saved: '页面入库', parse_failed: '解析失败',
-  retry_scheduled: '安排重试', startBackfill: '初始化别人回我', syncOutNow: '初始化我回别人',
-  pauseJob: '暂停读取', resumeJob: '继续读取', clearData: '清空数据', scheduled_sync: '同步排期',
-};
-
-export const DIAGNOSTIC_SOURCES = {
-  'mentions-graphql': '别人回我 · 新接口', 'mentions-rest': '别人回我 · 旧接口',
-  mentions: '别人回我', replies: '我回别人', backfill: '历史回填', incremental: '增量更新', scheduled: '发帖排期',
-};
-
-export const DIAGNOSIS_REASONS = {
-  post_found: '已找到目标', window_start: '已读到时间窗起点', end_of_feed: 'X 列表已到底',
-  page_limit: '已达到单次回查页数上限，后续页未检查', repeated_cursor: 'X 返回了重复的翻页位置',
-  no_tab: '未连接 X 页面', tpl_bad: '读取参数已失效', error: '读取中断',
-  account_disabled: '此账号已关闭插件', backoff: '账号正在限流退避',
-};
-
 export const SHOW_KEYS = ['showRank', 'showOut', 'showRel', 'showPlace', 'showSchedule']; // 时间线上几种标签与排期辅助的开关
 export const STORAGE_WATCH = /^(accounts|tpl:(replies|mentions)|(domWarning|settings|cursor|job|snap|alert):)/;
 
@@ -61,25 +41,6 @@ export function readSummary(at, counts, exact = false) {
     (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条 · 已有 ${existing} 条` : ' · 暂无条数');
 }
 
-export function formatDiagnosticRow(r) {
-  return [
-    fmtTime(r.at),
-    DIAGNOSTIC_NAMES[r.event] || r.event,
-    DIAGNOSTIC_SOURCES[r.source],
-    r.status ? `HTTP ${r.status}` : r.event === 'request' ? ({ no_tab: 'X 页面未连接', network: '网络请求失败', no_session: '未登录', bad_tpl: '读取参数失效' }[r.outcome] || '读取未成功')
-      : r.event === 'scheduled_sync' ? ({ ok: '成功', need_tpl: '等待首次连接', tpl_expired: '参数已过期' }[r.outcome] || r.outcome || '') : '',
-    r.count != null && `共 ${r.count} 条`,
-    r.added != null && `新增 ${r.added} 条`,
-    r.waitMs && `${r.waitMs / 60_000} 分钟后`,
-  ].filter(Boolean).join(' · ');
-}
-
-export function formatDiagnosisResult(result) {
-  const outcome = result.target
-    ? `；解析判定 ${result.target.reason}，本机${result.stored ? '已有' : '没有'}这条记录` : '';
-  return `尝试 ${result.pages} 页，窗口内解析出 ${result.matches} 条。${DIAGNOSIS_REASONS[result.reason] || `停止原因：${result.reason}`}${outcome}。可导出日志查看细节。`;
-}
-
 // 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1
 export function stepRuleValue(key, current, dir) {
   if (key === 'topN') return dir > 0 ? (current < 50 ? 50 : current + 50) : current <= 50 ? LIMITS.topN[0] : current - 50;
@@ -115,16 +76,4 @@ export function buildAllExportRows(inbound, outAll) {
     }),
   ].sort((x, y) => y.ts - x.ts);
   return [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入统计', '内容摘要', '链接'], ...rows.map((r) => r.line)];
-}
-
-export function buildDiagnosticReport(rows, env = {}) {
-  return {
-    schemaVersion: 4,
-    exportedAt: env.exportedAt || new Date().toISOString(),
-    extensionVersion: env.extensionVersion ?? '',
-    platform: env.platform ?? '',
-    browser: env.browser ?? [],
-    timezone: env.timezone ?? '',
-    events: rows,
-  };
 }

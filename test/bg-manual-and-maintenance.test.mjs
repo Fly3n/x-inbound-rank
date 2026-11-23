@@ -41,7 +41,7 @@ test('快照字段补齐、双向明细、状态汇总与全量导出', async ()
   assert.deepEqual([all.inbound.length, all.out.length], [8, 6]);
 });
 
-test('立即更新收据、冷却、退避、切后台续读与只读诊断回查', { timeout: 20_000 }, async () => {
+test('立即更新收据、冷却、退避与切后台续读', { timeout: 20_000 }, async () => {
   await setSettings({ fetchEnabled: false });
 
   store['cursor:me'].inLastReadAt = 1;
@@ -124,24 +124,6 @@ test('立即更新收据、冷却、退避、切后台续读与只读诊断回�
     chrome.tabs.sendMessage = realInterruptedSend;
     store['cursor:me'] = savedInterrupted;
   }
-
-  // 手动按时间回查：只读不改接续点
-  await setSettings({ fetchEnabled: true });
-  const checkpoint = store['cursor:me'].syncedId;
-  const reading = store['cursor:me'].inLastReadAt;
-  const originalDate = feed[2].created_at;
-  feed[2].created_at = new Date(Date.now() - env.DAY).toUTCString();
-  const diagnosis = await send({
-    type: 'diagnoseMentions', account: 'me',
-    from: Date.now() - 60_000, to: Date.now(), postId: feed[3].id_str,
-  });
-  feed[2].created_at = originalDate;
-  assert.equal(diagnosis.pages, 2);
-  assert.equal(diagnosis.reason, 'post_found');
-  assert.equal(diagnosis.stored, true);
-  assert.equal(store['cursor:me'].syncedId, checkpoint);
-  assert.equal(store['cursor:me'].inLastReadAt, reading);
-  await setSettings({ fetchEnabled: false });
 });
 
 test('清空数据并发保护与 90 天过期数据滚动清理', async () => {

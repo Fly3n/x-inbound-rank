@@ -50,10 +50,6 @@ const state = {
       out: { status: 'ok', lastAt: NOW - 20 * 60_000, lastReadAt: NOW - 20 * 60_000, lastReadCounts: { read: 5, added: 0 }, coverTs: NOW - 8 * DAY_MS, lastFullAt: NOW - 2 * DAY_MS, lastFullDays: 7, schema: 2, reachedEnd: false },
     },
   },
-  diagnostics: [
-    { at: NOW - 15 * 60_000, event: 'page_saved', source: 'mentions', added: 1 },
-    { at: NOW - 20 * 60_000, event: 'request', source: 'replies', status: 200 },
-  ],
 };
 
 const listeners = new Set();
@@ -77,8 +73,6 @@ window.chrome = {
           return repliesOf(state.inbound, msg.actorId, settings, NOW, 50, state.outbound);
         case 'exportAll':
           return { inbound: state.inbound, out: state.outbound };
-        case 'getDiagnostics':
-          return state.diagnostics;
         case 'setSettings': {
           if ('windowDays' in msg.patch && !WINDOWS.includes(msg.patch.windowDays)) return { error: '无效的榜单范围' };
           if ('initDays' in msg.patch && !INIT_WINDOWS.includes(msg.patch.initDays)) return { error: '无效的初始化范围' };

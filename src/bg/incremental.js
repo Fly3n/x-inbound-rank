@@ -1,5 +1,5 @@
-// 别人回我：日常增量读取、重叠即停、免补历史直启与手动按时间回查诊断。
-import { getEvents, kvGet, keys, getSettings } from '../db.js';
+// 别人回我：日常增量读取、重叠即停与免补历史直启。
+import { kvGet, keys, getSettings } from '../db.js';
 import { DAY_MS, KEEP_DAYS } from '../rank.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
@@ -7,7 +7,7 @@ import { idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, INC_ALARM, alarmFor,
   enabledAccount, now, rand, sleep, humanIncDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
-  serviceWait, isBusy, tryAcquireBusy, releaseBusy, updateCursor,
+  serviceWait, tryAcquireBusy, releaseBusy, updateCursor,
   flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
@@ -250,60 +250,6 @@ export async function maybeIncremental(account, manual = false) {
   } finally {
     if (account) await flushSnapshot(account, true).catch(() => {});
     queueBridgePush();
-    releaseBusy();
-  }
-}
-
-export async function diagnoseMentions({ account, from, to, postId, source }) {
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to - from > DAY_MS ||
-      (postId && !/^\d{1,24}$/.test(postId))) {
-    return { error: '请选择一个不超过 24 小时的时间窗，帖子编号只填数字。' };
-  }
-  if (!await enabledAccount(account)) return { error: '请先为此账号开启插件。' };
-  if (!inActiveHours()) return { error: '读取只在每天 08:00–24:00 进行，夜间不运行。' };
-  const state = await kvGet(keys.cursor(account), {});
-  const job = await kvGet(keys.job(account));
-  if (isBusy() || (state.rateUntil || 0) > now() || state.serviceRetries && state.nextIncAt > now() ||
-      job?.status === 'running' || job?.status === 'paused' && job.auto) {
-    return { error: '正在读取或处于退避期，请稍后回查。' };
-  }
-  if (!tryAcquireBusy()) return { error: '正在读取或处于退避期，请稍后回查。' };
-  const run = now();
-  try {
-    const api = source === 'rest' ? 'rest' : await mentionsApi(account);
-    await record('diagnostic_start', { account, source: 'mentions', run, api, from, to, postId: postId || null });
-    let cursor = null;
-    let pages = 0;
-    let matches = 0;
-    let reason = 'page_limit';
-    let target = null;
-    for (let page = 1; page <= PACE.diagnosePages; page++) {
-      if (page > 1) await sleep(rand(PACE.incPageGapMs));
-      if (!await enabledAccount(account)) { reason = 'account_disabled'; break; }
-      pages = page;
-      const result = await pull(account, cursor, api, undefined, { account, mode: 'inbound_diagnostic', run, page }, true);
-      if (result.kind !== 'ok') {
-        reason = result.kind === 'unavailable' || result.kind === 'rate' ? String(result.status || 429) : result.kind;
-        if (result.kind === 'rate' || result.kind === 'unavailable') {
-          await updateCursor(account, (c) => {
-            c.rateUntil = Math.max(c.rateUntil || 0, result.resetAt || 0, now() + PACE.backoffStartMs);
-          });
-        }
-        break;
-      }
-      const { parsed, decisions } = result;
-      matches += parsed.events.filter((event) => event.created_at >= from && event.created_at <= to).length;
-      target = postId ? decisions.find((item) => item.postId === postId) : null;
-      if (target) { reason = 'post_found'; break; }
-      // 提及列表可能混排，旧帖出现在第一页不能证明后续页没有目标。
-      if (!parsed.bottomCursor) { reason = 'end_of_feed'; break; }
-      if (parsed.bottomCursor === cursor) { reason = 'repeated_cursor'; break; }
-      cursor = parsed.bottomCursor;
-    }
-    const stored = postId ? (await getEvents(account)).some((event) => event.id === postId) : null;
-    await record('diagnostic_end', { account, source: 'mentions', run, pages, matches, reason, target, stored });
-    return { pages, matches, reason, target, stored };
-  } finally {
     releaseBusy();
   }
 }

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readDiagnostics } from '../src/diagnostics.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv();
@@ -122,7 +123,7 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     await fire('inc', 'uid-9');
     assert.equal(requested.length, before);
     assert.ok(store['cursor:uid-9'].inLastReadAt, '关闭账号保留已读进度');
-    const logs = await send({ type: 'getDiagnostics', account: 'me' });
+    const logs = (await readDiagnostics()).filter((r) => r.account === 'me');
     assert.equal(logs.some((r) => r.tabId === 9), false);
   } finally {
     chrome.tabs.sendMessage = originalSend;
@@ -168,6 +169,32 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   tabUrls.delete(1);
   await listeners.updated(1, { status: 'complete', url: 'https://x.com/home' });
   assert.deepEqual(reloadCalls.slice(noticeBefore), [1], '离开通知页并导航完成后补刷');
+
+  // 跨窗口切回 X 窗口：失去焦点忽略，聚焦新窗口补刷该窗口前台旧页面，且不限制 lastFocusedWindow 并写诊断日志
+  staleTabs.add(1);
+  const focusBefore = reloadCalls.length;
+  await listeners.windowFocus(-1);
+  assert.equal(reloadCalls.length, focusBefore, '窗口失焦不触发刷新');
+  await listeners.windowFocus(2);
+  assert.deepEqual(reloadCalls.slice(focusBefore), [1], '跨窗口切换焦点后补刷前台旧页面');
+
+  const realQuery = chrome.tabs.query;
+  const queries = [];
+  staleTabs.add(1);
+  staleTabs.add(4);
+  chrome.tabs.query = async (query) => {
+    queries.push(query);
+    return [{ id: 1, url: 'https://x.com/home', status: 'complete' }, { id: 4, url: 'https://x.com/home', status: 'complete' }];
+  };
+  const multiBefore = reloadCalls.length;
+  try {
+    await listeners.startup();
+  } finally {
+    chrome.tabs.query = realQuery;
+  }
+  assert.equal(queries.at(-1).lastFocusedWindow, undefined, '查询不限定 lastFocusedWindow，覆盖多个窗口前台页');
+  assert.deepEqual(reloadCalls.slice(multiBefore), [1, 4], '一次性刷新各窗口正在前台的旧页面');
+  assert.ok((await readDiagnostics()).some((r) => r.event === 'stale_tab_refresh' && r.reloaded === 2 && r.pending === 0));
 
   const daytime = env.getNow();
   try {

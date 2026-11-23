@@ -176,6 +176,10 @@ export async function createBgEnv({
       onStartup: hook('startup'),
       onMessage: hook('message'),
     },
+    windows: {
+      WINDOW_ID_NONE: -1,
+      onFocusChanged: hook('windowFocus'),
+    },
     tabs: {
       query: async ({ active } = {}) => (active ? [tab(activeTab)] : [...sessions.keys()].map((id) => ({ ...tab(id), status: loadingTabs.has(id) ? 'loading' : 'complete' }))),
       get: async (id) => ({ ...tab(id), status: loadingTabs.has(id) ? 'loading' : 'complete' }),

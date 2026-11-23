@@ -27,6 +27,9 @@ chrome.tabs?.onActivated?.addListener?.(refreshActiveStaleTab);
 chrome.tabs?.onUpdated?.addListener?.((_tabId, changeInfo) => {
   if (changeInfo?.status === 'complete' || changeInfo?.url) return refreshActiveStaleTab();
 });
+chrome.windows?.onFocusChanged?.addListener?.((windowId) => {
+  if (windowId !== chrome.windows?.WINDOW_ID_NONE) return refreshActiveStaleTab();
+});
 
 chrome.runtime.onInstalled.addListener(ensureTick);
 chrome.runtime.onStartup.addListener(ensureTick);

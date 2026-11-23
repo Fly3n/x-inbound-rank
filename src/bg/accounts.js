@@ -1,5 +1,6 @@
 // 账号管理、升级迁移、页面会话校验与扩展更新后的旧内容脚本刷新。
 import { kvGet, kvSet, kvRemove, keys } from '../db.js';
+import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
 import {
   serial, now, inActiveHours, nextActiveAt, accountForUser, refreshSnapshot,
@@ -70,9 +71,9 @@ export async function reloadStaleXirTabs() {
     await chrome.alarms.create(STALE_TABS_ALARM, { when: nextActiveAt() });
     return { reloaded: 0, pending: 0 };
   }
-  // 只处理当前窗口正在前台的 X 页面。后台标签页不刷新，切过去时再由 tabs.onActivated 补上；
-  // 通知页也不自动刷新，避免插件替用户动通知状态。
-  const tabs = await chrome.tabs.query({ ...X_TABS, active: true, lastFocusedWindow: true }).catch(() => []);
+  // 处理各窗口正在前台的 X 页面（覆盖多窗口并排开 X 且跨窗口点击切换的场景）；
+  // 后台标签页不强刷（切过去时由 tabs.onActivated 补上），通知页绝不自动刷新，避免代改未读状态。
+  const tabs = await chrome.tabs.query({ ...X_TABS, active: true }).catch(() => []);
   let reloaded = 0;
   let pending = 0;
   for (const tab of tabs) {
@@ -102,6 +103,7 @@ export async function reloadStaleXirTabs() {
       pending++; // 标签页可能刚关闭或暂时拒绝刷新；留下一次补查。
     }
   }
+  if (reloaded || pending) await record('stale_tab_refresh', { reloaded, pending });
   return { reloaded, pending };
 }
 

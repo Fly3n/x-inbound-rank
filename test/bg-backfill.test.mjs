@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inboundInitCovered, outboundInitCovered } from '../src/rank.js';
+import { readDiagnostics } from '../src/diagnostics.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv({
@@ -50,7 +51,7 @@ test('账号升级迁移、网页提及脱敏证据与入站回填完整流程',
     metadata: { age: '120', cache: 'HIT internal-node' }, text: JSON.stringify(nativeBody),
   };
   await pageSend(nativePayload, 4);
-  const evidence = (await send({ type: 'getDiagnostics', account: 'me' })).find((event) => event.event === 'web_mentions_response');
+  const evidence = (await readDiagnostics()).find((event) => event.account === 'me' && event.event === 'web_mentions_response');
   assert.equal(evidence.tabId, 4);
   assert.equal(evidence.evidence.request.count, 20);
   assert.equal(evidence.evidence.request.hasCursor, true);
@@ -93,7 +94,7 @@ test('账号升级迁移、网页提及脱敏证据与入站回填完整流程',
   const oldHour = Math.floor(Date.now() / 3_600_000) - 8 * 24;
   const expiredKey = `diagnostics:${oldHour}`;
   store[expiredKey] = [{ at: oldHour * 3_600_000, event: 'expired' }];
-  const diagnostics = await send({ type: 'getDiagnostics', account: 'me' });
+  const diagnostics = (await readDiagnostics()).filter((event) => event.account === 'me');
   const failedPage = diagnostics.find((event) => event.event === 'request' && event.status === 503);
   assert.equal(failedPage.mode, 'inbound_backfill');
   assert.equal(failedPage.page, 2);

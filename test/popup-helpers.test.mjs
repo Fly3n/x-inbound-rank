@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  jobText, readSummary, formatDiagnosticRow, formatDiagnosisResult, stepRuleValue,
-  buildCsv, buildBoardExportRows, buildAllExportRows, buildDiagnosticReport,
+  jobText, readSummary, stepRuleValue,
+  buildCsv, buildBoardExportRows, buildAllExportRows,
 } from '../src/ui/popup-helpers.js';
 
 test('jobText 与 readSummary：展示进行中、等待、完成和零新增已有条数', () => {
@@ -27,21 +27,6 @@ test('stepRuleValue：topN 在 10 与 50 之间直接跳，其余按步长增减
   assert.equal(stepRuleValue('topN', 100, -1), 50);
   assert.equal(stepRuleValue('minCount', 2, 1), 3);
   assert.equal(stepRuleValue('minCount', 2, -1), 1);
-});
-
-test('诊断格式化与报告构建', () => {
-  const now = new Date(2026, 10, 21, 9, 30, 0).getTime();
-  assert.equal(formatDiagnosticRow({ at: now, event: 'request', source: 'mentions-graphql', status: 200 }), '11/21 09:30 · 读取请求 · 别人回我 · 新接口 · HTTP 200');
-  assert.equal(formatDiagnosticRow({ at: now, event: 'request', source: 'replies', outcome: 'no_tab' }), '11/21 09:30 · 读取请求 · 我回别人 · X 页面未连接');
-  assert.equal(formatDiagnosticRow({ at: now, event: 'scheduled_sync', source: 'scheduled', outcome: 'ok', count: 3 }), '11/21 09:30 · 同步排期 · 发帖排期 · 成功 · 共 3 条');
-
-  assert.match(formatDiagnosisResult({ pages: 2, matches: 4, reason: 'post_found', target: { reason: 'accepted_own_root' }, stored: true }), /已找到目标；解析判定 accepted_own_root，本机已有这条记录/);
-  assert.match(formatDiagnosisResult({ pages: 5, matches: 0, reason: 'page_limit' }), /已达到单次回查页数上限/);
-
-  const report = buildDiagnosticReport([{ event: 'ping' }], { exportedAt: '2026-11-21T00:00:00.000Z', extensionVersion: '0.30.2', platform: 'MacIntel', browser: ['Chrome/130'], timezone: 'Asia/Shanghai' });
-  assert.equal(report.schemaVersion, 4);
-  assert.equal(report.extensionVersion, '0.30.2');
-  assert.deepEqual(report.events, [{ event: 'ping' }]);
 });
 
 test('导出构造：CSV BOM 转义、榜单导出和全量导出过滤 own 并补全 @ID', () => {

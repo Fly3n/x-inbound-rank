@@ -1,7 +1,7 @@
 // 后台数据清理与消息路由表（内容脚本 xir:* 与弹窗 RPC）。
 import { getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from '../db.js';
 import { replyPlaces, repliesOf, cleanRules, DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS } from '../rank.js';
-import { record, readDiagnostics } from '../diagnostics.js';
+import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
 import { mentionsEvidence } from '../x/mentions-diagnostics.js';
 import {
@@ -13,7 +13,7 @@ import { clearAccountAlarms, recoverAlarms } from './alarms.js';
 import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled } from './accounts.js';
 import { mentionsApi } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
-import { maybeIncremental, diagnoseMentions } from './incremental.js';
+import { maybeIncremental } from './incremental.js';
 import { handleOutboundTap, syncOut, syncOutNow } from './outbound.js';
 import { handleScheduledTap, handlePostEvent, handleScheduledSync } from './scheduled.js';
 
@@ -110,8 +110,6 @@ export const handlers = {
   },
 
   // 弹窗
-  getDiagnostics: async ({ account }) => (await readDiagnostics()).filter((event) => event.account === account).map(({ account: _, ...event }) => event),
-  diagnoseMentions,
   async updateNowWithReceipt({ account }) {
     const startedAt = now();
     if (!account) return { error: '请先选择已登录的 X 账号。' };

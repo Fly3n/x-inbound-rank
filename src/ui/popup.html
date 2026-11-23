@@ -190,37 +190,6 @@
         <p>读取用的是 X 网页版的内部接口，不是官方 API，属于服务条款的灰色地带，可能导致账号被限流。插件按人的作息设计：只在本地时间 08:00–24:00、X 页面前台可见时请求；每天低频读取，夜间和后台标签页零自动请求。全程只读，不点赞、不关注、不发帖；数据只存在本机。风险仍无法保证为零。</p>
       </details>
 
-      <details class="card fold" id="diagnostics">
-        <summary>本地诊断日志</summary>
-        <p class="hint">保留最近 7 天的全量日志。弹窗显示最近 10 条，导出包含帖子编号、请求条件和处理原因，分享前请先检查。</p>
-        <details class="settings-detail">
-          <summary>按时间回查「别人回我」</summary>
-          <p class="hint">从最新提及往前查，单次最多 5 页。预设按最近 1、6 或 24 小时；自定义时间按浏览器本地时区。</p>
-          <label class="line">时间窗
-            <select id="diagWindow">
-          <option value="1h">最近 1 小时</option>
-          <option value="6h">最近 6 小时</option>
-          <option value="24h">最近 24 小时</option>
-              <option value="custom">自定义</option>
-            </select>
-          </label>
-          <div id="diagCustom" hidden>
-            <label class="line">开始 <input id="diagFrom" type="datetime-local"></label>
-            <label class="line">结束 <input id="diagTo" type="datetime-local"></label>
-          </div>
-          <label class="line">帖子编号（可选） <input id="diagPostId" inputmode="numeric" maxlength="24"></label>
-          <label class="line">读取来源 <select id="diagSource"><option value="auto">默认接口</option><option value="rest">旧接口（对照）</option></select></label>
-          <button id="diagnoseMentions">开始回查</button>
-          <p id="diagnosisResult" role="status"></p>
-        </details>
-        <p id="diagnosticStatus" role="status"></p>
-        <ul id="diagnosticRows"></ul>
-        <div class="row">
-          <button id="refreshDiagnostics">刷新日志</button>
-          <button id="exportDiagnostics">导出日志</button>
-        </div>
-      </details>
-
       <details class="card fold">
         <summary>清空数据</summary>
         <p class="hint">清掉该账号在本机的两份回复数据和读取进度，榜单和时间线标签都会消失，不可恢复。账号绑定和设置保留。</p>

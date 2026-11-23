@@ -6,8 +6,8 @@ import {
 import {
   COLOR_NAMES, SHOW_KEYS, STORAGE_WATCH,
   pad, fmtDay, fmtShortDay, fmtTime, fullTime, windowLabel,
-  jobText, readSummary, formatDiagnosticRow, formatDiagnosisResult, stepRuleValue,
-  buildCsv, buildBoardExportRows, buildAllExportRows, buildDiagnosticReport,
+  jobText, readSummary, stepRuleValue,
+  buildCsv, buildBoardExportRows, buildAllExportRows,
 } from './popup-helpers.js';
 
 const $ = (id) => document.getElementById(id);
@@ -184,9 +184,6 @@ async function draw() {
   }
   if (view.account !== view.selected) {
     $('updateStatus').textContent = '';
-    $('diagnosticStatus').textContent = '';
-    $('diagnosticRows').replaceChildren();
-    $('diagnosisResult').textContent = '';
   }
   view.account = view.selected;
   view.activationUserId = inactivePage ? g.active.userId : null;
@@ -423,90 +420,6 @@ function download(name, lines) {
   URL.revokeObjectURL(a.href);
   $('exportMenu').open = false;
 }
-
-async function loadDiagnostics(account) {
-  let timer;
-  try {
-    return await Promise.race([
-      call('getDiagnostics', { account }),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('读取超时')), 8000); }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function showDiagnostics(exportAll = false) {
-  const { account } = view;
-  const status = $('diagnosticStatus');
-  const refresh = $('refreshDiagnostics');
-  const exportButton = $('exportDiagnostics');
-  if (refresh.disabled) return;
-  refresh.disabled = exportButton.disabled = true;
-  status.textContent = '正在读取日志…';
-  try {
-    const rows = await loadDiagnostics(account);
-    if (view.account !== account) return;
-    if (!Array.isArray(rows)) throw new Error();
-    status.textContent = rows.length ? `共 ${rows.length} 条 · 已刷新 ${fullTime(Date.now())}` : '最近 7 天没有日志可供查看或导出。';
-    $('diagnosticRows').replaceChildren(...rows.slice(0, 10).map((r) => el('li', {
-      textContent: formatDiagnosticRow(r),
-    })));
-    if (!exportAll || !rows.length) return;
-    const report = buildDiagnosticReport(rows, {
-      extensionVersion: chrome.runtime.getManifest().version,
-      platform: navigator.platform,
-      browser: navigator.userAgent.match(/(?:Chrome|Chromium|Edg|Firefox|Version)\/[0-9.]+/g) || [],
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    });
-    const link = el('a', {
-      href: URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })),
-      download: 'X 友-诊断日志.json',
-    });
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
-    status.textContent = `已发起下载，共 ${rows.length} 条日志。`;
-  } catch {
-    if (view.account === account) status.textContent = '日志读取失败。请确认扩展已重新加载，然后重试。';
-  } finally {
-    refresh.disabled = exportButton.disabled = false;
-  }
-}
-
-$('diagnostics').addEventListener('toggle', (e) => { if (e.target.open) showDiagnostics(); });
-$('refreshDiagnostics').addEventListener('click', () => showDiagnostics());
-$('exportDiagnostics').addEventListener('click', () => showDiagnostics(true));
-
-$('diagWindow').addEventListener('change', () => {
-  $('diagCustom').hidden = $('diagWindow').value !== 'custom';
-});
-
-$('diagnoseMentions').addEventListener('click', async () => {
-  const button = $('diagnoseMentions');
-  const status = $('diagnosisResult');
-  const custom = $('diagWindow').value === 'custom';
-  const hours = { '1h': 1, '6h': 6, '24h': 24 }[$('diagWindow').value] || 1;
-  const to = custom ? new Date($('diagTo').value).getTime() : Date.now();
-  const from = custom ? new Date($('diagFrom').value).getTime() : to - hours * 3_600_000;
-  const postId = $('diagPostId').value.trim();
-  button.disabled = true;
-  status.textContent = '正在限速回查，请保持弹窗和 X 页面打开。';
-  try {
-    const result = await call('diagnoseMentions', { account: view.account, from, to, postId, source: $('diagSource').value });
-    if (!result || result.error) {
-      status.textContent = result?.error || '回查未返回结果，请重载扩展后重试。';
-      return;
-    }
-    status.textContent = formatDiagnosisResult(result);
-    await showDiagnostics();
-  } catch {
-    status.textContent = '回查未能完成，可刷新日志查看已记录的页。';
-  } finally {
-    button.disabled = false;
-  }
-});
 
 // 导出榜单：当前榜上的人，一人一行
 $('exportBoard').addEventListener('click', () =>
