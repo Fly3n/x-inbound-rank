@@ -321,6 +321,10 @@ test('后台全流程', { timeout: 60_000 }, async () => {
   assert.deepEqual((await boardRows()).map((r) => [r.handle, r.count]), [['Fan', 7]]);
   assert.equal(store['snap:me'].windowDays, 15);
   assert.equal(store['snap:me'].users.fan.count, 7);
+  await setWindow(30);
+  assert.equal((await boardRows()).find((r) => r.handle === 'Fan').replied, 5, '窗口没覆盖完也按已有记录显示');
+  assert.equal(store['snap:me'].users.fan.replied, 5);
+  await setWindow(15);
 
   // 改口径和颜色：榜单和标签立刻跟着变；越界的值夹回范围
   const set = (patch) => send({ type: 'setSettings', account: 'me', patch });

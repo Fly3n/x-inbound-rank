@@ -12,14 +12,20 @@ export const LIMITS = { topN: [10, 500], minCount: [1, 99], maxTiers: 4 }; // ma
 export const OUT_SCHEMA = 2;
 
 /**
- * 「我回 N」能不能按当前榜单范围显示：必须完整读过一次，并且已经覆盖这个窗口的最早时间。
- * X 列表先到底、但没覆盖到窗口起点时不能显示 0，否则会把缺失数据说成「一次没回」。
- * 空列表到底（reachedEnd 且没有 coverTs）是可信的 0。
+ * 「我回别人」是否已经完整覆盖当前窗口。只用于初始化状态和覆盖提示，不用于隐藏窗口内的已有计数。
  */
 export function outboundReady(out, windowDays, now = Date.now()) {
   if (!out?.lastAt || (out.schema || 1) < OUT_SCHEMA) return false;
   if (out.coverTs) return out.coverTs <= now - windowDays * DAY_MS;
   return !!out.reachedEnd;
+}
+
+/**
+ * 「我回 N」有没有可用的本机记录：读过一次且是本机当前格式即可。
+ * 没读完整个窗口时也照常按窗口内已有记录计数，覆盖到哪天由界面单独说明。
+ */
+export function outboundCountable(out) {
+  return !!out?.lastAt && (out.schema || 1) >= OUT_SCHEMA;
 }
 
 /** 入站初始化是否覆盖所选范围；X 列表可信地到底且一条都没有，也算覆盖。 */

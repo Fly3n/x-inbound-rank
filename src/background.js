@@ -5,7 +5,7 @@ import { mentionsEvidence } from './x/mentions-diagnostics.js';
 import { record, readDiagnostics } from './diagnostics.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError, idGt } from './x/parser.js';
 import {
-  replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, outboundReady,
+  replyPlaces, ranking, repliesOf, badgeSnapshot, cleanRules, outboundCountable,
   DAY_MS, WINDOWS, INIT_WINDOWS, KEEP_DAYS, OUT_SCHEMA,
 } from './rank.js';
 import { putEvents, getEvents, clearEvents, pruneEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from './db.js';
@@ -456,7 +456,8 @@ const board = async (account) => {
   const settings = await getSettings(account);
   const cur = await kvGet(keys.cursor(account), {});
   const out = await getEvents(account, OUT);
-  return ranking(await getEvents(account), settings, now(), out, outboundReady(cur.out, settings.windowDays));
+  // 按当前窗口内本机已有的记录计数；覆盖是否完整只影响提示，不应把已经读到的数字藏掉。
+  return ranking(await getEvents(account), settings, now(), out, outboundCountable(cur.out));
 };
 
 // 快照每写一次，每个 x.com 标签页都要把标签重画一遍、弹窗也要重画，所以抓取过程中最多每 30 秒重算一次，
@@ -469,10 +470,10 @@ async function refreshSnapshot(account) {
   snapDirty.delete(account);
   snapAt.set(account, now());
   const rules = await getSettings(account);
-  // 「我回别人」读完过一次之后，标签里才带「我回他几次」
+  // 「我回别人」读到过数据之后，标签里就按已有记录带「我回他几次」
   const o = (await kvGet(keys.cursor(account), {})).out;
-  const outReady = outboundReady(o, rules.windowDays); // 没覆盖当前榜单窗口时，不把缺失数据说成 0
-  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace, schedule: rules.showSchedule }, users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outReady) };
+  const outCountable = outboundCountable(o); // 覆盖不完整也显示已有记录，窗口内没有记录才是 0
+  const snap = { windowDays: rules.windowDays, show: { rank: rules.showRank, out: rules.showOut, rel: rules.showRel, place: rules.showPlace, schedule: rules.showSchedule }, users: badgeSnapshot(await getEvents(account), rules, now(), await getEvents(account, OUT), outCountable) };
   // 和存着的一样就不写：写了也只会让各个页面白白重画一遍
   const prev = await kvGet(keys.snap(account));
   if (prev && JSON.stringify({ windowDays: prev.windowDays, show: prev.show, users: prev.users }) === JSON.stringify(snap)) return;

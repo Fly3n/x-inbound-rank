@@ -1,13 +1,14 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
 import {
-  COLORS, LIMITS, DEFAULT_RULES, OUT_SCHEMA, KEEP_DAYS, WARN_DAYS, DAY_MS,
-  colorOf, underMyPosts, countsFromMe, outboundReady, inboundInitCovered, outboundInitCovered,
+  COLORS, LIMITS, DEFAULT_RULES, KEEP_DAYS, WARN_DAYS, DAY_MS,
+  colorOf, underMyPosts, countsFromMe, outboundReady, outboundCountable,
+  inboundInitCovered, outboundInitCovered,
 } from '../rank.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outReady: false }; // open：榜单里点开的那个人
+const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outCountable: false }; // open：榜单里点开的那个人
 
 const COLOR_NAMES = { red: '红', orange: '橙', yellow: '黄', green: '绿', cyan: '青', blue: '蓝', purple: '紫', gray: '灰' };
 const pad = (n) => String(n).padStart(2, '0');
@@ -88,7 +89,7 @@ function detailRow() {
   if (d.error) return el('li', { className: 'detail hint', textContent: '读取明细失败，收起后再试。' });
   return el('li', { className: 'detail reply-columns' }, [
     replyColumn('他回我', d),
-    replyColumn('我回他', d.outbound, view.outReady),
+    replyColumn('我回他', d.outbound, view.outCountable),
   ]);
 }
 
@@ -114,7 +115,7 @@ function renderList() {
               el('span', { className: 'name', textContent: r.name }),
               el('span', { className: 'sub', textContent: `@${r.handle || r.actor_id} · 最近 ${fmtTime(r.last)}` }),
             ]),
-            ...(view.outReady
+            ...(view.outCountable
               ? [el('span', { className: `mine${r.replied ? '' : ' zero'}`, title: '同一范围内，本机已读取的直接评论次数', textContent: `我回 ${r.replied}` })]
               : [el('span', { className: 'mine zero', textContent: '我回 —' })]),
             el('span', { className: 'chip', dataset: { xirC: r.color }, title: '榜单范围内他在我的帖子下回复我几次，颜色和时间线标签一致', textContent: `${r.count} 次` }),
@@ -253,8 +254,9 @@ async function draw() {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
-  const outDataReady = (out?.schema || 1) >= OUT_SCHEMA;
-  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outReady: outboundReady(out, rules.windowDays) });
+  const outDataReady = outboundCountable(out);
+  const outWindowCovered = outboundReady(out, rules.windowDays);
+  Object.assign(view, { rows, rules, eventCount: s.db.in.count, outCountable: outDataReady });
   // 本机数据是不是已经覆盖了所选的初始化范围（覆盖了就把「初始化」置灰）：
   // 上次初始化往回读到了哪天；之后靠自动更新接着，是连续的
   const initStart = Date.now() - rules.initDays * DAY_MS;
@@ -294,7 +296,9 @@ async function draw() {
   $('outLine').hidden = false;
   $('outLine').textContent = outProgress || outBad
     ? `我回别人 · ${outProgress}${outBad} 榜单显示已读取的数据。`
-    : view.outReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
+    : outDataReady && !outWindowCovered
+      ? `我回别人 · 本机已有记录从 ${out?.coverTs ? fmtDay(out.coverTs) : '未完整读取'} 开始，榜单按窗口内已有记录计算。`
+      : outDataReady ? '' : '我回别人 · 到设置页初始化后显示次数。';
   $('outLine').hidden = !$('outLine').textContent;
   $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
     : outCoveredNow && !outPending
@@ -576,7 +580,7 @@ $('diagnoseMentions').addEventListener('click', async () => {
 $('exportBoard').addEventListener('click', () =>
   download(`回复榜_${view.rules.windowDays}天`, [
     ['名次', '名字', 'ID', '回复次数', '我回他次数', '最近一次回复', '主页'],
-    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outReady ? r.replied : '', fullTime(r.last), `https://x.com/${r.handle}`]),
+    ...view.rows.map((r) => [r.rank, r.name, `@${r.handle}`, r.count, view.outCountable ? r.replied : '', fullTime(r.last), `https://x.com/${r.handle}`]),
   ]),
 );
 

@@ -6,7 +6,7 @@ import '../src/content/rel.js';
 import '../src/content/schedule.js';
 import {
   ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
-  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, outboundReady, inboundInitCovered, outboundInitCovered,
+  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, outboundReady, outboundCountable, inboundInitCovered, outboundInitCovered,
 } from '../src/rank.js';
 import { parseMentions, parseMyReplies, parseScheduledTweets, ParseError } from '../src/x/parser.js';
 
@@ -67,6 +67,9 @@ test('覆盖判定：提前到底不冒充覆盖，完整到底才算数', () =>
   assert.equal(outboundReady(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: true }), 7, NOW), false, '只读到 3 天不能填满 7 天窗口');
   assert.equal(outboundReady(out({ coverTs: null, reachedEnd: true }), 7, NOW), true, '可信的空列表是 0');
   assert.equal(outboundReady(out({ coverTs: NOW - 8 * DAY_MS, schema: 1 }), 7, NOW), false, '旧数据口径不显示');
+  assert.equal(outboundCountable(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: false })), true, '没覆盖整个窗口也应显示已读记录');
+  assert.equal(outboundCountable(out({ lastAt: null, coverTs: null, reachedEnd: false })), false, '从没读取过时不显示');
+  assert.equal(outboundCountable(out({ coverTs: NOW - 8 * DAY_MS, schema: 1 })), false, '旧数据口径不显示');
 
   assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, '100', 7, NOW), true);
   assert.equal(inboundInitCovered({ oldestTs: NOW - 3 * DAY_MS, reachedEnd: true }, '100', 7, NOW), false);
