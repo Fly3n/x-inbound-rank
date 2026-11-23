@@ -362,3 +362,19 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
   assert.equal(receipt.readAt.outbound, null);
   assert.equal(server.outCalls, beforeOutCalls);
 });
+
+test('我回别人免补历史直接建起点：新账号开启低频同步自动排期并最多读 2 页建立接续点', { timeout: 20_000 }, async () => {
+  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  delete alarms['out:me'];
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true, outAutoSync: true } });
+  assert.ok(alarms['out:me'], '未补过历史的新账号开启低频同步时应自动安排出站闹钟');
+
+  const beforeCalls = server.outCalls;
+  await fire('out');
+  const out = store['cursor:me'].out;
+  assert.equal(out.status, 'ok');
+  assert.ok(out.syncedId, '首次免补历史读取后应建立接续点');
+  assert.equal(out.lastFullAt, undefined, '免补历史建起点不冒充已完成补历史');
+  assert.ok(server.outCalls - beforeCalls >= 1 && server.outCalls - beforeCalls <= 2, '首次建起点最多读 2 页');
+});

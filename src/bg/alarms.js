@@ -37,15 +37,15 @@ export async function recoverAlarms(account) {
     const nextIncAt = cur.nextIncAt > now() && inAutoSlot(cur.nextIncAt) ? cur.nextIncAt : nextAutoSlot();
     await ensure(INC_ALARM, nextIncAt);
   }
-  // 进行中的手动出站同步独立续跑；日常低频定时仅在显式开启 outAutoSync 时安排
+  // 进行中的手动出站同步独立续跑；日常低频定时仅在显式开启 outAutoSync 时安排（新账号免补历史即可排期）
   if (out?.status === 'need_tpl' && !out.limitReached && await kvGet(keys.tpl(account))) {
     await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + 3000 });
-  } else if (out && !out.limitReached && (out.fullFor === 0 || out.lastAt || out.syncedId) && out.status !== 'need_tpl') {
-    const retryAt = Math.max(out.resume?.nextAt || 0, out.retryAt || 0);
-    const pending = out.fullFor === 0 || out.resume || ['queued', 'waiting_tab', 'reading'].includes(out.status);
+  } else if (!out?.limitReached && out?.status !== 'need_tpl') {
+    const retryAt = Math.max(out?.resume?.nextAt || 0, out?.retryAt || 0);
+    const pending = !!(out && (out.fullFor === 0 || out.resume || ['queued', 'waiting_tab', 'reading'].includes(out.status)));
     if (pending) await ensure(OUT_ALARM, retryAt);
     else if (autoEnabled && settings.outAutoSync) {
-      const saved = out.nextAutoAt;
+      const saved = out?.nextAutoAt;
       const routine = saved > now() && inAutoSlot(saved) ? saved : nextOutAutoSlot();
       await ensure(OUT_ALARM, routine);
     }

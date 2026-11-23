@@ -109,15 +109,16 @@ export async function syncOut(account, manual = false) {
     if (!manual && !(await (taskManual ? hasVisiblePage(account) : hasActivePage(account)))) return;
     const initDays = prev.initDays ?? settings.initDays;
     const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
-    // 第一次必须手动点「补历史」（点的时候正好在读另一份数据，会先记下 fullFor: 0，过一会儿由闹钟来读）
-    if (!prev.lastAt && !prev.syncedId && prev.fullFor !== 0) return;
-    // 完整读：手动补历史（fullFor 被清成 0）、或本机数据是旧版本存的——读到补历史范围的起点。否则读到与上次位置重叠即停。
-    const full = !prev.syncedId || prev.fullFor === 0 || (prev.schema || 1) < OUT_SCHEMA;
+    // 完整读：手动补历史（fullFor 被清成 0）、或旧版本已同步数据的结构升级——读到补历史范围的起点。
+    // 首次免补历史建起点（bootstrap）：从未同步过且非补历史时，只读启用时刻前后（最多 2 页）建立接续点。
+    const full = prev.fullFor === 0 || (!!(prev.lastAt || prev.syncedId) && (prev.schema || 1) < OUT_SCHEMA);
+    const bootstrap = !full && !prev.syncedId;
+    const startFloor = me?.enabledAt || now();
     // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
     const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
-    const stopAt = full ? null : resume?.stopAt || prev.syncedId;
-    // 这个接口一轮最多读五页；页间使用非均匀停顿且低于 Chrome 空闲回收线。
-    const maxPages = PACE.outPages; // 这个接口额度小，不管哪种读法一轮都只读几页
+    const stopAt = full || bootstrap ? null : resume?.stopAt || prev.syncedId;
+    // 这个接口一轮最多读五页；首次建起点最多读 2 页，与入站免补历史口径一致。
+    const maxPages = bootstrap ? Math.min(PACE.outPages, 2) : PACE.outPages;
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
@@ -191,7 +192,7 @@ export async function syncOut(account, manual = false) {
       batch.read += p.events.length;
       batch.added += added;
       await record('page_saved', { ...trace, source: 'replies', posts: p.events.map(({ id, own, created_at }) => ({ postId: id, own: !!own, createdAt: created_at })), newestAt: p.newestTs, oldestAt: p.oldestTs, cursorRepeated: !!cursor && cursor === p.bottomCursor, parsed: p.events.length, added, more: !!p.bottomCursor });
-      await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, rate429Count: 0, running: { at: now(), pages: pages + 1 } });
+      await saveOut(account, { lastReadAt: readAt, lastReadCounts: { ...batch }, ...(manual && !full ? { lastManualAt: run } : {}), rate429Count: 0, running: { at: now(), pages: pages + 1 } });
       if (!topId) topId = p.newestId;
       if (p.oldestTs) reachedTs = p.oldestTs;
       if (cursor && p.bottomCursor === cursor) {
@@ -212,9 +213,10 @@ export async function syncOut(account, manual = false) {
       }
       const ended = !p.oldestId || !p.bottomCursor; // 列表到底了
       const reachedTarget = p.newestTs != null && p.newestTs < targetTs;
+      const bootstrapReached = bootstrap && (ended || (p.oldestTs != null && p.oldestTs <= startFloor) || pages + 1 >= maxPages);
       const crossedCheckpoint = !stopAt || !!(p.oldestId && !idGt(p.oldestId, stopAt));
-      const stoppedByTime = full ? reachedTarget : crossedCheckpoint;
-      const endedBeforeCheckpoint = ended && !full && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
+      const stoppedByTime = full ? reachedTarget : bootstrap ? bootstrapReached : crossedCheckpoint;
+      const endedBeforeCheckpoint = ended && !full && !bootstrap && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
       if (endedBeforeCheckpoint) {
         await record('pagination_stop', { ...trace, source: 'replies', reason: 'ended_before_checkpoint', checkpoint: stopAt });
         await saveOut(account, {
@@ -226,7 +228,7 @@ export async function syncOut(account, manual = false) {
       }
       if (ended || stoppedByTime) {
         complete = true;
-        reachedEnd = ended && !reachedTarget;
+        reachedEnd = ended && !reachedTarget && !(bootstrap && p.oldestTs != null && p.oldestTs <= startFloor);
         pages++;
         break;
       }
@@ -259,9 +261,9 @@ export async function syncOut(account, manual = false) {
     // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId))
       ? topId
-      : prev.syncedId || topId || (full && reachedEnd && !reachedTs ? EMPTY_SYNC_ID : null);
+      : prev.syncedId || topId || ((full || bootstrap) && !reachedTs ? EMPTY_SYNC_ID : null);
     const nextAutoAt = nextOutAutoSlot(now());
-    const done = { status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId, resume: null, lastAt: now(), nextAutoAt, manualTask: false };
+    const done = { status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId, schema: OUT_SCHEMA, resume: null, lastAt: now(), nextAutoAt, manualTask: false };
     await saveOut(account, full ? {
       ...done,
       coverTs: reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null,
