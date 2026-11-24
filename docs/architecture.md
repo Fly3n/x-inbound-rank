@@ -23,7 +23,7 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头；`fetchMentions` / `fetchMyReplies` / `fetchScheduled` 均返回 `{ ok, status, body, rateResetAt, userId, error }` 不抛异常；`own` 集合上限 500 | X 改接口 |
 | `src/x/parser.js` | 解析层：`parseMentions`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`；结构不符抛 `ParseError` | X 改返回结构 |
 | `src/x/mentions-diagnostics.js` | 提及诊断：裁剪请求与响应为条件指纹、帖子编号与时间线结构，不保存完整地址、游标或正文 | X 改提及返回结构或排查漏收 |
-| `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：包住 XHR / `fetch`，将相关文本经 `postMessage` 转给 `rel.js`；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
+| `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：包住 XHR / `fetch`，经页面加载时协商的随机通道名通过 `document` `CustomEvent` 传给 `rel.js`（不走全局 `window.postMessage` 广播）；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
 | `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、请求模板（`tplKind`）、`CreateTweet` 回复与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条），不落盘、不发请求 | 改旁听字段或关系判断 |
 | `src/content/schedule.js` | 发帖排期纯逻辑：07:00–24:00 半小时档、±15 分钟归档、25 分钟硬防撞、中点均分 / 30–40 分钟顺排、具体档 ±1–3 分钟微调与前后参考时间差；无 DOM/Chrome 依赖 | 改档位规则 |
 | `src/content/schedule-ui.js` | X 原生排期弹窗快捷档期条：找原生表单（`data-testid` 优先、语义兜底）、上下空档切换、左右分栏前后参考卡、展示占用并点击填入日期/时间，不代点确认或发布 | X 改排期弹窗结构 |
