@@ -123,6 +123,8 @@
   }
 
   const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  const stepWait = () => new Promise((resolve) => setTimeout(resolve, 35 + Math.floor(Math.random() * 50)));
+  let fillToken = 0;
 
   /** X 换月后 React 可能异步重建「日」的选项：等到目标选项出现再填，最多等 600ms。 */
   async function setSelectWhenReady(select, candidates, timeout = 600) {
@@ -134,8 +136,11 @@
     }
   }
 
+  /** 按轻微人类错开节奏填写 5 个下拉框，并带单调序号防连续快点竞态；被后续点击取代时返回 null。 */
   async function fillNativeForm(form, targetTs) {
-    let current = () => (activeDialog && document.contains(activeDialog) && findScheduleForm(activeDialog)) || form;
+    const seq = ++fillToken;
+    const stale = () => seq !== fillToken || (activeDialog && !document.contains(activeDialog));
+    const current = () => (activeDialog && document.contains(activeDialog) && findScheduleForm(activeDialog)) || form;
     const d = new Date(targetTs);
     const y = d.getFullYear();
     const m = d.getMonth() + 1;
@@ -145,11 +150,19 @@
 
     let f = current();
     const okY = setSelectValue(f.year, [y]);
+    await stepWait();
+    if (stale()) return null;
+    f = current();
     const okM = setSelectValue(f.month, [m, String(m).padStart(2, '0')]);
     await nextFrame();
+    await stepWait();
+    if (stale()) return null;
     f = current();
     const okD = await setSelectWhenReady(f.day, [day, String(day).padStart(2, '0')]);
+    if (stale()) return null;
 
+    await stepWait();
+    if (stale()) return null;
     let okH = false;
     f = current();
     if (f.ampm) {
@@ -157,13 +170,19 @@
       const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
       setSelectValue(f.ampm, isPm ? ['pm', 'PM', '下午'] : ['am', 'AM', '上午']);
       await nextFrame();
+      await stepWait();
+      if (stale()) return null;
       f = current();
       okH = await setSelectWhenReady(f.hour, [h12, String(h12).padStart(2, '0')]);
     } else {
       okH = setSelectValue(f.hour, [h24, String(h24).padStart(2, '0')]);
     }
+    if (stale()) return null;
+    await stepWait();
+    if (stale()) return null;
     f = current();
     const okMin = await setSelectWhenReady(f.minute, [min, String(min).padStart(2, '0')]);
+    if (stale()) return null;
     return okY && okM && okD && okH && okMin;
   }
 
@@ -194,7 +213,7 @@
       nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt, mode,
     });
     const ok = await fillNativeForm(form, filledTs);
-    if (XIRRel.session()?.account !== account || !enabled) return;
+    if (ok === null || XIRRel.session()?.account !== account || !enabled) return;
     lastPicked = { slotTs: slot.ts, filledTs, label: slot.label, ok };
     if (closeDrop) dropOpen = false;
     renderPanel((activeDialog && findScheduleForm(activeDialog)) || form);

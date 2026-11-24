@@ -102,6 +102,37 @@ const XIRRel = (() => {
   }
 
   // 开关与登录会话共同决定本页是否工作。切换时清掉上一账号留在页面里的信息。
+  const BOOT_INIT = 'ui:ch:i';
+  const BOOT_READY = 'ui:ch:r';
+  const randCh = () => {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      return '_' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+    return '_' + Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2);
+  };
+  const toMain = randCh();
+  const toIso = randCh();
+  let lastSessionMsg = null;
+  const pushSession = (payload) => {
+    lastSessionMsg = payload;
+    if (typeof document === 'undefined' || !document.dispatchEvent) return;
+    try {
+      document.dispatchEvent(new CustomEvent(toMain, { detail: JSON.stringify({ t: 's', s: payload }) }));
+    } catch {
+      // 忽略
+    }
+  };
+  const sendBoot = () => {
+    if (typeof document === 'undefined' || !document.dispatchEvent) return;
+    try {
+      document.dispatchEvent(new CustomEvent(BOOT_INIT, { detail: JSON.stringify({ a: toMain, b: toIso }) }));
+    } catch {
+      // 忽略
+    }
+  };
+
   let accounts = {};
   let session = null;
   const listeners = new Set();
@@ -117,12 +148,69 @@ const XIRRel = (() => {
     ops.clear();
     api.tpls.length = 0;
     api.mentionsEvidence.length = 0;
-    window.postMessage({ xirSetSession: true, session: session && { userId, activation: session.activation } }, location.origin);
+    pushSession(session && { userId, activation: session.activation });
     for (const fn of listeners) fn(session);
     return session;
   };
 
-  if (typeof window !== 'undefined' && window.addEventListener && typeof chrome !== 'undefined') {
+  if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.addEventListener && typeof chrome !== 'undefined') {
+    document.addEventListener(toIso, (e) => {
+      if (typeof e?.detail !== 'string') return;
+      let data;
+      try { data = JSON.parse(e.detail); } catch { return; }
+      if (!data?.s) return;
+      const current = api.session();
+      if (!current || data.s.userId !== current.userId || data.s.activation !== current.activation) return;
+      if (typeof data.op === 'string' && data.op.length < 80) {
+        ops.delete(data.op);
+        ops.add(data.op);
+        if (ops.size > 40) ops.delete(ops.values().next().value);
+      }
+      if (typeof data.tpl === 'string') {
+        api.tpls.push(data.tpl);
+        if (api.tpls.length > 6) api.tpls.shift();
+        api.onTpl?.(data.tpl);
+      }
+      if (data.pe && typeof data.pe.op === 'string') {
+        api.onPostEvent?.(data.pe);
+      }
+      if (typeof data.tap !== 'string') return;
+      if (data.ev && data.tap.length < 8_000_000) {
+        const evidence = { ...data.ev, text: data.tap };
+        if (api.onMentionsEvidence) api.onMentionsEvidence(evidence);
+        else {
+          api.mentionsEvidence.push(evidence);
+          if (api.mentionsEvidence.length > 2) api.mentionsEvidence.shift();
+        }
+      }
+      if (data.top === 'FetchScheduledTweets') {
+        try {
+          api.onScheduledTap?.(data.tap);
+        } catch {
+          // 忽略
+        }
+      }
+      if (data.top === 'CreateTweet') {
+        try {
+          api.onCreateTweetTap?.(data.tap);
+        } catch {
+          // 忽略
+        }
+      }
+      try {
+        take(data.tap);
+      } catch {
+        // 结构对不上就当没看到
+      }
+    });
+    const onReady = () => {
+      document.removeEventListener(BOOT_READY, onReady);
+      sendBoot();
+      pushSession(lastSessionMsg);
+    };
+    document.addEventListener(BOOT_READY, onReady);
+    sendBoot();
+
     let registryChanged = false;
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes.accounts) return;
@@ -138,53 +226,6 @@ const XIRRel = (() => {
     // cookieStore 不是每个 Chrome 都支持；轮询也覆盖 X 在同一个页面内切换账号的情况。
     window.cookieStore?.addEventListener('change', () => api.session());
     setInterval(() => api.session(), 1_000);
-
-    window.addEventListener('message', (e) => {
-      if (e.source !== window || e.origin !== location.origin || !e.data?.xirSession) return;
-      const current = api.session();
-      if (!current || e.data.xirSession.userId !== current.userId || e.data.xirSession.activation !== current.activation) return;
-      if (typeof e.data?.xirOp === 'string' && e.data.xirOp.length < 80) {
-        ops.delete(e.data.xirOp);
-        ops.add(e.data.xirOp);
-        if (ops.size > 40) ops.delete(ops.values().next().value);
-      }
-      if (typeof e.data?.xirTpl === 'string') {
-        api.tpls.push(e.data.xirTpl);
-        if (api.tpls.length > 6) api.tpls.shift();
-        api.onTpl?.(e.data.xirTpl);
-      }
-      if (e.data?.xirPostEvent && typeof e.data.xirPostEvent.op === 'string') {
-        api.onPostEvent?.(e.data.xirPostEvent);
-      }
-      if (typeof e.data?.xirTap !== 'string') return;
-      if (e.data.xirMentionsEvidence && e.data.xirTap.length < 8_000_000) {
-        const evidence = { ...e.data.xirMentionsEvidence, text: e.data.xirTap };
-        if (api.onMentionsEvidence) api.onMentionsEvidence(evidence);
-        else {
-          api.mentionsEvidence.push(evidence);
-          if (api.mentionsEvidence.length > 2) api.mentionsEvidence.shift();
-        }
-      }
-      if (e.data.xirTapOp === 'FetchScheduledTweets') {
-        try {
-          api.onScheduledTap?.(e.data.xirTap);
-        } catch {
-          // 忽略
-        }
-      }
-      if (e.data.xirTapOp === 'CreateTweet') {
-        try {
-          api.onCreateTweetTap?.(e.data.xirTap);
-        } catch {
-          // 忽略
-        }
-      }
-      try {
-        take(e.data.xirTap);
-      } catch {
-        // 结构对不上就当没看到
-      }
-    });
   }
 
   return api;
