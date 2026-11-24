@@ -45,7 +45,7 @@
 | `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
 | `scheduled:<账号>` | `{ items, syncedAt, retryAt, errorCount }`：已排期列表缓存与失败退避 |
 | `lastPostAt:<账号>` | 最近一次电脑端原创/引用主帖时间戳（由 `CreateTweet` 旁听记录，不含回复评论） |
-| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, incLimitReached, rateUntil, rate429Count, out }` |
+| `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, inLastReadAt, inLastReadCounts, inLastTapAt, inLastTapCounts, outLastTapAt, outLastTapCounts, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, incLimitReached, rateUntil, rate429Count, circuitBroken, out }` |
 | `job:<账号>` | 入站历史补读任务状态 |
 | `snap:<账号>` | 标签快照 `{ at, windowDays, show, users }`；抓取期节流 30 秒，结束时补算，内容不变不写入 |
 | `alert:<账号>` | 最近一次抓取/解析错误，下次成功后清除 |
@@ -60,9 +60,16 @@
 - 一步一页通过 `job:<账号>` 闹钟接力，避免 Service Worker 回收丢定时；30 分钟 `tick` 闹钟兜底接续、算榜与检查增量；完成后清除 `incLimitReached`。
 - 结束判定：本页 `newestTs < targetTs` 正常完成；无 `bottomCursor` 或空页记 `reachedEnd: true`；首屏可信空列表记哨兵 `syncedId = '0'`；通知模板缺失或 400/404 过期时删除模板并暂停等待用户自行打开一次 X 通知页刷新（不再降级旧 REST）；翻页返回相同 `bottomCursor` 报 `error` 不推进接续点。
 
+### 旁听直接入库（零主动请求）
+
+- **别人回我（通知页 / 提及页旁听）**：`tap.js` → `rel.js` → `content.js` 捕获 X 页面自身发出的 `NotificationsTimeline` GET 响应（过滤自身主动请求），发往 `xir:inbound:tap` → `handleInboundTap`；`Mentions` 严格按 `parseMentions` 校验，`All` / `Verified` 允许跳过点赞/关注等非帖子条目并记录 `nonTweetEntries` / `nonTweetKinds`。结果按主键去重写入 `events` 表，记录 `cur.inLastTapAt` / `cur.inLastTapCounts`，**绝不推进 `cur.syncedId`**；全程记录 `inbound_tap`（以及异常时的 `inbound_tap_skipped` / `inbound_tap_failed`）与 `web_mentions_response` 日志，并在有新增时立即刷新快照、每次事件均触发 `queueBridgePush()` 同步至本机数据桥。
+- **我回别人（发帖旁听 + 本人主页回复栏旁听）**：
+  - `CreateTweet` 响应经 `xir:outbound:tap` → `handleOutboundTap` 写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched`、`cur.outLastTapAt` / `cur.outLastTapCounts`、触发 `queueBridgePush()`（不碰 `cur.out`）。
+  - `UserRepliesTimeline` / `UserTweetsAndReplies` GET 响应经 `xir:replies:tap` → `handleRepliesTap` 核验 URL 中 `variables.userId === me.userId`（浏览他人主页时静默跳过），调用 `parseMyReplies` 写入 `OUT` 表，记录 `outbound_replies_tap` / `outbound_replies_tap_skipped` / `outbound_replies_tap_failed` 与 `cur.outLastTapAt` / `cur.outLastTapCounts`，**绝不碰 `cur.out`**（不推进 `syncedId` / `coverTs` / `lastAt`），每次事件均触发 `queueBridgePush()`。
+
 ### 出站同步（`cursor.out` 与浏览器旁听）
 
-- **默认方案 A（浏览器发帖旁听）**：`tap.js` → `rel.js` → `content.js` 捕获 `CreateTweet` 响应，由 `handleOutboundTap` 校验后写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched` 日志；不动 `cur.out.syncedId` 与 `cur.out.lastAt`，避免遮蔽手机端回复。
+- **默认方案 A（浏览器旁听）**：`CreateTweet` 发帖旁听与本人主页「回复」栏旁听实时写入 `OUT` 表并同步至本机桥，不动 `cur.out.syncedId` 与 `cur.out.lastAt`，避免遮蔽未刷到的手机端回复。
 - **可选方案 B（手动补历史、独立立即更新与 2 天低频自动同步）**：`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastManualAt`（独立 10 分钟冷却）、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
 - 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」或开启 `outAutoSync` 时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true` 并阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。日常自动同步仅在 `fetchEnabled && outAutoSync`（默认 `outAutoSync: false`）同时为真时按 `nextOutAutoSlot()`（至少 48 小时）调度。
 - **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。

@@ -3,8 +3,8 @@
 ## 本机数据桥（仅维护期使用）
 
 - `manifest.json` 在维护期临时包含 `http://127.0.0.1/*` 站点权限，**正式分发前必须移除或改为按需授权**。
-- `src/bridge.js` 在账号/数据变化、任务结束、30 分钟兜底和页面上线时将 `{ accounts, data, storage, source: 'live' }` 推送到 `http://127.0.0.1:17321/ingest`；2.5 秒防抖合并，服务不在线静默退避 60 秒，不影响抓取。
-- `scripts/live-bridge.mjs` 仅监听 `127.0.0.1`，原子写出 `.local/xir-live.json` 与 `.local/xir-live.meta.json`（权限 `0600`），不访问外网。
+- `src/bridge.js` 在账号/数据变化、旁听事件落盘（含新增、去重与异常日志）、任务结束、30 分钟兜底和页面上线时将 `{ accounts, data, storage, source: 'live' }` 推送到 `http://127.0.0.1:17321/ingest`；2.5 秒防抖合并，服务不在线静默退避 60 秒，不影响抓取。
+- `scripts/live-bridge.mjs` 仅监听 `127.0.0.1`，原子写出 `.local/xir-live.json` 与 `.local/xir-live.meta.json`（权限 `0600`，含账号计数与近期诊断/旁听摘要 `diagnostics`），不访问外网。
 - 常用命令：
   - `npm run bridge`：前台运行桥接接收服务
   - `npm run bridge:install` / `npm run bridge:uninstall`：安装或卸载 `~/Library/LaunchAgents/com.xir.live-bridge.plist`

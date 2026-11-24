@@ -1,6 +1,6 @@
 # X 接口实测状态与已知未知
 
-最后核对日期：2026-11-23（每次实测得出新结论时同步更新本文档与 `README.md`）。
+最后核对日期：2026-11-24（每次实测得出新结论时同步更新本文档与 `README.md`）。
 
 ## 已确认事实
 
@@ -39,4 +39,5 @@
 3. **关系 / `M` 旁听字段兼容性**：`relationship_perspectives.following / followed_by`、旧 `legacy` 内字段与页面帖子归属结构尚未在真实账号全面确认（不符时仅不显示小标，不影响榜单）。
 4. **排期快捷档期弹窗兼容**：真实排期弹窗的选择器兼容性、日期联动与填入效果需随实际反馈调整。
 5. **X 发版导致的结构变更**：接口或 DOM 改版后插件在弹窗/错误提示中直接报错，不做静默兜底。
-6. **`CreateTweet` 真实返回载荷持续核对**：2026-11-23 已在真实账号实测命中 3 条 `outbound_tap`（`added: 1, direct: true`），后续继续借 `.local/` 日志核对是否存在其他返回变体。
+6. **`CreateTweet` 真实返回载荷持续核对**：2026-11-23 已在真实账号实测命中 `outbound_tap`，后续继续借 `.local/` 日志核对是否存在其他返回变体。
+7. **通知页「全部」(`timeline_type: "All"`) 旁听覆盖率与折叠形态实测**：已接入 `inbound_tap` 全量诊断日志（含 `timeline`、`entries`、`nonTweetEntries`、`nonTweetKinds`、`decisions`、`shapes`）与 `.local/xir-live.meta.json` 桥接摘要，待在真实账号刷通知页后核对是否存在回复折叠摘要。

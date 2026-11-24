@@ -21,23 +21,23 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | 文件 / 目录 | 职责 | 何时改 |
 |---|---|---|
 | `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头；`fetchMentions` / `fetchMyReplies` / `fetchScheduled` 均返回 `{ ok, status, body, rateResetAt, userId, error }` 不抛异常；`own` 集合上限 500 | X 改接口 |
-| `src/x/parser.js` | 解析层：`parseMentions`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`；结构不符抛 `ParseError` | X 改返回结构 |
+| `src/x/parser.js` | 解析层：`parseMentions`、`parseNotificationsTap`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`、`repliesTapTargetUserId` / `repliesTapHasCursor`；结构不符抛 `ParseError` | X 改返回结构 |
 | `src/x/mentions-diagnostics.js` | 提及诊断：裁剪请求与响应为条件指纹、帖子编号与时间线结构，不保存完整地址、游标或正文 | X 改提及返回结构或排查漏收 |
-| `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：包住 XHR / `fetch`，经页面加载时协商的随机通道名通过 `document` `CustomEvent` 传给 `rel.js`（不走全局 `window.postMessage` 广播）；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
-| `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、请求模板（`tplKind`）、`CreateTweet` 回复与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条），不落盘、不发请求 | 改旁听字段或关系判断 |
+| `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：包住 XHR / `fetch`，经页面加载时协商的随机通道名通过 `document` `CustomEvent` 传给 `rel.js`（不走全局 `window.postMessage` 广播），并附带通知页/个人回复栏旁听元数据；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
+| `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、请求模板（`tplKind`）、通知页/个人回复栏/`CreateTweet` 旁听数据（含加载期短缓冲）与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条），不落盘、不发请求 | 改旁听字段或关系判断 |
 | `src/content/schedule.js` | 发帖排期纯逻辑：07:00–24:00 半小时档、±15 分钟归档、25 分钟硬防撞、中点均分 / 30–40 分钟顺排、具体档 ±1–3 分钟微调与前后参考时间差；无 DOM/Chrome 依赖 | 改档位规则 |
 | `src/content/schedule-ui.js` | X 原生排期弹窗快捷档期条：找原生表单（`data-testid` 优先、语义兜底）、上下空档切换、左右分栏前后参考卡、展示占用并点击填入日期/时间，不代点确认或发布 | X 改排期弹窗结构 |
-| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、上报接口模板与 `CreateTweet` 旁听文本、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | Service Worker 入口：初始化与集中注册 Chrome 事件监听（`tabs.onActivated`/`tabs.onUpdated`/`windows.onFocusChanged`/`runtime.onInstalled`/`runtime.onStartup`/`alarms.onAlarm`/`runtime.onMessage`） | 增删顶级事件入口 |
 | `src/bg/runtime.js` | 后台公共常量 `PACE`、模拟真人停顿函数（`humanIncDelay`/`humanBackfillDelay`/`humanBatchPages`）、双窗口调度（含 `nextOutAutoSlot`）、并发 `busy` 锁、串行 `cursor` 队列、`board` 与快照节流计算 | 调风控节奏或锁 |
 | `src/bg/alarms.js` | 按账号命名闹钟清理、重试与恢复（`job:` / `inc:` / `out:`） | 改闹钟恢复条件 |
 | `src/bg/accounts.js` | 账号升级迁移、会话校验 `senderAccount`、启停控制、`hasVisiblePage`/`hasActivePage` 活跃门控、`refreshStaleTabs` 各窗口前台旧内容脚本刷新与 `stale_tab_refresh` 日志记录 | 改账号隔离或刷新策略 |
 | `src/bg/transport.js` | `fetchViaTab`、`recordRateLimit`/`clearRateLimit` 账号级 429 退避、提及 `pull` 入库与诊断记录 | 改请求退避或入库流程 |
 | `src/bg/backfill.js` | 别人回我历史补读状态机（启动、逐页、暂停、恢复、唤醒） | 改回填流程 |
-| `src/bg/incremental.js` | 别人回我增量拉取（免补历史直启、发现重叠即停、单轮 10 段/60 页安全上限） | 改增量停止或上限逻辑 |
-| `src/bg/outbound.js` | 我回别人浏览器发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`），以及免补历史建起点、手动补历史与可选 2 天低频自动同步（`syncOut` / `syncOutNow`） | 改出站旁听或同步策略 |
+| `src/bg/incremental.js` | 别人回我日常通知页/提及页旁听入库 `handleInboundTap`（写诊断日志并推桥），以及增量拉取（免补历史直启、发现重叠即停、单轮 8 段/48 页安全上限） | 改入站旁听或增量逻辑 |
+| `src/bg/outbound.js` | 我回别人浏览器发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`，以及免补历史建起点、手动补历史与可选 2 天低频自动同步（`syncOut` / `syncOutNow`） | 改出站旁听或同步策略 |
 | `src/bg/scheduled.js` | 发帖排期按需同步、`xir:scheduled:tap` 与 `xir:postEvent`（排期增删缓存失效）处理 | 改排期同步与退避 |
-| `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:outbound:tap`、`xir:active` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
+| `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:inbound:tap`、`xir:replies:tap`、`xir:outbound:tap`、`xir:active` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
 | `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`countsFromMe`、规则默认值 `DEFAULT_RULES`（含 `outAutoSync: false`）与 `cleanRules` | 改统计口径或规则范围 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 `keys`；重读同一条按 `mergeKnown` 合并；整表冻结缓存 | 改数据模型或存储键 |
 | `src/diagnostics.js` | 本机诊断日志按小时分键静默写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
