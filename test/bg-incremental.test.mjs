@@ -53,8 +53,7 @@ test('增量更新：重叠即停与完整晚间窗口排期', { timeout: 20_000
   feed.splice(feed.indexOf(older), 1);
 });
 
-test('提及模板切换与 404 自动回退旧接口', async () => {
-  assert.equal(server.mentionTpl, undefined, '没记下之前用旧接口');
+test('提及模板切换：404 过期后不降级旧 REST，提示打开通知页并在捕获新模板后自动恢复', async () => {
   const NT = 'https://x.com/i/api/graphql/NQ/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22All%22%7D';
   await pageSend({ type: 'xir:tpl', url: NT, kind: 'mentions' });
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
@@ -65,14 +64,26 @@ test('提及模板切换与 404 自动回退旧接口', async () => {
   const realSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (_id, msg) => (msg.type === 'xir:fetch' && msg.tpl ? { ok: false, status: 404, userId: '1' } : realSend(_id, msg));
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
-  await fire('inc');
+  const expired = await fire('inc');
   chrome.tabs.sendMessage = realSend;
   assert.equal(store['tpl:mentions:me'], undefined, '过期的模板删掉');
-  assert.ok(store['cursor:me'].nextIncAt - Date.now() <= 5 * 60_000, '三到五分钟后用旧接口重读');
+  assert.equal((await send({ type: 'getAccountState', account: 'me' })).mentionsApi, 'need_tpl');
+  assert.match(expired.message, /通知/);
+  assert.match(store['alert:me'].message, /通知/);
 
+  // 无模板时不再降级打旧 REST，零请求
+  const beforeMissing = server.calls;
   Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
   await fire('inc');
-  assert.equal(server.mentionTpl, undefined);
+  assert.equal(server.calls, beforeMissing, '无模板时不降级旧 REST');
+
+  // 用户自行打开一次通知页捕到新模板后：清掉提示并恢复读取
+  const NT2 = 'https://x.com/i/api/graphql/NQ2/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D';
+  await pageSend({ type: 'xir:tpl', url: NT2, kind: 'mentions' });
+  assert.equal(store['alert:me'], undefined, '拿到新通知模板后清掉旧告警');
+  Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0 });
+  await fire('inc');
+  assert.equal(server.mentionTpl, NT2);
 });
 
 test('并发去重、429 退避、重复游标与提前空页异常边界', async () => {
@@ -295,7 +306,7 @@ test('免补历史直接增量与 60 页安全上限拦截', { timeout: 20_000 }
     assert.equal(server.calls - beforeInitFree, 2, '免补历史首轮最多读 2 页建立接续点');
     assert.equal(store['cursor:me'].syncedId, '7008');
 
-    // 2. 单轮超过 10 段（60 页）仍未重叠接续点：触及安全上限停止，等待人工介入或补历史
+    // 2. 单轮超过 8 段（48 页）仍未重叠接续点：触及安全上限停止，等待人工介入或补历史
     feed.splice(0, feed.length, ...Array.from({ length: 200 }, (_, i) => (
       { ...env.mention(0, '2', '50', '50'), id_str: String(8199 - i) }
     )));
@@ -309,13 +320,13 @@ test('免补历史直接增量与 60 页安全上限拦截', { timeout: 20_000 }
       store['cursor:me'].nextIncAt = 0;
       lastResult = await fire('inc');
     }
-    assert.equal(server.calls - beforeCap, 60, '10 段累计读取 60 页后触及安全上限');
+    assert.equal(server.calls - beforeCap, 48, '8 段累计读取 48 页后触及安全上限');
     assert.match(lastResult.error, /安全页数上限/);
     assert.equal(store['cursor:me'].incLimitReached, true);
     assert.equal(store['cursor:me'].incResume, undefined);
     assert.equal(alarms['inc:me'], undefined, '触及上限后暂停自动定时');
     assert.equal(store['cursor:me'].syncedId, '7008', '未接上时接续点不动');
-    assert.match(store['alert:me']?.message, /60 页/);
+    assert.match(store['alert:me']?.message, /48 页/);
 
     // 触发安全上限后自动 tick 不再发请求
     const callsDuringPaused = server.calls;

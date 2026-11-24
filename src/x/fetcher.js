@@ -2,40 +2,16 @@
 // 只负责「用当前已登录的网页会话读一页列表」（别人对我的提及、我自己的回复），返回原始 JSON；不解析、不存储、不做任何写操作。
 // X 改接口时只改这个文件和 parser.js。
 //
-// 提及优先用 X 网页版现在自己用的 GraphQL NotificationsTimeline（2026-11-19 小号实测：额度 1500 次 / 15 分钟，
-// 每页 40 条，照模板重发不需要 x-client-transaction-id）。它的查询 ID 和 features 随 X 发版变，所以照着页面发过的请求（模板）发；
-// 还没有模板时用旧版 REST mentions.json（2026-11-13 实测 200，额度 180 次 / 15 分钟，不需要 x-client-transaction-id）。
+// 提及仅使用 X 网页版现行的 GraphQL NotificationsTimeline（2026-11-19 小号实测：额度 1500 次 / 15 分钟，
+// 每页 40 条）；它的查询 ID 和 features 随 X 发版变，照页面发过的模板重发，模板缺失或过期时提示用户打开一次通知页，
+// 不再自动降级请求已废弃的旧版 REST mentions.json。
 
 const XIRFetcher = (() => {
-  const ENDPOINT = '/i/api/2/notifications/mentions.json';
-  const PAGE_SIZE = 20; // 旧接口和「回复」栏：与网页版自己翻页的大小一致
-  const NOTIF_PAGE = 40; // 新的提及接口：网页版自己翻页用 40（2026-11-19 实测）
+  const PAGE_SIZE = 20; // 「回复」栏：与网页版自己翻页的大小一致
+  const NOTIF_PAGE = 40; // 提及接口：网页版自己翻页用 40（2026-11-19 实测）
 
   // X 网页客户端内置的公开 Bearer（所有访客相同，不是用户凭证）；用户身份由会话 cookie 承载。
   const WEB_BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
-
-  const PARAMS = {
-    include_profile_interstitial_type: 1,
-    include_blocking: 1,
-    include_blocked_by: 1,
-    include_followed_by: 1,
-    include_want_retweets: 1,
-    include_mute_edge: 1,
-    include_can_dm: 1,
-    include_can_media_tag: 1,
-    include_ext_is_blue_verified: 1,
-    skip_status: 1,
-    cards_platform: 'Web-12',
-    include_cards: 1,
-    include_ext_alt_text: true,
-    include_quote_count: true,
-    include_reply_count: 1,
-    tweet_mode: 'extended',
-    include_entities: true,
-    include_user_entities: true,
-    simple_quoted_tweet: true,
-    count: PAGE_SIZE,
-  };
 
   function cookie(name) {
     const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
@@ -85,7 +61,15 @@ const XIRFetcher = (() => {
     }
 
     const reset = Number(res.headers.get('x-rate-limit-reset'));
-    const out = { ...request, ok: res.ok, status: res.status, userId, rateResetAt: reset ? reset * 1000 : null };
+    const out = {
+      ...request,
+      ok: res.ok,
+      status: res.status,
+      userId,
+      rateResetAt: reset ? reset * 1000 : null,
+      cfMitigated: res.headers.get('cf-mitigated') || null,
+      contentType: res.headers.get('content-type') || null,
+    };
     if (diagnose) {
       out.responseMetadata = {
         date: res.headers.get('date'),
@@ -124,16 +108,12 @@ const XIRFetcher = (() => {
     }
   }
 
-  /** 读一页提及。cursor 为空表示最新一页。tpl：X 页面读通知的请求地址，有就走新接口，没有走旧接口。 */
+  /** 读一页提及。cursor 为空表示最新一页。必须使用页面旁听到的 NotificationsTimeline 模板，不降级旧 REST。 */
   function fetchMentions(cursor, tpl) {
-    if (tpl) {
-      const url = fromTpl(tpl, NOTIF_RE, { timeline_type: 'Mentions', count: NOTIF_PAGE }, cursor);
-      if (!url) return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
-      return get(url, { 'content-type': 'application/json' }, true);
-    }
-    const qs = new URLSearchParams(PARAMS);
-    if (cursor) qs.set('cursor', cursor);
-    return get(`${location.origin}${ENDPOINT}?${qs}`, {}, true);
+    if (!tpl) return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
+    const url = fromTpl(tpl, NOTIF_RE, { timeline_type: 'Mentions', count: NOTIF_PAGE }, cursor);
+    if (!url) return Promise.resolve({ ok: false, status: 0, userId: sessionUserId(), error: 'bad_tpl' });
+    return get(url, { 'content-type': 'application/json' }, true);
   }
 
   // ---- 我自己的回复列表（个人主页「回复」栏背后的 GraphQL 接口）----

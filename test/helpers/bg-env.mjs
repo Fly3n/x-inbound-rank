@@ -28,6 +28,10 @@ export async function createBgEnv({
       me: { handle: 'Me', userId: '1', enabled: true, activation: 1 },
       seen: { handle: 'Seen', userId: '3', enabled: false, activation: null },
     },
+    'tpl:mentions:me': {
+      url: 'https://x.com/i/api/graphql/DEFAULT/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D',
+      at: initialNow,
+    },
   });
   const sessionStore = {};
   const alarms = {};

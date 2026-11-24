@@ -241,4 +241,36 @@ test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自
   assert.equal(store['cursor:me'].circuitBroken, undefined, '用户手动重开后解除熔断标记');
   assert.equal(store['alert:me'], undefined, '解除熔断后清除告警');
   assert.ok(alarms['inc:me'], '用户手动重开后恢复自动排期');
+
+  // 连续 3 次 429 升级为硬熔断（前 2 次正常指数退避，第 3 次直接停抓）
+  store['cursor:me'].rate429Count = 2;
+  store['cursor:me'].rateUntil = 0;
+  store['cursor:me'].nextIncAt = 0;
+  store['cursor:me'].lastAttemptAt = 0;
+  server.fail429Once = true;
+  await fire('inc');
+  assert.equal(store['settings:me'].fetchEnabled, false, '连续第 3 次 429 升级硬熔断并关闭自动更新');
+  assert.equal(store['cursor:me'].circuitBroken.code, 429);
+  assert.equal(alarms['inc:me'], undefined);
+
+  // 非 5xx HTML 挑战页（not_json）同样触发硬熔断
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
+  const realSendHtml = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') {
+      return { ok: false, status: 200, userId: '1', error: 'not_json', contentType: 'text/html', detail: '<!DOCTYPE html><title>Just a moment</title>' };
+    }
+    return realSendHtml(id, msg);
+  };
+  try {
+    store['cursor:me'].rateUntil = 0;
+    store['cursor:me'].rate429Count = 0;
+    store['cursor:me'].nextIncAt = 0;
+    store['cursor:me'].lastAttemptAt = 0;
+    await fire('inc');
+  } finally {
+    chrome.tabs.sendMessage = realSendHtml;
+  }
+  assert.equal(store['settings:me'].fetchEnabled, false, 'HTML 挑战页落入 not_json 也触发硬熔断');
+  assert.equal(store['cursor:me'].circuitBroken.code, 'html_challenge');
 });

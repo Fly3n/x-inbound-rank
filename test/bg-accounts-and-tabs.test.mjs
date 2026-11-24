@@ -64,6 +64,7 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     return originalSend(id, msg);
   };
   try {
+    await pageSend({ type: 'xir:tpl', kind: 'mentions', url: 'https://x.com/i/api/graphql/Q9/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D' }, 9);
     const both = Promise.all([fire('inc', 'me'), fire('inc', 'uid-9')]);
     await until(() => requested.length === 1, '第一份请求开始');
     await new Promise((resolve) => setTimeout(resolve, 0));

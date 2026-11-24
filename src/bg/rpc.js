@@ -5,7 +5,7 @@ import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
 import { mentionsEvidence } from '../x/mentions-diagnostics.js';
 import {
-  PACE, INC_ALARM, OUT_ALARM, alarmFor,
+  PACE, JOB_ALARM, INC_ALARM, OUT_ALARM, alarmFor,
   now, inActiveHours, accountForUser, tryAcquireBusy, releaseBusy,
   serial, updateCursor, board, refreshSnapshot, clearSnapDirty,
 } from './runtime.js';
@@ -71,6 +71,19 @@ export const handlers = {
       const out = (await kvGet(keys.cursor(account), {})).out;
       if (out?.status === 'need_tpl' && !out.limitReached) {
         await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + 3000 });
+      }
+    } else if (template === keys.tplMentions) {
+      const cur = await kvGet(keys.cursor(account), {});
+      if (!cur.circuitBroken) {
+        const alert = await kvGet(keys.alert(account));
+        if (alert?.message?.includes('通知')) await kvRemove(keys.alert(account));
+        const job = await kvGet(keys.job(account));
+        if (job?.needTpl && job.status === 'error') {
+          await kvSet(keys.job(account), { ...job, status: 'running', needTpl: false, message: '' });
+          await chrome.alarms.create(alarmFor(JOB_ALARM, account), { when: now() + 3000 });
+        } else if ((await getSettings(account)).fetchEnabled) {
+          await recoverAlarms(account);
+        }
       }
     }
     return {};

@@ -261,7 +261,7 @@ test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeou
     status: 'ok', message: null, limitReached: null, attemptCoverTs: null,
     coverTs: null,
     fullFor: 0, initDays: 15, targetTs: Date.now() - 20 * env.DAY,
-    resume: { cursor: '0', topId: null, rounds: 119, full: true, stopAt: null, nextAt: 0 },
+    resume: { cursor: '0', topId: null, rounds: 44, full: true, stopAt: null, nextAt: 0 },
   };
   try {
     await fire('out');

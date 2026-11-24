@@ -439,9 +439,16 @@ export function parseScheduledTweets(body) {
 
 const ACCOUNT_ANOMALY_CODES = new Set([32, 64, 89, 226, 326]);
 const ACCOUNT_ANOMALY_RE = /\b(account is locked|temporarily locked|temporarily restricted|suspended|automated|challenge|verify your account|bounce)\b/i;
+const HTML_CHALLENGE_RE = /<!doctype\s+html|<html\b|just a moment|account\/access|arkose|challenge|verify your/i;
 
-/** 识别 X 账号侧异常信号（登录失效、封禁、锁定/要求验证、判定自动化）；普通 429 限流与 5xx 临时故障不属于此类。 */
-export function detectAccountAnomaly(status, body) {
+/** 识别 X 账号侧异常与验证挑战信号（401/403、cf-mitigated、非 5xx HTML 验证页、封禁/锁定/自动化错误码）；普通 429 与 5xx 不误判。 */
+export function detectAccountAnomaly(status, body, meta = {}) {
+  if (meta?.cfMitigated) {
+    return {
+      code: 'cf_mitigated',
+      reason: `Cloudflare 挑战限制（HTTP ${status || 0} / cf-mitigated: ${String(meta.cfMitigated).slice(0, 60)}）`,
+    };
+  }
   if (status === 401 || status === 403) {
     const err = Array.isArray(body?.errors) ? body.errors[0] : null;
     const code = err?.code;
@@ -450,6 +457,17 @@ export function detectAccountAnomaly(status, body) {
       code: code ?? status,
       reason: `HTTP ${status}${code ? ` / code ${code}` : ''}${msg ? `：${msg}` : ''}`,
     };
+  }
+  // 非 5xx 的 HTML 响应（排除 502/503/504 网关临时报错页面，避免误熔断）
+  if (meta?.error === 'not_json' && status > 0 && status < 500) {
+    const ct = String(meta.contentType || '').toLowerCase();
+    const detail = String(meta.detail || '');
+    if (ct.includes('text/html') || HTML_CHALLENGE_RE.test(detail)) {
+      return {
+        code: 'html_challenge',
+        reason: `收到非 JSON 网页/验证响应（HTTP ${status}）`,
+      };
+    }
   }
   const errors = Array.isArray(body?.errors) ? body.errors : [];
   for (const err of errors) {

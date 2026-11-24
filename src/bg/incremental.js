@@ -6,13 +6,13 @@ import { queueBridgePush } from '../bridge.js';
 import { idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, INC_ALARM, alarmFor,
-  enabledAccount, now, rand, sleep, humanIncDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
+  enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
   serviceWait, tryAcquireBusy, releaseBusy, updateCursor,
   flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
 import { hasVisiblePage, hasActivePage } from './accounts.js';
-import { mentionsApi, pull } from './transport.js';
+import { pull } from './transport.js';
 
 /** 自动任务未到期返回 null，手动任务受阻时返回具体原因。 */
 async function incDue(account, manual) {
@@ -52,7 +52,7 @@ export async function maybeIncremental(account, manual = false) {
 
     // 每次从最新一页往回读：已有接续点时一发现与上次位置重叠即停（再往前都已读过）；
     // 从未补过历史的账号直接从启用时刻建立起点（单轮最多读 2 页）。
-    // 每个后台事件最多读 6 页；没接上则休息 3–5 分钟续读，单轮最多 10 段（60 页）。
+    // 每个后台事件最多读 6 页；没接上则休息 3–5 分钟续读，单轮最多 8 段（48 页）。
     const stopAt = cur.syncedId || null;
     const resume = (cur.incResume?.stopAt || null) === stopAt ? cur.incResume : null;
     const taskManual = manual || !!resume?.manual;
@@ -60,8 +60,8 @@ export async function maybeIncremental(account, manual = false) {
     const floorTs = run - KEEP_DAYS * DAY_MS;
     const me = (await kvGet(keys.accounts, {}))[account];
     const startFloor = me?.activation || run;
-    const api = resume?.api || (await mentionsApi(account)); // 接着上一轮读的，游标是哪个接口的就用哪个
-    const canRequest = api !== 'gql' || !!(await kvGet(keys.tplMentions(account)));
+    const api = 'gql';
+    const canRequest = !!(await kvGet(keys.tplMentions(account)));
     const maxPages = stopAt ? PACE.incPagesPerEvent : Math.min(PACE.incPagesPerEvent, 2);
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
@@ -89,7 +89,7 @@ export async function maybeIncremental(account, manual = false) {
       if (page) await sleep(humanIncDelay());
       const trace = { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, page: page + 1 };
       const res = await pull(account, cursor, api, batch, trace);
-      if (manual && canRequest && !manualMarked && !['no_tab', 'outside_window'].includes(res.kind)) {
+      if (manual && canRequest && !manualMarked && !['no_tab', 'outside_window', 'tpl_bad'].includes(res.kind)) {
         manualMarked = true;
         await updateCursor(account, (c) => { c.lastManualAt = now(); });
       }
@@ -113,14 +113,12 @@ export async function maybeIncremental(account, manual = false) {
         return { message: '账号正在限流退避，本轮没有继续发请求。' };
       }
       if (res.kind === 'tpl_bad') {
-        // 新接口的模板失效：休息三到五分钟后用旧接口从最新一页重读这一段
-        const when = nextActiveAt(now() + rand(PACE.restMs));
+        // 通知模板缺失或已过期：不再降级打废弃旧 REST，等待用户自行打开一次 X 通知页后自动恢复
         await updateCursor(account, (c) => {
           delete c.incResume;
-          c.nextIncAt = when;
         });
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
-        return { message: '新版读取方式失效，已安排用旧接口重试。' };
+        await setAlert(account, 'X 通知读取方式尚未就绪或已更新，请打开一次 X 的「通知」页，插件会自动恢复读取。');
+        return { message: '请打开一次 X 的「通知」页，插件会自动连接并继续读取。' };
       }
       await updateCursor(account, (c) => {
         c.lastAttemptAt = now();
@@ -157,7 +155,7 @@ export async function maybeIncremental(account, manual = false) {
       if (page === 0 && !resume) topId = p.newestId;
       const repeatedCursor = !!cursor && p.bottomCursor === cursor;
       if (repeatedCursor) {
-        const when = nextAutoSlot(nextActiveAt(now() + rand(PACE.restMs)));
+        const when = nextAutoSlot(nextActiveAt(now() + humanRestDelay(PACE.restMs)));
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'repeated_cursor', checkpoint: stopAt });
         await updateCursor(account, (c) => {
           delete c.incResume;
@@ -186,7 +184,7 @@ export async function maybeIncremental(account, manual = false) {
       const endedBeforeCheckpoint = stopAt !== EMPTY_SYNC_ID && !overlapped &&
         (stopReason === 'empty_page' || stopReason === 'no_next_page');
       if (endedBeforeCheckpoint) {
-        const when = nextAutoSlot(now() + rand(PACE.restMs));
+        const when = nextAutoSlot(now() + humanRestDelay(PACE.restMs));
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'ended_before_checkpoint', checkpoint: stopAt });
         await updateCursor(account, (c) => {
           delete c.incResume;
@@ -213,11 +211,11 @@ export async function maybeIncremental(account, manual = false) {
           c.nextIncAt = when;
         });
         await chrome.alarms.clear(alarmFor(INC_ALARM, account));
-        await setAlert(account, '本轮新增回复较多，已达到安全页数上限（60 页），请稍后手动更新或补读历史');
+        await setAlert(account, `本轮新增回复较多，已达到安全页数上限（${PACE.incMaxRounds * PACE.incPagesPerEvent} 页），请稍后手动更新或补读历史`);
         await record('inc_limit_reached', { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, rounds, read: batch.read, added: batch.added });
         return { error: '别人回我本轮达到安全页数上限，已停止。' };
       }
-      const when = nextActiveAt(now() + rand(PACE.restMs));
+      const when = nextActiveAt(now() + humanRestDelay(PACE.restMs));
       await updateCursor(account, (c) => {
         if ((c.syncedId || null) !== stopAt) return; // 读的过程中被补历史或清空改掉了
         c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt, rounds, pages: (resume?.pages || 0) + pagesRead };

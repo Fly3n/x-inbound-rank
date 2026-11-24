@@ -479,12 +479,15 @@ test('解析已排期列表：兼容秒和毫秒时间戳，按时间升序，�
   assert.throws(() => parseScheduledTweets({ data: { viewer: { scheduled_tweet_list: [{ rest_id: 'bad' }] } } }), ParseError);
 });
 
-test('detectAccountAnomaly：精准识别 401/403 与账号锁定/自动化错误码，不误伤 429/503/404', () => {
+test('detectAccountAnomaly：精准识别 401/403、cf-mitigated、非 5xx HTML 挑战与锁定错误码，不误伤 429/503/404', () => {
   assert.equal(detectAccountAnomaly(401, {})?.code, 401);
   assert.equal(detectAccountAnomaly(403, { errors: [{ code: 326, message: 'Account is locked' }] })?.code, 326);
   assert.equal(detectAccountAnomaly(200, { errors: [{ code: 226, message: 'This request looks like it might be automated.' }] })?.code, 226);
   assert.equal(detectAccountAnomaly(200, { errors: [{ code: 64, message: 'Your account is suspended' }] })?.code, 64);
   assert.ok(detectAccountAnomaly(200, { errors: [{ kind: 'Bounce', message: 'Challenge required' }] }));
+  assert.equal(detectAccountAnomaly(200, undefined, { cfMitigated: 'challenge', error: 'not_json' })?.code, 'cf_mitigated');
+  assert.equal(detectAccountAnomaly(200, undefined, { error: 'not_json', contentType: 'text/html; charset=utf-8', detail: '<!DOCTYPE html><title>Just a moment...</title>' })?.code, 'html_challenge');
+  assert.equal(detectAccountAnomaly(503, undefined, { error: 'not_json', contentType: 'text/html', detail: '<!DOCTYPE html>503 Service Unavailable' }), null, '5xx 临时网关错误页不能误触发硬熔断');
   assert.equal(detectAccountAnomaly(429, { errors: [{ code: 88, message: 'Rate limit exceeded' }] }), null);
   assert.equal(detectAccountAnomaly(503, {}), null);
   assert.equal(detectAccountAnomaly(404, {}), null);
@@ -648,8 +651,13 @@ test('抓取层：模板识别且自有请求集合有容量上限', async () =>
   assert.equal(tplKind('https://evil.example/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D'), null);
   assert.equal(tplKind('https://x.com/i/api/graphql/Q4/HomeTimeline?variables=%7B%7D'), null);
 
+  const missingTpl = await fetchMentions('c_no_tpl');
+  assert.equal(missingTpl.error, 'bad_tpl', '无通知模板时拒绝降级旧 REST');
+  assert.equal(sentUrls.length, 0);
+
+  const ntTpl = 'https://x.com/i/api/graphql/Q2/NotificationsTimeline?variables=%7B%7D';
   for (let i = 0; i < 505; i++) {
-    await fetchMentions(`c${i}`);
+    await fetchMentions(`c${i}`, ntTpl);
   }
   await fetchMyReplies('https://x.com/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D', 'c_out');
   await fetchScheduled('https://x.com/i/api/graphql/Q3/FetchScheduledTweets');
@@ -661,16 +669,24 @@ test('抓取层：模板识别且自有请求集合有容量上限', async () =>
   assert.equal(isOwn(sentUrls.at(-1)), true, '最近发出的请求应保留');
 });
 
-test('模拟真人节律：增量页间停顿低于空闲回收线，可选出站同步间隔不少于 48 小时', async () => {
-  const { PACE, humanIncDelay, humanBackfillDelay, humanBatchPages, nextOutAutoSlot } = await import('../src/bg/runtime.js');
-  for (let i = 0; i < 60; i++) {
+test('模拟真人节律：连续平滑分布无断层、低于空闲回收线，可选出站同步间隔不少于 48 小时', async () => {
+  const { PACE, humanIncDelay, humanBackfillDelay, humanRestDelay, humanBatchPages, nextOutAutoSlot } = await import('../src/bg/runtime.js');
+  let incMidGapHits = 0;
+  let backfillMidGapHits = 0;
+  for (let i = 0; i < 400; i++) {
     const incDelay = humanIncDelay();
-    assert.ok(incDelay >= 4_000 && incDelay < 29_000, `增量页间停顿 ${incDelay}ms 须低于 Chrome 空闲回收线`);
+    assert.ok(incDelay >= 4_000 && incDelay < 28_000, `增量页间停顿 ${incDelay}ms 须严格在 [4s, 28s)`);
+    if (incDelay >= 10_000 && incDelay < 12_000) incMidGapHits++;
     const backfillDelay = humanBackfillDelay();
     assert.ok(backfillDelay >= 15_000 && backfillDelay < 110_000, `补历史停顿 ${backfillDelay}ms 应在预期区间内`);
+    if (backfillDelay >= 28_000 && backfillDelay < 30_000) backfillMidGapHits++;
+    const rest = humanRestDelay();
+    assert.ok(rest >= 180_000 && rest < 300_000, `批间休息 ${rest}ms 应在 [180s, 300s)`);
     const batch = humanBatchPages();
     assert.ok(batch >= 8 && batch <= 12, `补历史每批页数 ${batch} 应在 8–12 页`);
   }
+  assert.ok(incMidGapHits > 0, '增量停顿 10–12s 区间不再存在零概率断层');
+  assert.ok(backfillMidGapHits > 0, '补历史停顿 28–30s 区间不再存在零概率断层');
   const base = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
   const nextOut = nextOutAutoSlot(base);
   assert.ok(nextOut - base >= PACE.outAutoGapMs, '可选低频出站自动同步间隔至少 48 小时');

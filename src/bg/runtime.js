@@ -6,19 +6,20 @@ import { ranking, badgeSnapshot } from '../rank.js';
 // 只保留远低于额度的节奏；真实账号还要经过行为风控，不能拿「没触发 429」当作安全。
 export const PACE = {
   batchRestMs: [180_000, 300_000], // 回填：批与批之间的随机休息
-  maxPagesPerRun: 300, // 回填（7/15 天）：单次运行的页数上限，到了就暂停等用户确认
+  maxPagesPerRun: 220, // 回填（7/15 天）：单次运行的页数上限，到了就暂停等用户确认
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
+  rate429CircuitThreshold: 3, // 连续 3 次 429 升级为账号异常硬熔断，停止自动续跑
   incPagesPerEvent: 6, // 增量：每个后台事件最多六页，读完休息后自动续，避免单次事件过长
-  incMaxRounds: 10, // 增量：单轮最多 10 段（60 页）安全上限
+  incMaxRounds: 8, // 增量：单轮最多 8 段（48 页）安全上限
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）
   restMs: [180_000, 300_000], // 一次读不完、分几轮读时，轮与轮之间的休息
   manualCooldownMs: 10 * 60_000, // 手动更新：十分钟内不重复向 X 发请求
-  // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），比提及的 180 次小得多，单独定节奏：
-  // 一个闹钟事件最多读 5 页，读不完休息 3–5 分钟再接着读，回填平均约每 15 分钟 16 页
+  // 我的回复（「回复」栏的 GraphQL 接口）额度只有 50 次 / 15 分钟（2026-11-19 小号实测），单独定节奏：
+  // 一个闹钟事件最多读 5 页，读不完休息 3–5 分钟再接着读
   outPages: 5,
   outRestMs: [180_000, 300_000],
-  outMaxRounds: 120, // 我的回复：一次读不完时最多接着读几轮（120 × 5 页 = 600 页，和回填单次上限一样），再多就到此为止
+  outMaxRounds: 45, // 我的回复：一次读不完时最多接着读 45 轮（225 页，足够覆盖 15 天），再多就到此为止
   outAutoGapMs: 48 * 60 * 60_000, // 可选方案 B：每 2 天低频自动同步兜底手机端回复
   activeInteractionMs: 5 * 60_000, // 自动更新要求同账号前台页最近 5 分钟内有真实浏览交互，避免白天亮屏离座空发请求
 };
@@ -51,21 +52,20 @@ export const rand = ([a, b]) => a + Math.floor(Math.random() * (b - a));
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const now = () => Date.now();
 
-/** 模拟真人刷通知的非均匀页间停顿（单事件内必须低于 Chrome ~30s 空闲回收线）。 */
-export function humanIncDelay() {
-  const r = Math.random();
-  if (r < 0.35) return rand([4_000, 10_000]);
-  if (r < 0.80) return rand([12_000, 22_000]);
-  return rand([22_000, 28_000]);
+/** 连续单峰右偏平滑采样：无分段零概率断层，严格落在 [a, b)，且兼容单测将 Math.random 固定为 0 或 0.999999。 */
+export function smoothSpan([a, b], skew = 1.35) {
+  const u = Math.min(1 - 1e-9, Math.max(0, (Math.random() + Math.random()) / 2));
+  return a + Math.floor(Math.pow(u, skew) * (b - a));
 }
 
-/** 模拟真人补历史页间停顿（每页独立闹钟唤醒，允许长停顿）。 */
-export function humanBackfillDelay() {
-  const r = Math.random();
-  if (r < 0.30) return rand([15_000, 28_000]);
-  if (r < 0.75) return rand([30_000, 55_000]);
-  return rand([60_000, 110_000]);
-}
+/** 模拟真人刷通知的连续右偏页间停顿（单事件内严格低于 Chrome ~30s 空闲回收线）。 */
+export const humanIncDelay = () => smoothSpan([4_000, 28_000], 1.35);
+
+/** 模拟真人补历史页间停顿（每页独立闹钟唤醒，允许长停顿，连续无断层）。 */
+export const humanBackfillDelay = () => smoothSpan([15_000, 110_000], 1.5);
+
+/** 批与批之间的平滑休息时长（单峰连续分布，替代平坦均匀分布）。 */
+export const humanRestDelay = (span = PACE.restMs) => smoothSpan(span, 1.0);
 
 export const humanBatchPages = () => rand([8, 13]); // 每批 8–12 页后休息
 

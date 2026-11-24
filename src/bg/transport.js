@@ -114,9 +114,19 @@ export async function fetchViaTab(account, req, trace) {
       const result = await report(r, tab.id);
       if (r?.status === 429) {
         const rate = await recordRateLimit(account, r.rateResetAt);
+        if (rate.attempts >= PACE.rate429CircuitThreshold) {
+          const anomaly = { code: 429, reason: `连续 ${rate.attempts} 次触发限流（HTTP 429）` };
+          await tripAccountCircuit(account, anomaly, source);
+          return { ...result, ok: false, error: 'circuit_broken', anomaly, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
+        }
         return { ...result, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
       }
-      const anomaly = detectAccountAnomaly(r?.status, r?.body);
+      const anomaly = detectAccountAnomaly(r?.status, r?.body, {
+        cfMitigated: r?.cfMitigated,
+        contentType: r?.contentType,
+        error: r?.error,
+        detail: r?.detail,
+      });
       if (anomaly) {
         await tripAccountCircuit(account, anomaly, source);
         return { ...result, ok: false, error: 'circuit_broken', anomaly };
@@ -130,27 +140,26 @@ export async function fetchViaTab(account, req, trace) {
   return report({ ok: false, error: 'no_tab' });
 }
 
-/** 读提及用哪个接口：记下过 X 页面读通知的请求（模板）就用新接口 'gql'，否则用旧接口 'rest'。两种接口的翻页游标不通用。 */
-export const mentionsApi = async (account) => ((await kvGet(keys.tplMentions(account))) ? 'gql' : 'rest');
+/** 读提及固定走现行 GraphQL 模板（有模板返回 'gql'，尚未捕获返回 'need_tpl'），不再降级旧 REST。 */
+export const mentionsApi = async (account) => ((await kvGet(keys.tplMentions(account))) ? 'gql' : 'need_tpl');
 
 /**
- * 抓一页提及并入库。api：'gql' | 'rest'，同一次翻页（一个回填任务、一轮补读）从头到尾用同一个。
- * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'error',message}
- * tpl_bad：新接口的模板没了或过期了（已删掉），调用方改用旧接口从最新一页重来。
+ * 抓一页提及并入库。仅使用页面旁听到的 NotificationsTimeline 模板，模板缺失或 400/404 过期时返回 tpl_bad 等待用户打开一次通知页。
+ * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'circuit_broken',message} | {kind:'error',message}
  */
-export async function pull(account, cursor, api = 'rest', batch = { read: 0, added: 0 }, trace, inspectOnly = false) {
+export async function pull(account, cursor, _api = 'gql', batch = { read: 0, added: 0 }, trace, inspectOnly = false) {
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me?.enabled) return { kind: 'error', message: '账号未绑定' };
 
-  const tpl = api === 'gql' ? await kvGet(keys.tplMentions(account)) : null;
-  if (api === 'gql' && !tpl) return { kind: 'tpl_bad' };
-  const r = await fetchViaTab(account, { cursor, tpl: tpl?.url }, trace);
+  const tpl = await kvGet(keys.tplMentions(account));
+  if (!tpl) return { kind: 'tpl_bad' };
+  const r = await fetchViaTab(account, { cursor, tpl: tpl.url }, trace);
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (r.error === 'outside_window') return { kind: 'outside_window' };
   if (r.error === 'circuit_broken') return { kind: 'circuit_broken', message: '检测到 X 账号异常，已熔断并关闭全部自动抓取；请先在 X 确认账号正常后再手动开启。' };
   if (r.error === 'backoff') return { kind: 'backoff', retryAt: r.rateResetAt || 0 };
-  if (tpl && (r.error === 'bad_tpl' || r.status === 400 || r.status === 404)) {
-    if (!inspectOnly) await kvRemove(keys.tplMentions(account)); // X 发版换了参数：等用户下次打开通知页时记下新的，在那之前用旧接口
+  if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
+    if (!inspectOnly) await kvRemove(keys.tplMentions(account)); // X 发版换了参数：删掉过期模板，等用户下次打开通知页时自动重新捕获
     return { kind: 'tpl_bad' };
   }
   if (temporaryUnavailable(r.status)) return { kind: 'unavailable', status: r.status };

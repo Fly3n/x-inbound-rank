@@ -6,13 +6,13 @@ import { queueBridgePush } from '../bridge.js';
 import { idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, JOB_ALARM, alarmFor,
-  enabledAccount, now, rand, humanBackfillDelay, humanBatchPages,
+  enabledAccount, now, humanBackfillDelay, humanBatchPages, humanRestDelay,
   inActiveHours, nextActiveAt, serviceWait,
   isBusy, tryAcquireBusy, releaseBusy, serial, updateCursor,
   refreshSnapshot, flushSnapshot, setAlert, completeBackfillRound, armInc,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { mentionsApi, pull } from './transport.js';
+import { pull } from './transport.js';
 
 export async function saveJob(account, job) {
   await kvSet(keys.job(account), job);
@@ -34,7 +34,7 @@ export async function startBackfill(account) {
   const rangeDays = settings.initDays; // 往回读多远看初始化范围，和榜单范围分开
   const job = {
     status: 'running',
-    api: await mentionsApi(account), // 这次翻页用哪个接口，中途不换（游标不通用）
+    api: 'gql', // 仅使用页面旁听到的 NotificationsTimeline 模板，不降级旧 REST
     rangeDays,
     targetTs: now() - rangeDays * DAY_MS,
     cursor: null,
@@ -100,22 +100,21 @@ export async function stepBackfill(account) {
     }
 
     const trace = { account, mode: 'inbound_backfill', run: job.startedAt, page: job.pages + 1 };
-    const res = await pull(account, job.cursor, job.api || 'rest', undefined, trace);
+    const res = await pull(account, job.cursor, 'gql', undefined, trace);
     // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
     const latest = await kvGet(keys.job(account));
     if (!await enabledAccount(account) || !latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
     if (res.kind === 'circuit_broken') return;
 
     if (res.kind === 'tpl_bad') {
-      // 新接口的模板失效：换旧接口从最新一页重来，已入库的靠主键去重
-      job.api = 'rest';
+      // 通知模板缺失或已过期：不再降级打废弃旧 REST，等待用户打开一次 X 通知页后自动继续
+      job.status = 'error';
+      job.auto = false;
+      job.needTpl = true;
       job.cursor = null;
       job.topId = null;
-      job.restarted = (job.restarted || 0) + 1;
-      if (job.restarted > 3) {
-        job.status = 'error';
-        job.message = '读取方式反复失效，已停止';
-      } else await scheduleJob(account, job, humanBackfillDelay());
+      job.message = '请打开一次 X 的「通知」页，插件会自动连接并继续补历史。';
+      await setAlert(account, job.message);
     } else if (res.kind === 'no_tab') {
       job.status = 'waiting_tab';
       job.message = '打开此账号的 X 页面后自动继续';
@@ -184,7 +183,7 @@ export async function stepBackfill(account) {
         job.batchPages = 0;
         job.batchLimit = humanBatchPages();
         queueBridgePush(); // 每批结束把本机数据推给开发桥，长回填期间也能看到进度
-        await scheduleJob(account, job, rand(PACE.batchRestMs));
+        await scheduleJob(account, job, humanRestDelay(PACE.batchRestMs));
       } else {
         await scheduleJob(account, job, humanBackfillDelay());
       }

@@ -9,6 +9,10 @@ const env = await createBgEnv({
   initialStore: {
     accounts: { me: { handle: 'Me', userId: '1' }, seen: { handle: 'Seen', userId: '3' } },
     'job:me': { status: 'done', startedAt: 1 },
+    'tpl:mentions:me': {
+      url: 'https://x.com/i/api/graphql/DEFAULT/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D',
+      at: 1,
+    },
     current: 'me',
   },
 });

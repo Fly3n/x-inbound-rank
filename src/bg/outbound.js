@@ -6,7 +6,7 @@ import { queueBridgePush } from '../bridge.js';
 import { parseCreatedReply, parseMyReplies, ParseError, idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, OUT_ALARM, alarmFor,
-  enabledAccount, now, rand, sleep, humanIncDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot, nextOutAutoSlot,
+  enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot, nextOutAutoSlot,
   temporaryUnavailable, serviceWait, tryAcquireBusy, releaseBusy, updateCursor, refreshSnapshot,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
@@ -258,7 +258,7 @@ export async function syncOut(account, manual = false) {
     }
     if (!complete && rounds < PACE.outMaxRounds) {
       // 一轮没读完：记下位置，休息一批的间隔后在新的闹钟事件里接着读。读完之前接续点不动
-      const nextAt = now() + rand(PACE.outRestMs);
+      const nextAt = now() + humanRestDelay(PACE.outRestMs);
       await saveOut(account, { status: 'ok', serviceRetries: 0, message: null, pages, limitReached: null, ...(full ? { attemptCoverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
       return;
