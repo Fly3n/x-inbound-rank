@@ -54,10 +54,13 @@ function fromRest(body) {
   return { tweets, users, entryIds, bottomCursor };
 }
 
+const SAFE_DIAG_TOKEN = /^[A-Za-z0-9_.:-]{1,64}$/;
+const safeDiagToken = (v) => (typeof v === 'string' && SAFE_DIAG_TOKEN.test(v) ? v : null);
+
 /** GraphQL：每个条目自带帖子和作者，这里换成和 REST 一样的形状（帖子表、用户表、条目里的帖子 ID）。 */
-function fromGraphql(body, inspect) {
+function fromGraphql(body, inspect, { allowNonTweet = false } = {}) {
   let instructions = null;
-  walk(body.data, (n) => {
+  walk(body?.data, (n) => {
     if (!instructions && Array.isArray(n.instructions)) instructions = n.instructions;
   });
   if (!instructions) {
@@ -70,9 +73,18 @@ function fromGraphql(body, inspect) {
   let bottomCursor = null;
   let candidates = 0;
   let unknown = 0;
+  let nonTweetEntries = 0;
+  const nonTweetKinds = new Set();
+  const recordNonTweet = (parts) => {
+    nonTweetEntries++;
+    if (nonTweetKinds.size >= 24) return;
+    const label = parts.map(safeDiagToken).filter(Boolean).join(':') || 'unknown';
+    nonTweetKinds.add(label.slice(0, 80));
+  };
   for (const ins of instructions) {
     for (const entry of ins?.entries || []) {
       let knownContent = false;
+      const entryElement = entry?.content?.clientEventInfo?.element;
       walk(entry?.content, (node) => {
         if (node.cursorType) {
           if (node.cursorType === 'Bottom' && typeof node.value === 'string') bottomCursor = node.value;
@@ -83,6 +95,10 @@ function fromGraphql(body, inspect) {
         if (!item) return;
         knownContent = true;
         if (item.itemType !== 'TimelineTweet' && !item.tweet_results?.result) {
+          if (allowNonTweet) {
+            recordNonTweet([item.itemType || item.__typename, item.notification_icon, entryElement]);
+            return;
+          }
           unknown++;
           return;
         }
@@ -110,28 +126,20 @@ function fromGraphql(body, inspect) {
           };
         }
       });
-      if (!knownContent) unknown++;
+      if (!knownContent) {
+        if (allowNonTweet) recordNonTweet([entry?.content?.entryType || entry?.content?.__typename, entryElement]);
+        else unknown++;
+      }
     }
   }
   if (unknown) throw new ParseError('通知里有无法识别或缺少内容的条目，不能把这一页当成完整结果');
   if (!entryIds.length && candidates) {
     throw new ParseError('通知里有条目，但解析不出任何帖子内容');
   }
-  return { tweets, users, entryIds, bottomCursor };
+  return { tweets, users, entryIds, bottomCursor, nonTweetEntries, nonTweetKinds: [...nonTweetKinds] };
 }
 
-/**
- * @param body 接口原始返回
- * @param me   { handle, userId } 当前账号
- * @returns {{
- *   events: Array,        // 别人对我的回复
- *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
- *   newestId: string|null, newestTs: number|null, oldestId: string|null, oldestTs: number|null,
- *   bottomCursor: string|null
- * }}
- */
-export function parseMentions(body, me, inspect) {
-  const { tweets, users, entryIds, bottomCursor } = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects) ? fromGraphql(body, inspect) : fromRest(body);
+function buildMentionResult({ tweets, users, entryIds, bottomCursor }, me, inspect) {
   const myHandle = (me.handle || '').toLowerCase();
   const mine = (userId, screenName) => {
     if (me.userId && userId) return userId === me.userId;
@@ -205,6 +213,60 @@ export function parseMentions(body, me, inspect) {
   if (missing) throw new ParseError('时间线条目引用的帖子在返回里缺失，不能把这一页当成完整结果');
 
   return { events, entryIds: [...new Set(entryIds)], newestId, newestTs, oldestId, oldestTs, bottomCursor };
+}
+
+/**
+ * @param body 接口原始返回
+ * @param me   { handle, userId } 当前账号
+ * @returns {{
+ *   events: Array,        // 别人对我的回复
+ *   entryIds: string[],   // 本页时间线里的全部帖子 ID（含不计数的普通提及），用于判断翻到哪了
+ *   newestId: string|null, newestTs: number|null, oldestId: string|null, oldestTs: number|null,
+ *   bottomCursor: string|null
+ * }}
+ */
+export function parseMentions(body, me, inspect) {
+  const raw = body?.data || (Array.isArray(body?.errors) && !body?.globalObjects)
+    ? fromGraphql(body, inspect)
+    : fromRest(body);
+  return buildMentionResult(raw, me, inspect);
+}
+
+/**
+ * 解析浏览器旁听到的 NotificationsTimeline（含「全部」「提及」「已认证」页）。
+ * Mentions 维持严格校验；All / Verified 允许跳过点赞、关注等非帖子通知并输出去敏类型清单供诊断核对。
+ */
+export function parseNotificationsTap(body, me, { timeline = null, inspect = null } = {}) {
+  if (!body || typeof body !== 'object') throw new ParseError('通知旁听返回不是有效对象');
+  const raw = fromGraphql(body, inspect, { allowNonTweet: timeline !== 'Mentions' });
+  return {
+    ...buildMentionResult(raw, me, inspect),
+    nonTweetEntries: raw.nonTweetEntries,
+    nonTweetKinds: raw.nonTweetKinds,
+  };
+}
+
+/** 从旁听到的 UserRepliesTimeline URL 提取目标用户数字 ID，读不到返回 null。 */
+export function repliesTapTargetUserId(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 30_000) return null;
+  try {
+    const vars = JSON.parse(new URL(rawUrl).searchParams.get('variables') || '{}');
+    const id = vars?.userId == null ? '' : String(vars.userId);
+    return /^\d{1,24}$/.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 判断旁听到的 UserRepliesTimeline 请求是否带翻页 cursor（用于诊断日志）。 */
+export function repliesTapHasCursor(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 30_000) return null;
+  try {
+    const vars = JSON.parse(new URL(rawUrl).searchParams.get('variables') || '{}');
+    return Boolean(vars?.cursor);
+  } catch {
+    return null;
+  }
 }
 
 // ---------- 我自己的回复列表（GraphQL：个人主页「回复」栏） ----------

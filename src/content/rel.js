@@ -65,8 +65,13 @@ const XIRRel = (() => {
   const rel = new Map(); // 小写 handle -> 'mutual' | 'fan' | 'following' | 'none'
   const tweets = new Map(); // 帖子 ID -> { uid, conv, rtoStatus, rtoUser }
   const ops = new Set(); // 这个页面发过的接口请求的名字，只留最近 40 个（诊断用）
-  // tpls：页面读「回复」列表、读通知、读已排期列表的请求地址（content.js 就绪之前来的先存着）；onTpl：content.js 就绪后接手
-  const api = { extract, relOf, placeOf, rel, tweets, ops, tpls: [], mentionsEvidence: [], onMentionsEvidence: null, onChange: null, onTpl: null, onCreateTweetTap: null, onScheduledTap: null, onPostEvent: null };
+  // tpls / notificationsTaps / repliesTaps：content.js 就绪之前来的先短缓冲，就绪后由对应回调接手
+  const api = {
+    extract, relOf, placeOf, rel, tweets, ops,
+    tpls: [], notificationsTaps: [], repliesTaps: [],
+    onNotificationsTap: null, onRepliesTap: null,
+    onChange: null, onTpl: null, onCreateTweetTap: null, onScheduledTap: null, onPostEvent: null,
+  };
 
   // 页面开久了会越攒越多，超了就把最早的一批丢掉
   const trim = (map, max) => {
@@ -147,7 +152,8 @@ const XIRRel = (() => {
     tweets.clear();
     ops.clear();
     api.tpls.length = 0;
-    api.mentionsEvidence.length = 0;
+    api.notificationsTaps.length = 0;
+    api.repliesTaps.length = 0;
     pushSession(session && { userId, activation: session.activation });
     for (const fn of listeners) fn(session);
     return session;
@@ -176,11 +182,19 @@ const XIRRel = (() => {
       }
       if (typeof data.tap !== 'string') return;
       if (data.ev && data.tap.length < 8_000_000) {
-        const evidence = { ...data.ev, text: data.tap };
-        if (api.onMentionsEvidence) api.onMentionsEvidence(evidence);
+        const item = { ...data.ev, text: data.tap };
+        if (api.onNotificationsTap) api.onNotificationsTap(item);
         else {
-          api.mentionsEvidence.push(evidence);
-          if (api.mentionsEvidence.length > 2) api.mentionsEvidence.shift();
+          api.notificationsTaps.push(item);
+          if (api.notificationsTaps.length > 4) api.notificationsTaps.shift();
+        }
+      }
+      if (data.rv && data.tap.length < 8_000_000) {
+        const item = { ...data.rv, text: data.tap };
+        if (api.onRepliesTap) api.onRepliesTap(item);
+        else {
+          api.repliesTaps.push(item);
+          if (api.repliesTaps.length > 4) api.repliesTaps.shift();
         }
       }
       if (data.top === 'FetchScheduledTweets') {

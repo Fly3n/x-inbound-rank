@@ -65,13 +65,16 @@
       if (!op) return { session };
       const upper = String(method || 'GET').toUpperCase();
       const msg = { s: session, op: `${op}${upper === 'GET' ? '' : '(POST)'}` };
-      if (TPL_OP.test(op)) msg.tpl = new URL(url, location.href).href;
+      let sameOriginUrl = null;
+      if (TPL_OP.test(op)) {
+        const urlObject = new URL(url, location.href);
+        msg.tpl = urlObject.href;
+        if (urlObject.origin === location.origin) sameOriginUrl = urlObject.href;
+      }
       emit(msg);
-      const urlObject = op === 'NotificationsTimeline' && upper === 'GET' ? new URL(url, location.href) : null;
-      const mentionsUrl = urlObject?.origin === location.origin &&
-        JSON.parse(urlObject.searchParams.get('variables') || '{}')?.timeline_type === 'Mentions'
-        ? urlObject.href : null;
-      return { op, upper, mentionsUrl, session };
+      const notifUrl = op === 'NotificationsTimeline' && upper === 'GET' ? sameOriginUrl : null;
+      const repliesUrl = /^User\w*Replies/.test(op) && upper === 'GET' ? sameOriginUrl : null;
+      return { op, upper, notifUrl, repliesUrl, session };
     } catch {
       return { session };
     }
@@ -83,14 +86,15 @@
       const current = approved();
       if (!current || current.userId !== meta.session.userId || current.activation !== meta.session.activation) return;
       if (typeof text === 'string' && text.length < MAX && text[0] === '{') {
-        const ev = meta?.mentionsUrl ? {
-          url: meta.mentionsUrl, status,
+        const ev = meta?.notifUrl ? {
+          url: meta.notifUrl, status,
           metadata: {
             date: readHeader('date'), age: readHeader('age'),
             cache: readHeader('x-cache'), cloudflareCache: readHeader('cf-cache-status'),
           },
         } : undefined;
-        emit({ s: current, tap: text, ...(meta?.op ? { top: meta.op } : {}), ...(ev ? { ev } : {}) });
+        const rv = meta?.repliesUrl ? { url: meta.repliesUrl, status } : undefined;
+        emit({ s: current, tap: text, ...(meta?.op ? { top: meta.op } : {}), ...(ev ? { ev } : {}), ...(rv ? { rv } : {}) });
       }
       if (meta.upper === 'POST' && POST_OP.test(meta.op)) {
         emit({ s: current, pe: { op: meta.op, at: Date.now() } });

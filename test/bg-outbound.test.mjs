@@ -396,3 +396,91 @@ test('我回别人免补历史直接建起点：新账号开启低频同步与�
   assert.ok(store['cursor:me'].out.syncedId, '手动立即更新也能为新账号建立出站接续点');
   assert.ok(server.outCalls - beforeManualOut >= 1 && server.outCalls - beforeManualOut <= 2);
 });
+
+test('本人主页「回复」栏旁听入库：只收本人主页、静默跳过他人主页、不动 cur.out 且记录诊断日志', { timeout: 20_000 }, async () => {
+  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false, outAutoSync: false, windowDays: 15 } });
+  const beforeOutCalls = server.outCalls;
+  const nowStr = new Date(Date.now()).toUTCString();
+  const repliesBody = JSON.stringify({
+    data: {
+      user: {
+        result: {
+          timeline_v2: {
+            timeline: {
+              instructions: [{
+                entries: [
+                  {
+                    entryId: 'tweet-8801',
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            __typename: 'Tweet',
+                            rest_id: '8801',
+                            core: { user_results: { result: { rest_id: '1', core: { screen_name: 'Me' } } } },
+                            legacy: {
+                              id_str: '8801', user_id_str: '1', created_at: nowStr, full_text: '@Fan 手机回的这条也被补上了',
+                              in_reply_to_status_id_str: '50', in_reply_to_user_id_str: '2', in_reply_to_screen_name: 'Fan', conversation_id_str: '50',
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    entryId: 'tweet-8802',
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            __typename: 'Tweet',
+                            rest_id: '8802',
+                            core: { user_results: { result: { rest_id: '1', core: { screen_name: 'Me' } } } },
+                            legacy: {
+                              id_str: '8802', user_id_str: '1', created_at: nowStr, full_text: '我帖子下的自回复',
+                              in_reply_to_status_id_str: '100', in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', conversation_id_str: '100',
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                ],
+              }],
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // 1. 浏览他人主页回复栏：静默跳过，不入库、不写噪点日志
+  const otherUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '999', count: 20 }));
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: otherUrl, status: 200, text: repliesBody }), { skipped: 'other_user' });
+  assert.equal((await send({ type: 'exportAll', account: 'me' })).out.length, 0);
+
+  // 2. 浏览本人主页回复栏：入库直评 + own 自回复，记录 cur.outLastTapAt，绝不碰 cur.out
+  const ownUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '1', count: 20, cursor: 'CUR1' }));
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 200, text: repliesBody }), { ok: true, added: 2, parsed: 2 });
+  assert.equal(server.outCalls, beforeOutCalls, '回复栏旁听零主动请求');
+  assert.equal(store['cursor:me']?.out, undefined, '回复栏旁听绝不伪造 cur.out 同步游标');
+  assert.ok(store['cursor:me'].outLastTapAt > 0);
+  assert.deepEqual(store['cursor:me'].outLastTapCounts, { read: 2, added: 2, source: 'replies_timeline' });
+
+  // 3. 重复同一页：去重 added: 0
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 200, text: repliesBody }), { ok: true, added: 0, parsed: 2 });
+
+  // 4. 异常 HTTP 与结构错误写入诊断日志
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 503, text: '{}' }), { ok: false, skipped: true });
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 200, text: '{"data":{}}' }), { ok: false });
+
+  const logs = (await readDiagnostics()).filter((e) => e.account === 'me');
+  const tapLog = logs.find((e) => e.event === 'outbound_replies_tap' && e.added === 2);
+  assert.equal(tapLog.direct, 1);
+  assert.equal(tapLog.own, 1);
+  assert.equal(tapLog.hasCursor, true);
+  assert.ok(logs.some((e) => e.event === 'outbound_replies_tap' && e.added === 0 && e.deduped === 2));
+  assert.ok(logs.some((e) => e.event === 'outbound_replies_tap_skipped' && e.status === 503));
+  assert.ok(logs.some((e) => e.event === 'outbound_replies_tap_failed' && e.category === 'unexpected_payload'));
+});

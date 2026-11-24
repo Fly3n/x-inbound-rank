@@ -13,8 +13,8 @@ import { clearAccountAlarms, recoverAlarms } from './alarms.js';
 import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled, refreshActiveStaleTab } from './accounts.js';
 import { mentionsApi, clearAccountCircuit } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
-import { maybeIncremental } from './incremental.js';
-import { handleOutboundTap, syncOut, syncOutNow } from './outbound.js';
+import { maybeIncremental, handleInboundTap } from './incremental.js';
+import { handleOutboundTap, handleRepliesTap, syncOut, syncOutNow } from './outbound.js';
 import { handleScheduledTap, handlePostEvent, handleScheduledSync } from './scheduled.js';
 
 export async function maybePrune(account) {
@@ -100,9 +100,12 @@ export const handlers = {
         account, source: 'mentions-graphql', tabId: sender.tab.id,
         status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0, evidence,
       });
+      queueBridgePush();
     }
     return {};
   },
+  'xir:inbound:tap': handleInboundTap,
+  'xir:replies:tap': handleRepliesTap,
   'xir:outbound:tap': handleOutboundTap,
   async 'xir:active'(msg, sender) {
     const account = await senderAccount(msg, sender);

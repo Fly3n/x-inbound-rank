@@ -1,18 +1,112 @@
-// 别人回我：日常增量读取、重叠即停与免补历史直启。
-import { kvGet, keys, getSettings } from '../db.js';
+// 别人回我：日常通知页/提及页零请求旁听入库、增量读取、重叠即停与免补历史直启。
+import { putEvents, kvGet, keys, getSettings } from '../db.js';
 import { DAY_MS, KEEP_DAYS } from '../rank.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
-import { idGt } from '../x/parser.js';
+import { mentionsEvidence } from '../x/mentions-diagnostics.js';
+import { parseNotificationsTap, ParseError, idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, INC_ALARM, alarmFor,
   enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
   serviceWait, tryAcquireBusy, releaseBusy, updateCursor,
-  flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
+  refreshSnapshot, flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { hasVisiblePage, hasActivePage } from './accounts.js';
+import { hasVisiblePage, hasActivePage, senderAccount } from './accounts.js';
 import { pull } from './transport.js';
+
+/** 旁听浏览器通知页 / 提及页响应，零请求写入入站库并记录完整诊断（不推 syncedId，不遮蔽未翻到的漏项）。 */
+export async function handleInboundTap(msg, sender) {
+  const account = await senderAccount(msg, sender);
+  const { url, status, metadata, text } = msg;
+  if (!account || typeof text !== 'string' || text.length > 8_000_000) return {};
+  const tabId = sender?.tab?.id ?? null;
+  const validStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  let body = null;
+  let jsonOk = true;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    jsonOk = false;
+  }
+  const evidence = await mentionsEvidence(url, body, metadata).catch(() => null);
+  const timeline = evidence?.request?.timeline || 'unknown';
+  const hasCursor = evidence?.request?.hasCursor ?? null;
+  if (evidence?.request?.timeline === 'Mentions') {
+    await record('web_mentions_response', {
+      account, source: 'mentions-graphql', tabId, status: validStatus, evidence,
+    });
+  }
+  const me = (await kvGet(keys.accounts, {}))[account];
+  if (!me?.enabled) return {};
+  if (validStatus && (validStatus < 200 || validStatus >= 300)) {
+    await record('inbound_tap_skipped', {
+      account, source: 'notifications_tap', tabId, timeline, hasCursor, status: validStatus, reason: 'http_status',
+    });
+    queueBridgePush();
+    return { ok: false, skipped: true };
+  }
+  if (!jsonOk) {
+    await record('inbound_tap_failed', {
+      account, source: 'notifications_tap', tabId, timeline, hasCursor, status: validStatus, category: 'invalid_json',
+    });
+    queueBridgePush();
+    return { ok: false };
+  }
+  const decisions = [];
+  let parsed;
+  try {
+    parsed = parseNotificationsTap(body, me, {
+      timeline,
+      inspect: (id, reason) => {
+        decisions.push({ postId: typeof id === 'string' && /^\d{1,24}$/.test(id) ? id : null, reason });
+      },
+    });
+  } catch (e) {
+    await record('inbound_tap_failed', {
+      account, source: 'notifications_tap', tabId, timeline, hasCursor, status: validStatus,
+      category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception',
+      reason: String(e?.message || e).slice(0, 200),
+      decisions,
+      shapes: evidence?.response?.timelineShapes || [],
+      postCount: evidence?.response?.postCount ?? null,
+    });
+    queueBridgePush();
+    return { ok: false };
+  }
+  let added;
+  try {
+    added = await putEvents(account, parsed.events);
+  } catch {
+    await record('save_failed', { account, mode: 'inbound_tap', source: 'notifications_tap', tabId, timeline, decisions });
+    queueBridgePush();
+    return { ok: false };
+  }
+  const tapAt = now();
+  await updateCursor(account, (cur) => {
+    cur.inLastTapAt = tapAt;
+    cur.inLastTapCounts = { read: parsed.events.length, added, timeline };
+    if (parsed.newestId && (!cur.newestId || idGt(parsed.newestId, cur.newestId))) cur.newestId = parsed.newestId;
+    if (parsed.oldestTs && (!cur.earliestTs || parsed.oldestTs < cur.earliestTs)) cur.earliestTs = parsed.oldestTs;
+  });
+  await record('inbound_tap', {
+    account, source: 'notifications_tap', tabId, timeline, hasCursor,
+    entries: parsed.entryIds.length,
+    nonTweetEntries: parsed.nonTweetEntries,
+    nonTweetKinds: parsed.nonTweetKinds,
+    parsed: parsed.events.length,
+    added,
+    deduped: parsed.events.length - added,
+    newestAt: parsed.newestTs,
+    oldestAt: parsed.oldestTs,
+    more: !!parsed.bottomCursor,
+    decisions,
+    shapes: evidence?.response?.timelineShapes || [],
+  });
+  if (added > 0) await refreshSnapshot(account).catch(() => {});
+  queueBridgePush();
+  return { ok: true, added, parsed: parsed.events.length, timeline };
+}
 
 /** 自动任务未到期返回 null，手动任务受阻时返回具体原因。 */
 async function incDue(account, manual) {

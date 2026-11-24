@@ -54,7 +54,8 @@
     useSnap(stored[key]);
     sendForSession({ type: 'xir:hello', handle: detectHandle() });
     for (const url of XIRRel.tpls) noteTpl(url);
-    for (const evidence of XIRRel.mentionsEvidence.splice(0)) XIRRel.onMentionsEvidence(evidence);
+    for (const item of XIRRel.notificationsTaps.splice(0)) XIRRel.onNotificationsTap(item);
+    for (const item of XIRRel.repliesTaps.splice(0)) XIRRel.onRepliesTap(item);
   }
 
   function useSnap(snap) {
@@ -137,8 +138,11 @@
     sendForSession({ type: 'xir:tpl', url, kind });
   }
   XIRRel.onTpl = noteTpl;
-  XIRRel.onMentionsEvidence = ({ url, status, metadata, text }) => {
-    if (alive && !XIRFetcher.isOwn(url)) sendForSession({ type: 'xir:mentions:evidence', url, status, metadata, text });
+  XIRRel.onNotificationsTap = ({ url, status, metadata, text }) => {
+    if (alive && !XIRFetcher.isOwn(url)) sendForSession({ type: 'xir:inbound:tap', url, status, metadata, text });
+  };
+  XIRRel.onRepliesTap = ({ url, status, text }) => {
+    if (alive && !XIRFetcher.isOwn(url)) sendForSession({ type: 'xir:replies:tap', url, status, text });
   };
   XIRRel.onCreateTweetTap = (text) => { if (alive) sendForSession({ type: 'xir:outbound:tap', text }); };
   XIRRel.onScheduledTap = (text) => { if (alive) sendForSession({ type: 'xir:scheduled:tap', text }); };

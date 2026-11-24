@@ -10,7 +10,10 @@ import {
   ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
   cleanRules, colorOf, DEFAULT_RULES, DAY_MS, inboundInitCovered, outboundInitCovered,
 } from '../src/rank.js';
-import { parseCreatedReply, parseMentions, parseMyReplies, parseScheduledTweets, detectAccountAnomaly, ParseError } from '../src/x/parser.js';
+import {
+  parseCreatedReply, parseMentions, parseNotificationsTap, parseMyReplies, parseScheduledTweets,
+  repliesTapTargetUserId, repliesTapHasCursor, detectAccountAnomaly, ParseError,
+} from '../src/x/parser.js';
 
 const board = (events, rules, now) => ranking(events, rules, now).rows;
 
@@ -744,4 +747,78 @@ test('parseCreatedReply：实时旁听 CreateTweet 回复解析（直评/深层/
   assert.deepEqual(parseCreatedReply({ data: {} }, meRef), { ok: false, reason: 'missing_tweet_result' });
   assert.deepEqual(parseCreatedReply(makeCreate({ replyTo: '100', toUid: '2', toHandle: 'Fan', conv: null }), meRef), { ok: false, reason: 'missing_conversation_id' });
   assert.deepEqual(parseCreatedReply(makeCreate({ replyTo: '100', toUid: '2', toHandle: 'Fan', conv: '100', createdAt: 'bad-date' }), meRef), { ok: false, reason: 'missing_created_at' });
+});
+
+test('parseNotificationsTap 与回复栏 URL 解析：All 跳过非帖子通知并留去敏类型，Mentions 维持严格校验', () => {
+  const meRef = { userId: '1', handle: 'Me' };
+  const mixedPayload = {
+    data: {
+      viewer_v2: {
+        user_results: {
+          result: {
+            notification_timeline: {
+              timeline: {
+                instructions: [{
+                  entries: [
+                    {
+                      content: {
+                        entryType: 'TimelineTimelineItem',
+                        clientEventInfo: { element: 'users_liked_your_tweet' },
+                        itemContent: {
+                          itemType: 'TimelineNotification',
+                          notification_icon: 'heart_icon',
+                          template: { target_objects: [{ tweet_results: { result: { rest_id: '50' } } }] },
+                        },
+                      },
+                    },
+                    {
+                      content: {
+                        entryType: 'TimelineTimelineItem',
+                        itemContent: {
+                          itemType: 'TimelineTweet',
+                          tweet_results: {
+                            result: {
+                              rest_id: '9201',
+                              core: { user_results: { result: { rest_id: '2', core: { screen_name: 'Fan', name: '粉丝' } } } },
+                              legacy: {
+                                id_str: '9201', user_id_str: '2', created_at: 'Thu Nov 12 08:00:00 +0000 2026',
+                                full_text: '@Me 很赞', in_reply_to_status_id_str: '50',
+                                in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', conversation_id_str: '50',
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    { content: { cursorType: 'Bottom', value: 'CUR_NEXT' } },
+                  ],
+                }],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  // All 页：抽出回复，跳过点赞通知并保留去敏类型，不抛错
+  const all = parseNotificationsTap(mixedPayload, meRef, { timeline: 'All' });
+  assert.equal(all.events.length, 1);
+  assert.equal(all.events[0].id, '9201');
+  assert.equal(all.events[0].root_mine, true);
+  assert.equal(all.nonTweetEntries, 1);
+  assert.deepEqual(all.nonTweetKinds, ['TimelineNotification:heart_icon:users_liked_your_tweet']);
+  assert.equal(all.bottomCursor, 'CUR_NEXT');
+
+  // Mentions 页：保持严格校验，遇到非帖子条目明确抛错
+  assert.throws(() => parseNotificationsTap(mixedPayload, meRef, { timeline: 'Mentions' }), ParseError);
+
+  // UserRepliesTimeline URL 目标用户与游标解析
+  const ownUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=%7B%22userId%22%3A%221%22%2C%22count%22%3A20%2C%22cursor%22%3A%22C1%22%7D';
+  const noCurUrl = 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%22userId%22%3A%22999%22%7D';
+  assert.equal(repliesTapTargetUserId(ownUrl), '1');
+  assert.equal(repliesTapHasCursor(ownUrl), true);
+  assert.equal(repliesTapTargetUserId(noCurUrl), '999');
+  assert.equal(repliesTapHasCursor(noCurUrl), false);
+  assert.equal(repliesTapTargetUserId('not-a-url'), null);
 });

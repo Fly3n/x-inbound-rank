@@ -308,7 +308,9 @@ async function draw() {
   $('resume').disabled = !isSession;
   if (!$('jobControls').hidden || !$('outNotice').hidden) $('backfillCard').open = true;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
+  const inboundTapAt = s.cursor.inLastTapAt || null;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
+  const outboundTapAt = s.cursor.outLastTapAt || null;
   const fmtCompactTime = (ts) => {
     if (!ts) return '未读取';
     const d = new Date(ts);
@@ -317,12 +319,17 @@ async function draw() {
     const sameDay = d.getFullYear() === nowD.getFullYear() && d.getMonth() === nowD.getMonth() && d.getDate() === nowD.getDate();
     return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
   };
-  $('inLastAt').textContent = fmtCompactTime(inboundAt);
-  $('outLastAt').textContent = fmtCompactTime(outboundAt);
-  $('inReadSummary').textContent = `最近读取：${readSummary(inboundAt, s.cursor.inLastReadCounts, true)}`;
-  $('outReadSummary').textContent = `最近读取：${readSummary(outboundAt, out?.lastReadCounts, true)}`;
-  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts);
-  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts);
+  const latestOf = (a, b) => Math.max(a || 0, b || 0) || null;
+  const inTapTag = { All: '全部', Mentions: '提及', Verified: '已认证' }[s.cursor.inLastTapCounts?.timeline] || '';
+  const outTapTag = s.cursor.outLastTapCounts?.source === 'replies_timeline' ? '回复栏' : s.cursor.outLastTapCounts?.source === 'create_tweet' ? '发帖' : '';
+  $('inLastAt').textContent = fmtCompactTime(latestOf(inboundAt, inboundTapAt));
+  $('outLastAt').textContent = fmtCompactTime(latestOf(outboundAt, outboundTapAt));
+  $('inReadSummary').textContent = `最近读取：${readSummary(inboundAt, s.cursor.inLastReadCounts, true)}`
+    + (inboundTapAt ? `；最近旁听${inTapTag ? `（${inTapTag}）` : ''}：${readSummary(inboundTapAt, s.cursor.inLastTapCounts, true)}` : '');
+  $('outReadSummary').textContent = `最近读取：${readSummary(outboundAt, out?.lastReadCounts, true)}`
+    + (outboundTapAt ? `；最近旁听${outTapTag ? `（${outTapTag}）` : ''}：${readSummary(outboundTapAt, s.cursor.outLastTapCounts, true)}` : '');
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts, inboundTapAt, s.cursor.inLastTapCounts);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts, outboundTapAt, s.cursor.outLastTapCounts);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -342,13 +349,15 @@ async function draw() {
   renderTiers(rules);
 }
 
-function renderDataStatus(id, data, initializedAt, days, readAt, counts) {
-  renderFields(id, [
+function renderDataStatus(id, data, initializedAt, days, readAt, counts, tapAt, tapCounts) {
+  const fields = [
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtShortDay(data.from)} – ${fmtShortDay(data.to)}` : '暂无记录'],
     ['上次补历史', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未补历史'],
     ['上次读取', readSummary(readAt, counts)],
-  ]);
+  ];
+  if (tapAt) fields.push(['上次旁听', readSummary(tapAt, tapCounts)]);
+  renderFields(id, fields);
 }
 
 function renderFields(id, fields) {

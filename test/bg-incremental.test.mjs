@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readDiagnostics } from '../src/diagnostics.js';
 import { createBgEnv } from './helpers/bg-env.mjs';
 
 const env = await createBgEnv();
@@ -383,5 +384,94 @@ test('近期真实交互门控：亮屏离座不自动抓，手动更新不受�
     idleTabs.delete(4);
     store['cursor:me'] = savedCursor;
     delete alarms['inc:me'];
+  }
+});
+
+test('通知页与提及页零请求旁听入库：All 过滤非帖子通知、Mentions 去重并写日志、绝不推进 syncedId', { timeout: 20_000 }, async () => {
+  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false, windowDays: 15 } });
+  const savedCursor = structuredClone(store['cursor:me'] || {});
+  const beforeCalls = server.calls;
+  const beforeSynced = store['cursor:me']?.syncedId;
+  const nowStr = new Date(Date.now()).toUTCString();
+  const makeEntry = (id, actorId, handle, name, text, rootId = '50') => ({
+    content: {
+      entryType: 'TimelineTimelineItem',
+      itemContent: {
+        itemType: 'TimelineTweet',
+        tweet_results: {
+          result: {
+            rest_id: id,
+            core: { user_results: { result: { rest_id: actorId, core: { screen_name: handle, name } } } },
+            legacy: {
+              id_str: id, user_id_str: actorId, created_at: nowStr, full_text: text,
+              in_reply_to_status_id_str: rootId, in_reply_to_user_id_str: '1', in_reply_to_screen_name: 'Me', conversation_id_str: rootId,
+            },
+          },
+        },
+      },
+    },
+  });
+  const wrapNotif = (entries) => JSON.stringify({
+    data: { viewer_v2: { user_results: { result: { notification_timeline: { timeline: { instructions: [{ entries }] } } } } } },
+  });
+
+  try {
+    // 1. 「全部」通知页：混有赞/关通知 + 1 条新回复 → 零请求入库、不动 syncedId、记全诊断日志
+    const allUrl = 'https://x.com/i/api/graphql/QID/NotificationsTimeline?variables=' + encodeURIComponent(JSON.stringify({ timeline_type: 'All', count: 40 }));
+    const resAll = await pageSend({
+      type: 'xir:inbound:tap',
+      url: allUrl,
+      status: 200,
+      metadata: { age: '3', cache: 'BYPASS' },
+      text: wrapNotif([
+        { content: { entryType: 'TimelineTimelineItem', clientEventInfo: { element: 'users_liked_your_tweet' }, itemContent: { itemType: 'TimelineNotification', notification_icon: 'heart_icon' } } },
+        makeEntry('95001', '77', 'TapFan', '旁听好友', '@Me 刷通知就记进来了'),
+        { content: { cursorType: 'Bottom', value: 'CUR_ALL' } },
+      ]),
+    }, 1);
+    assert.deepEqual(resAll, { ok: true, added: 1, parsed: 1, timeline: 'All' });
+    assert.equal(server.calls, beforeCalls, '旁听入库全程零主动请求');
+    assert.equal(store['cursor:me']?.syncedId, beforeSynced, '旁听入库绝不推进主动增量接续点');
+    assert.ok(store['cursor:me'].inLastTapAt > 0);
+    assert.deepEqual(store['cursor:me'].inLastTapCounts, { read: 1, added: 1, timeline: 'All' });
+
+    // 2. 「提及」页：含刚入库的重复 ID + 1 条新回复 → 主键去重 + 同写 inbound_tap 与 web_mentions_response
+    const mentionsUrl = 'https://x.com/i/api/graphql/QID/NotificationsTimeline?variables=' + encodeURIComponent(JSON.stringify({ timeline_type: 'Mentions', count: 40, cursor: 'C2' }));
+    const resMentions = await pageSend({
+      type: 'xir:inbound:tap',
+      url: mentionsUrl,
+      status: 200,
+      metadata: { age: '10', cache: 'MISS' },
+      text: wrapNotif([
+        makeEntry('95001', '77', 'TapFan', '旁听好友', '@Me 重复条目'),
+        makeEntry('95002', '77', 'TapFan', '旁听好友', '@Me 第二条回复'),
+      ]),
+    }, 1);
+    assert.deepEqual(resMentions, { ok: true, added: 1, parsed: 2, timeline: 'Mentions' });
+    assert.ok(store['snap:me'].users.tapfan.count >= 2, '旁听入库即时刷新时间线标签快照');
+
+    // 3. 非 2xx 响应跳过留日志；Mentions 异常结构记 inbound_tap_failed 且不挂红字告警
+    const res429 = await pageSend({ type: 'xir:inbound:tap', url: mentionsUrl, status: 429, metadata: {}, text: '{"errors":[{"message":"rate"}]}' }, 1);
+    assert.deepEqual(res429, { ok: false, skipped: true });
+    const resBad = await pageSend({ type: 'xir:inbound:tap', url: mentionsUrl, status: 200, metadata: {}, text: JSON.stringify({ data: { unexpected: true } }) }, 1);
+    assert.deepEqual(resBad, { ok: false });
+    assert.equal(store['alert:me'], undefined, '旁听解析异常只写诊断日志，不误弹主动抓取红字告警');
+
+    const logs = (await readDiagnostics()).filter((e) => e.account === 'me');
+    const allLog = logs.find((e) => e.event === 'inbound_tap' && e.timeline === 'All');
+    assert.equal(allLog.nonTweetEntries, 1);
+    assert.deepEqual(allLog.nonTweetKinds, ['TimelineNotification:heart_icon:users_liked_your_tweet']);
+    assert.equal(allLog.added, 1);
+    const mentionsLog = logs.find((e) => e.event === 'inbound_tap' && e.timeline === 'Mentions');
+    assert.equal(mentionsLog.added, 1);
+    assert.equal(mentionsLog.deduped, 1);
+    assert.equal(mentionsLog.hasCursor, true);
+    assert.ok(logs.some((e) => e.event === 'web_mentions_response' && e.evidence?.request?.timeline === 'Mentions'));
+    assert.ok(logs.some((e) => e.event === 'inbound_tap_skipped' && e.status === 429));
+    assert.ok(logs.some((e) => e.event === 'inbound_tap_failed' && e.category === 'unexpected_payload'));
+  } finally {
+    store['cursor:me'] = savedCursor;
+    delete store['alert:me'];
+    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
   }
 });

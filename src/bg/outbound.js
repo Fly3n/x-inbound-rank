@@ -1,9 +1,9 @@
-// 我回别人：日常浏览器发帖实时旁听入库，以及按需补历史 / 低频自动兜底同步。
+// 我回别人：日常浏览器发帖与本人主页回复栏实时旁听入库，以及按需补历史 / 低频自动兜底同步。
 import { putEvents, kvGet, kvSet, kvRemove, keys, getSettings, OUT } from '../db.js';
 import { DAY_MS, OUT_SCHEMA } from '../rank.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
-import { parseCreatedReply, parseMyReplies, ParseError, idGt } from '../x/parser.js';
+import { parseCreatedReply, parseMyReplies, repliesTapTargetUserId, repliesTapHasCursor, ParseError, idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, OUT_ALARM, alarmFor,
   enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot, nextOutAutoSlot,
@@ -28,6 +28,7 @@ export async function handleOutboundTap(msg, sender) {
     body = JSON.parse(text);
   } catch {
     await record('outbound_tap_unmatched', { account, reason: 'invalid_json' });
+    queueBridgePush();
     return {};
   }
   const me = (await kvGet(keys.accounts, {}))[account];
@@ -35,6 +36,7 @@ export async function handleOutboundTap(msg, sender) {
   const parsed = parseCreatedReply(body, me);
   if (!parsed.ok) {
     await record('outbound_tap_unmatched', { account, reason: parsed.reason });
+    queueBridgePush();
     return {};
   }
   if (!parsed.event) {
@@ -43,6 +45,10 @@ export async function handleOutboundTap(msg, sender) {
     return {};
   }
   const added = await putEvents(account, [parsed.event], OUT);
+  await updateCursor(account, (cur) => {
+    cur.outLastTapAt = now();
+    cur.outLastTapCounts = { read: 1, added, source: 'create_tweet' };
+  });
   await record('outbound_tap', {
     account,
     postId: parsed.event.id,
@@ -50,11 +56,86 @@ export async function handleOutboundTap(msg, sender) {
     direct: parsed.event.reply_to_id === parsed.event.conversation_id,
     added,
   });
-  if (added > 0) {
-    await refreshSnapshot(account).catch(() => {});
-    queueBridgePush();
-  }
+  if (added > 0) await refreshSnapshot(account).catch(() => {});
+  queueBridgePush();
   return { ok: true, added };
+}
+
+/** 旁听本人个人主页「回复」栏响应，零请求写入 OUT（不推 syncedId / coverTs / lastAt，浏览他人主页静默跳过）。 */
+export async function handleRepliesTap(msg, sender) {
+  const account = await senderAccount(msg, sender);
+  const { url, status, text } = msg;
+  if (!account || typeof text !== 'string' || text.length > 8_000_000) return {};
+  const me = (await kvGet(keys.accounts, {}))[account];
+  if (!me?.enabled) return {};
+  const tabId = sender?.tab?.id ?? null;
+  const targetUserId = repliesTapTargetUserId(url);
+  if (targetUserId && me.userId && targetUserId !== me.userId) return { skipped: 'other_user' };
+  if (!targetUserId) {
+    await record('outbound_replies_tap_skipped', { account, source: 'replies_tap', tabId, reason: 'missing_target_user' });
+    queueBridgePush();
+    return { ok: false, skipped: true };
+  }
+  const validStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  const hasCursor = repliesTapHasCursor(url);
+  if (validStatus && (validStatus < 200 || validStatus >= 300)) {
+    await record('outbound_replies_tap_skipped', {
+      account, source: 'replies_tap', tabId, hasCursor, status: validStatus, reason: 'http_status',
+    });
+    queueBridgePush();
+    return { ok: false, skipped: true };
+  }
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    await record('outbound_replies_tap_failed', {
+      account, source: 'replies_tap', tabId, hasCursor, status: validStatus, category: 'invalid_json',
+    });
+    queueBridgePush();
+    return { ok: false };
+  }
+  let parsed;
+  try {
+    parsed = parseMyReplies(body, me);
+  } catch (e) {
+    await record('outbound_replies_tap_failed', {
+      account, source: 'replies_tap', tabId, hasCursor, status: validStatus,
+      category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception',
+      reason: String(e?.message || e).slice(0, 200),
+    });
+    queueBridgePush();
+    return { ok: false };
+  }
+  let added;
+  try {
+    added = await putEvents(account, parsed.events, OUT);
+  } catch {
+    await record('save_failed', { account, mode: 'outbound_replies_tap', source: 'replies_tap', tabId });
+    queueBridgePush();
+    return { ok: false };
+  }
+  const ownCount = parsed.events.filter((e) => e.own).length;
+  const directCount = parsed.events.filter((e) => !e.own && e.reply_to_id === e.conversation_id).length;
+  await updateCursor(account, (cur) => {
+    cur.outLastTapAt = now();
+    cur.outLastTapCounts = { read: parsed.events.length, added, source: 'replies_timeline' };
+  });
+  await record('outbound_replies_tap', {
+    account, source: 'replies_tap', tabId, hasCursor,
+    parsed: parsed.events.length,
+    added,
+    deduped: parsed.events.length - added,
+    own: ownCount,
+    direct: directCount,
+    newestAt: parsed.newestTs,
+    oldestAt: parsed.oldestTs,
+    more: !!parsed.bottomCursor,
+    posts: parsed.events.map(({ id, own, created_at }) => ({ postId: id, own: !!own, createdAt: created_at })),
+  });
+  if (added > 0) await refreshSnapshot(account).catch(() => {});
+  queueBridgePush();
+  return { ok: true, added, parsed: parsed.events.length };
 }
 
 /** 读取已排队的补历史，或更新已经同步过的账号。 */

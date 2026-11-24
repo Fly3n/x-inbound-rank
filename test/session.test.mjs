@@ -137,6 +137,49 @@ test('页面仅旁听已启用会话（走私有随机通道、零 window.postMe
     await pending;
     await flush();
     assert.equal(createTaps.length, 1, `${order}: 未启用账号的 CreateTweet 响应不触发旁听回调`);
+
+    // NotificationsTimeline（含 All 与 Mentions）和 UserRepliesTimeline：加载期先缓冲、挂回调后直达、切号清空
+    doc.cookie = 'twid=u%3D1';
+    isolated.XIRRel.session();
+    const notifAllUrl = origin + '/i/api/graphql/n1/NotificationsTimeline?variables=' + encodeURIComponent(JSON.stringify({ timeline_type: 'All', count: 40 }));
+    const repliesUrl = origin + '/i/api/graphql/r1/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '1', count: 20 }));
+    pending = window.fetch(notifAllUrl);
+    h.settle({ status: 200, headers: new Map([['age', '5']]), clone: () => ({ text: async () => '{"data":{"notif":1}}' }) });
+    await pending;
+    await flush();
+    assert.equal(isolated.XIRRel.notificationsTaps.length, 1, `${order}: 回调未就绪前通知旁听进入短缓冲`);
+    assert.equal(isolated.XIRRel.notificationsTaps[0].url, notifAllUrl);
+    assert.equal(isolated.XIRRel.notificationsTaps[0].metadata.age, '5');
+
+    pending = window.fetch(repliesUrl);
+    h.settle({ status: 200, headers: new Map(), clone: () => ({ text: async () => '{"data":{"replies":1}}' }) });
+    await pending;
+    await flush();
+    assert.equal(isolated.XIRRel.repliesTaps.length, 1, `${order}: 回调未就绪前回复栏旁听进入短缓冲`);
+    assert.equal(isolated.XIRRel.repliesTaps[0].url, repliesUrl);
+
+    const notifDelivered = [];
+    const repliesDelivered = [];
+    isolated.XIRRel.onNotificationsTap = (item) => notifDelivered.push(item);
+    isolated.XIRRel.onRepliesTap = (item) => repliesDelivered.push(item);
+    const notifMentionsUrl = origin + '/i/api/graphql/n1/NotificationsTimeline?variables=' + encodeURIComponent(JSON.stringify({ timeline_type: 'Mentions', count: 40 }));
+    pending = window.fetch(notifMentionsUrl);
+    h.settle({ status: 200, headers: new Map(), clone: () => ({ text: async () => '{"data":{"notif":2}}' }) });
+    await pending;
+    await flush();
+    assert.equal(notifDelivered.length, 1, `${order}: 挂回调后通知旁听直接投递`);
+    assert.equal(notifDelivered[0].url, notifMentionsUrl);
+
+    pending = window.fetch(repliesUrl);
+    h.settle({ status: 200, headers: new Map(), clone: () => ({ text: async () => '{"data":{"replies":2}}' }) });
+    await pending;
+    await flush();
+    assert.equal(repliesDelivered.length, 1, `${order}: 挂回调后回复栏旁听直接投递`);
+
+    doc.cookie = 'twid=u%3D9';
+    assert.equal(isolated.XIRRel.session(), null);
+    assert.equal(isolated.XIRRel.notificationsTaps.length, 0, `${order}: 切号清空通知旁听缓冲`);
+    assert.equal(isolated.XIRRel.repliesTaps.length, 0, `${order}: 切号清空回复栏旁听缓冲`);
     assert.equal(postMessages.length, 0, `${order}: 全程零 window.postMessage 明文广播`);
   }
 });
