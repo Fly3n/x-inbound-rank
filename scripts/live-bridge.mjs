@@ -7,7 +7,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { snapshotSummary } from '../src/snapshot.js';
+import { snapshotSummary, diagnosticsSummary } from '../src/snapshot.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_DIR = path.join(ROOT, '.local');
@@ -120,6 +120,7 @@ export async function startServer({ port = DEFAULT_PORT, dir = DEFAULT_DIR, log 
           extensionVersion: payload.extensionVersion || null,
           source: payload.source || null,
           accounts: snapshotSummary(payload.data),
+          diagnostics: diagnosticsSummary(payload.storage),
         };
         await atomicWrite(meta, `${JSON.stringify(summary, null, 2)}\n`);
         log.info?.(`[xir-bridge] ${receivedAt} ${summary.source || 'unknown'} ${summary.accounts.length} accounts ${summary.bytes} bytes`);

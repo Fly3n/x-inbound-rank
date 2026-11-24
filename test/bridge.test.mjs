@@ -30,7 +30,12 @@ test('本机桥：健康检查、接收快照、写主文件和摘要', async ()
           outbound: [{ id: '2' }],
         },
       },
-      storage: { accounts: { a: { handle: 'alice' } } },
+      storage: {
+        accounts: { a: { handle: 'alice' } },
+        'diagnostics:1': [
+          { at: 1700000000000, event: 'inbound_tap', account: 'a', timeline: 'Mentions', entries: 10, nonTweetEntries: 0, parsed: 2, added: 1, deduped: 1 },
+        ],
+      },
     };
     const response = await fetch(`http://127.0.0.1:${bridge.port}/ingest`, {
       method: 'POST',
@@ -48,6 +53,9 @@ test('本机桥：健康检查、接收快照、写主文件和摘要', async ()
     const meta = JSON.parse(await readFile(path.join(dir, 'xir-live.meta.json'), 'utf8'));
     assert.deepEqual(meta.accounts, [{ account: 'a', handle: 'alice', inbound: 1, outbound: 1 }]);
     assert.equal(meta.extensionVersion, '0.23.1');
+    assert.equal(meta.diagnostics.total, 1);
+    assert.equal(meta.diagnostics.counts.inbound_tap, 1);
+    assert.equal(meta.diagnostics.lastTap.inbound.timeline, 'Mentions');
   } finally {
     await bridge.close();
     await rm(dir, { recursive: true, force: true });

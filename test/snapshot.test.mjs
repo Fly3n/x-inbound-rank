@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SNAPSHOT_SCHEMA, buildSnapshot, snapshotFilename, snapshotSummary } from '../src/snapshot.js';
+import { SNAPSHOT_SCHEMA, buildSnapshot, snapshotFilename, snapshotSummary, diagnosticsSummary } from '../src/snapshot.js';
 
 test('本机快照：版本、账号、两份数据和环境信息', () => {
   const data = {
@@ -35,4 +35,22 @@ test('本机快照：文件名和摘要', () => {
     { account: 'a', handle: 'alice', inbound: 2, outbound: 1 },
     { account: 'b', handle: '', inbound: 0, outbound: 0 },
   ]);
+
+  const diag = diagnosticsSummary({
+    'diagnostics:100': [
+      { at: 1000, event: 'inbound_tap', account: 'a', timeline: 'All', entries: 20, nonTweetEntries: 5, parsed: 3, added: 2, deduped: 1 },
+      { at: 2000, event: 'outbound_tap', account: 'a', postId: '99', own: false, direct: true, added: 1 },
+      { at: 3000, event: 'outbound_replies_tap', account: 'a', parsed: 4, added: 1, deduped: 3 },
+      { at: 4000, event: 'inbound_tap_failed', account: 'a', timeline: 'Mentions', category: 'unexpected_payload', reason: 'bad' },
+    ],
+    other: 'ignored',
+  });
+  assert.equal(diag.total, 4);
+  assert.equal(diag.latestAt, 4000);
+  assert.deepEqual(diag.counts, { inbound_tap: 1, inbound_tap_failed: 1, outbound_replies_tap: 1, outbound_tap: 1 });
+  assert.equal(diag.lastTap.inbound.timeline, 'All');
+  assert.equal(diag.lastTap.inbound.nonTweetEntries, 5);
+  assert.equal(diag.lastTap.outbound.postId, '99');
+  assert.equal(diag.lastTap.replies.added, 1);
+  assert.equal(diag.lastTap.error.event, 'inbound_tap_failed');
 });
