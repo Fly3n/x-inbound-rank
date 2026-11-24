@@ -159,12 +159,12 @@
   cursor: default;
 }
 
-.xir-sched-ref {
+.xir-sched-timeline {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 8px;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--xir-s-bd);
   border-radius: 8px;
   background: var(--xir-s-slot-bg);
@@ -172,34 +172,68 @@
   font-variant-numeric: tabular-nums;
 }
 
-.xir-sched-ref-line {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+.xir-sched-node {
+  flex: 0 0 auto;
+  display: inline-flex;
   align-items: center;
-}
-
-.xir-sched-ref-cell {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding-right: 10px;
-}
-
-.xir-sched-ref-cell.is-right {
-  padding-right: 0;
-  padding-left: 10px;
-  border-left: 1px solid var(--xir-s-bd);
-}
-
-.xir-sched-ref-label {
-  color: var(--xir-s-muted);
+  gap: 4px;
   white-space: nowrap;
 }
 
-.xir-sched-ref-val {
+.xir-sched-node-label {
+  color: var(--xir-s-muted);
+  font-size: 11px;
+}
+
+.xir-sched-node-val {
   color: var(--xir-s-fg);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.xir-sched-node.is-empty .xir-sched-node-val {
+  color: var(--xir-s-muted);
+  font-weight: 400;
+}
+
+.xir-sched-node.is-current {
+  padding: 2px 8px;
+  border: 1px solid rgba(29, 155, 240, 0.45);
+  border-radius: 999px;
+  background: var(--xir-s-slot-hover);
+}
+.xir-sched-node.is-current .xir-sched-node-label,
+.xir-sched-node.is-current .xir-sched-node-val {
+  color: #1d9bf0;
+  font-weight: 700;
+}
+
+.xir-sched-gap {
+  flex: 1 1 24px;
+  min-width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.xir-sched-gap::before,
+.xir-sched-gap::after {
+  content: "";
+  flex: 1 1 6px;
+  height: 1px;
+  background: var(--xir-s-bd);
+}
+.xir-sched-gap.is-empty::before {
+  background: none;
+  border-top: 1px dashed var(--xir-s-bd);
+}
+.xir-sched-gap.is-empty::after {
+  display: none;
+}
+
+.xir-sched-gap-text {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--xir-s-muted);
   white-space: nowrap;
 }
 

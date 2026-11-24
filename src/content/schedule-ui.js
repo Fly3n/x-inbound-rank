@@ -277,51 +277,56 @@
     head.append(title, stat, refresh);
     panel.appendChild(head);
 
-    // 选定时间后，左右分栏展示「上一条（或刚发主帖）时间 | 间隔」（无数据显示「无」）；有后续排期时追加一行「下一条 | 间隔」
+    // 选定时间后，单行三段式时间轴展示：上一条 — 间隔 — [本条] — 间隔 — 下一条
     if (lastPicked?.ok) {
       const { prev, next } = XIRSchedule.neighborSummary(lastPicked.filledTs, {
         scheduled: state.items,
         lastPostAt: state.lastPostAt,
       });
-      const refBox = document.createElement('div');
-      refBox.className = 'xir-sched-ref';
-      const appendRefRow = (leftLabel, leftVal, rightVal) => {
-        const line = document.createElement('div');
-        line.className = 'xir-sched-ref-line';
-        const left = document.createElement('span');
-        left.className = 'xir-sched-ref-cell';
-        const lTag = document.createElement('span');
-        lTag.className = 'xir-sched-ref-label';
-        lTag.textContent = leftLabel;
-        const lVal = document.createElement('span');
-        lVal.className = 'xir-sched-ref-val';
-        lVal.textContent = leftVal;
-        left.append(lTag, lVal);
-        const right = document.createElement('span');
-        right.className = 'xir-sched-ref-cell is-right';
-        const rTag = document.createElement('span');
-        rTag.className = 'xir-sched-ref-label';
-        rTag.textContent = '间隔';
-        const rVal = document.createElement('span');
-        rVal.className = 'xir-sched-ref-val';
-        rVal.textContent = rightVal;
-        right.append(rTag, rVal);
-        line.append(left, right);
-        refBox.appendChild(line);
+      const timeline = document.createElement('div');
+      timeline.className = 'xir-sched-timeline';
+
+      const makeNode = (label, val, extraClass = '') => {
+        const node = document.createElement('span');
+        node.className = `xir-sched-node${extraClass ? ` ${extraClass}` : ''}`;
+        const l = document.createElement('span');
+        l.className = 'xir-sched-node-label';
+        l.textContent = label;
+        const v = document.createElement('span');
+        v.className = 'xir-sched-node-val';
+        v.textContent = val;
+        node.append(l, v);
+        return node;
       };
-      appendRefRow(
-        prev?.kind === 'post' ? '刚发主帖' : '上一条',
-        prev ? XIRSchedule.formatRefTime(prev.ts, lastPicked.filledTs) : '无',
-        prev ? XIRSchedule.formatGap(prev.gapMs) : '无',
-      );
-      if (next) {
-        appendRefRow(
+
+      const makeGap = (info) => {
+        const gap = document.createElement('span');
+        gap.className = `xir-sched-gap${info ? '' : ' is-empty'}`;
+        if (info) {
+          const text = document.createElement('span');
+          text.className = 'xir-sched-gap-text';
+          text.textContent = XIRSchedule.formatGap(info.gapMs);
+          gap.appendChild(text);
+        }
+        return gap;
+      };
+
+      timeline.append(
+        makeNode(
+          prev?.kind === 'post' ? '刚发' : '上一条',
+          prev ? XIRSchedule.formatRefTime(prev.ts, lastPicked.filledTs) : '无',
+          prev ? '' : 'is-empty',
+        ),
+        makeGap(prev),
+        makeNode('本条', XIRSchedule.formatTime(lastPicked.filledTs), 'is-current'),
+        makeGap(next),
+        makeNode(
           '下一条',
-          XIRSchedule.formatRefTime(next.ts, lastPicked.filledTs),
-          XIRSchedule.formatGap(next.gapMs),
-        );
-      }
-      panel.appendChild(refBox);
+          next ? XIRSchedule.formatRefTime(next.ts, lastPicked.filledTs) : '无',
+          next ? 'is-right' : 'is-right is-empty',
+        ),
+      );
+      panel.appendChild(timeline);
     }
 
     // 快捷上下空档切换：无上一档/下一档时自动置灰
