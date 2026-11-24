@@ -220,11 +220,9 @@
   }
 
   function statusSummary() {
-    if (lastPicked) {
+    if (lastPicked && !lastPicked.ok) {
       const t = XIRSchedule.formatTime(lastPicked.filledTs);
-      return lastPicked.ok
-        ? { text: `已填 ${t}（${lastPicked.label} 微调），请点确认`, tone: 'ok' }
-        : { text: `未能自动填入，请手动选 ${t}`, tone: 'warn' };
+      return { text: `未能自动填入，请手动选 ${t}`, tone: 'warn' };
     }
     if (state.status === 'loading') return { text: '正在同步已排期列表…', tone: 'muted' };
     if (state.status === 'need_tpl') return { text: state.message || '点下方「已排期帖子」完成首次同步', tone: 'warn' };

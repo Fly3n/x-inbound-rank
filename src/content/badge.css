@@ -197,13 +197,13 @@
 
 .xir-sched-node.is-current {
   padding: 2px 8px;
-  border: 1px solid rgba(29, 155, 240, 0.45);
+  border: 1px solid rgba(22, 163, 74, 0.45);
   border-radius: 999px;
-  background: var(--xir-s-slot-hover);
+  background: rgba(22, 163, 74, 0.12);
 }
 .xir-sched-node.is-current .xir-sched-node-label,
 .xir-sched-node.is-current .xir-sched-node-val {
-  color: #1d9bf0;
+  color: #16a34a;
   font-weight: 700;
 }
 
@@ -233,7 +233,8 @@
 .xir-sched-gap-text {
   flex: 0 0 auto;
   font-size: 11px;
-  color: var(--xir-s-muted);
+  font-weight: 600;
+  color: #1d9bf0;
   white-space: nowrap;
 }
 
