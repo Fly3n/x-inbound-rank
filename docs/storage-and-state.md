@@ -70,7 +70,7 @@
 ### 出站手动同步（`cursor.out`）
 
 - **按需手动补历史与独立立即更新**：后台不再定时自动刷回复栏，仅由用户手动点击「补历史」或「立即更新」触发 `syncOut(account, true)`（标 `manualTask: true`），中途退避/分段续读由 `OUT_ALARM` 自动接续直到本次手动任务结束，结束后即清空 `manualTask` 不再排期。`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastManualAt`（独立 10 分钟冷却）、`lastFullAt`、`lastFullDays`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
-- 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true`；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒续完进行中的手动任务。
+- 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true`；遇到非 2xx、解析错误、连续 3 次 5xx 或未预期异常时一律置 `status: 'error'` 并清空 `resume` / `retryAt` / `manualTask` 及 `OUT_ALARM`，避免 `tick` 或 `xir:hello` 无限重启失败任务；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒续完进行中的手动任务。
 - **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。
 
 ### 手动补读（统一入口：自定义小时/天 + 连续区间智能早停）
@@ -88,8 +88,8 @@
 | 机制 | 当前值 | 说明 |
 |---|---|---|
 | 回填页间隔 / 批休 | `humanBackfillDelay()`（15–110 秒连续右偏分布）；每 `humanBatchPages()`（8–12 页）休 3–5 分钟（连续分布） | 仅手动触发；单次上限 **220 页**后暂停等确认 |
-| 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时；连续 3 次 429 升级硬熔断 | 回填、手动立即更新、排期同步共用，到期成功读取后清零 |
-| 账号异常硬熔断 | 命中 HTTP 401/403、连续 3 次 429、`cf-mitigated`、非 5xx HTML 挑战页或账号异常错误码（32/64/89/226/326、`Bounce` 等）立即熔断 | 立即中止当前手动任务、清空全部闹钟与续读、记 `cursor.circuitBroken` 与红字告警；绝不自动恢复，仅用户确认账号正常后再次手动触发读取才解除 |
+| 账号级 429 / 5xx 退避 | 429：`max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时，连续 3 次升级硬熔断；502/503/504：指数退避最多重试 `maxServiceRetries = 3` 次后中止 | 回填、手动补读、排期同步共用 429 退避，到期成功读取后清零；5xx 超限清闹钟与续读进度，绝不无限重打 |
+| 账号异常硬熔断 | 优先于 429 判定；命中 HTTP 401/403、连续 3 次 429、`cf-mitigated`、挑战/登录重定向、非 5xx HTML 挑战页、带强挑战特征的 503 页或账号异常错误码（32/64/89/226/326、`Bounce` 等）立即熔断 | 立即中止当前手动任务、清空全部闹钟与续读、记 `cursor.circuitBroken` 与红字告警；绝不自动恢复，用户手动触发读取时仅放行首屏半开探测（`allowCircuitProbe`），收到正常 `ok` 响应后才清除 `circuitBroken` |
 | 日常数据收集 | 零后台定时 `fetch`；默认由 `tapInEnabled` / `tapOutEnabled` 旁听浏览器自然请求入库 | 浏览通知页/提及页、发回复、浏览本人回复栏时即时去重写入，零额外网络请求 |
 | 手动立即更新 | 入站（`updateNowWithReceipt`，单轮 8 段/48 页、页间 `humanIncDelay()`）与出站（`updateOutNowWithReceipt`，单轮 45 轮/225 页）各自独立 10 分钟冷却 | 仅用户手动点击触发，彼此互不牵连，不受旁听收集开关影响 |
 | 时段与前台门控 | 本地 08:00–24:00、同账号页面 `visible` | `fetchViaTab` 统一拦截夜间与后台标签页；后台不发任何无人值守定时请求 |
