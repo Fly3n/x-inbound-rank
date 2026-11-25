@@ -41,7 +41,7 @@
 | 键 | 内容 |
 |---|---|
 | `accounts` | `{ [dataKey]: { handle, userId, enabled, activation } }`；以 `userId` 为唯一身份基准 |
-| `settings:<账号>` | `{ fetchEnabled, outAutoSync, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }` |
+| `settings:<账号>` | `{ tapInEnabled, tapOutEnabled, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }`（旧版 `fetchEnabled` / `outAutoSync` 静默废弃） |
 | `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
 | `scheduled:<账号>` | `{ items, syncedAt, retryAt, errorCount }`：已排期列表缓存与失败退避 |
 | `lastPostAt:<账号>` | 最近一次电脑端原创/引用主帖时间戳（由 `CreateTweet` 旁听记录，不含回复评论） |
@@ -60,24 +60,24 @@
 - 一步一页通过 `job:<账号>` 闹钟接力，避免 Service Worker 回收丢定时；30 分钟 `tick` 闹钟兜底接续、算榜与检查增量；完成后清除 `incLimitReached`。
 - 结束判定：本页 `newestTs < targetTs` 正常完成；无 `bottomCursor` 或空页记 `reachedEnd: true`；首屏可信空列表记哨兵 `syncedId = '0'`；通知模板缺失或 400/404 过期时删除模板并暂停等待用户自行打开一次 X 通知页刷新（不再降级旧 REST）；翻页返回相同 `bottomCursor` 报 `error` 不推进接续点。
 
-### 旁听直接入库（零主动请求）
+### 旁听收集（零主动请求，默认日常数据来源）
 
-- **别人回我（通知页 / 提及页旁听）**：`tap.js` → `rel.js` → `content.js` 捕获 X 页面自身发出的 `NotificationsTimeline` GET 响应（过滤自身主动请求），发往 `xir:inbound:tap` → `handleInboundTap`；`Mentions` 严格按 `parseMentions` 校验，`All` / `Verified` 允许跳过点赞/关注等非帖子条目并记录 `nonTweetEntries` / `nonTweetKinds`。结果按主键去重写入 `events` 表，记录 `cur.inLastTapAt` / `cur.inLastTapCounts`，**绝不推进 `cur.syncedId`**；全程记录 `inbound_tap`（以及异常时的 `inbound_tap_skipped` / `inbound_tap_failed`）与 `web_mentions_response` 日志，并在有新增时立即刷新快照、每次事件均触发 `queueBridgePush()` 同步至本机数据桥。
-- **我回别人（发帖旁听 + 本人主页回复栏旁听）**：
-  - `CreateTweet` 响应经 `xir:outbound:tap` → `handleOutboundTap` 写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched`、`cur.outLastTapAt` / `cur.outLastTapCounts`、触发 `queueBridgePush()`（不碰 `cur.out`）。
-  - `UserRepliesTimeline` / `UserTweetsAndReplies` GET 响应经 `xir:replies:tap` → `handleRepliesTap` 核验 URL 中 `variables.userId === me.userId`（浏览他人主页时静默跳过），调用 `parseMyReplies` 写入 `OUT` 表，记录 `outbound_replies_tap` / `outbound_replies_tap_skipped` / `outbound_replies_tap_failed` 与 `cur.outLastTapAt` / `cur.outLastTapCounts`，**绝不碰 `cur.out`**（不推进 `syncedId` / `coverTs` / `lastAt`），每次事件均触发 `queueBridgePush()`。
+- **别人回我（`tapInEnabled`，默认开启）**：`tap.js` → `rel.js` → `content.js` 捕获 X 页面自身发出的 `NotificationsTimeline` GET 响应（过滤自身主动请求），发往 `xir:inbound:tap` → `handleInboundTap`；关闭 `tapInEnabled` 时静默跳过不写库。`Mentions` 严格按 `parseMentions` 校验，`All` / `Verified` 允许跳过点赞/关注等非帖子条目并记录 `nonTweetEntries` / `nonTweetKinds`。结果按主键去重写入 `events` 表，记录 `cur.inLastTapAt` / `cur.inLastTapCounts`，**绝不推进 `cur.syncedId`**；全程记录 `inbound_tap`（以及异常时的 `inbound_tap_skipped` / `inbound_tap_failed`）与 `web_mentions_response` 日志，并在有新增时立即刷新快照、每次事件均触发 `queueBridgePush()` 同步至本机数据桥。
+- **我回别人（`tapOutEnabled`，默认开启）**：
+  - `CreateTweet` 响应经 `xir:outbound:tap` → `handleOutboundTap` 处理：原创/引用主帖刷新 `lastPostAt` 供发帖排期缓冲（不受 `tapOutEnabled` 影响）；回复事件在 `tapOutEnabled` 开启时写入 `OUT` 表并记录 `outbound_tap` / `outbound_tap_unmatched`、`cur.outLastTapAt` / `cur.outLastTapCounts`、触发 `queueBridgePush()`（不碰 `cur.out`）。
+  - `UserRepliesTimeline` / `UserTweetsAndReplies` GET 响应经 `xir:replies:tap` → `handleRepliesTap` 在 `tapOutEnabled` 开启时核验 URL 中 `variables.userId === me.userId`（浏览他人主页时静默跳过），调用 `parseMyReplies` 写入 `OUT` 表，记录 `outbound_replies_tap` / `outbound_replies_tap_skipped` / `outbound_replies_tap_failed` 与 `cur.outLastTapAt` / `cur.outLastTapCounts`，**绝不碰 `cur.out`**（不推进 `syncedId` / `coverTs` / `lastAt`），每次事件均触发 `queueBridgePush()`。
 
-### 出站同步（`cursor.out` 与浏览器旁听）
+### 出站手动同步（`cursor.out`）
 
-- **默认方案 A（浏览器旁听）**：`CreateTweet` 发帖旁听与本人主页「回复」栏旁听实时写入 `OUT` 表并同步至本机桥，不动 `cur.out.syncedId` 与 `cur.out.lastAt`，避免遮蔽未刷到的手机端回复。
-- **可选方案 B（手动补历史、独立立即更新与 2 天低频自动同步）**：`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastManualAt`（独立 10 分钟冷却）、`lastFullAt`、`lastFullDays`、`nextAutoAt`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
-- 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」或开启 `outAutoSync` 时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true` 并阻止自动闹钟空耗；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒安排续读。日常自动同步仅在 `fetchEnabled && outAutoSync`（默认 `outAutoSync: false`）同时为真时按 `nextOutAutoSlot()`（至少 48 小时）调度。
+- **按需手动补历史与独立立即更新**：后台不再定时自动刷回复栏，仅由用户手动点击「补历史」或「立即更新」触发 `syncOut(account, true)`（标 `manualTask: true`），中途退避/分段续读由 `OUT_ALARM` 自动接续直到本次手动任务结束，结束后即清空 `manualTask` 不再排期。`cursor.out` 核心字段为 `status`（`ok | need_tpl | error | queued | waiting_tab | reading`）、`syncedId`（空列表完成记 `'0'`）、`coverTs`、`reachedEnd`、`attemptCoverTs`（部分进度只用于展示，不作覆盖证明）、`limitReached`、`retryAt`、`rate429Count`、`fullFor`、`resume`、`manualTask`、`lastAt`、`lastManualAt`（独立 10 分钟冷却）、`lastFullAt`、`lastFullDays`、`pages`、`schema`（`OUT_SCHEMA = 2`）。
+- 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true`；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒续完进行中的手动任务。
 - **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。
 
-### 增量与分页异常边界
+### 手动增量与分页异常边界
 
-- **免补历史直启与重叠即停**：尚未补过历史（无 `syncedId`）的账号在启用自动更新或手动点「立即更新」时，可直接以启用时间 `activation` 为起点最多翻 2 页建立接续点；已有 `syncedId` 时只要本页 `oldestId` 已与 `syncedId` 重叠（`!idGt(p.oldestId, stopAt)`）或越过 `KEEP_DAYS` 即停，不再强制向更早补 1 小时。
-- **单轮 48 页安全上限**：入站单轮最多续读 `PACE.incMaxRounds = 8` 段（`8 × 6 = 48` 页）。第 8 段仍未重叠接续点时清除 `incResume`、置位 `cur.incLimitReached = true`、记录 `inc_limit_reached` 并停掉自动定时，等用户手动更新或补读历史后解除。
+- **不再定时自动抓取**：`maybeIncremental` 仅响应用户点击「立即更新」（`manual: true`）或续完该次未结束的分段手动任务（`cur.incResume?.manual === true`）；`tick`、`xir:active` 与 `recoverAlarms` 绝不自动发起入站或出站请求，升级时顺手清理旧版遗留的非手动 `inc:` / `out:` 闹钟。
+- **免补历史直启与重叠即停**：尚未补过历史（无 `syncedId`）的账号手动点「立即更新」时，可直接以启用时间 `activation` 为起点最多翻 2 页建立接续点；已有 `syncedId` 时只要本页 `oldestId` 已与 `syncedId` 重叠（`!idGt(p.oldestId, stopAt)`）或越过 `KEEP_DAYS` 即停。
+- **单轮 48 页安全上限**：入站手动更新单轮最多续读 `PACE.incMaxRounds = 8` 段（`8 × 6 = 48` 页）。第 8 段仍未重叠接续点时清除 `incResume`、置位 `cur.incLimitReached = true`、记录 `inc_limit_reached` 并停下提示。
 - 入站或出站增量在接上旧接续点前遇到空页、无下一页或重复 `bottomCursor` 一律按分页异常中止，**绝不推进** `syncedId` / `lastIncrementalAt` / `coverTs`。
 - 解析层遇到已删除/受保护等不可用单条回复只跳过该条；结构未知或作者数字 ID 缺失则整页抛 `ParseError`。
 
@@ -85,11 +85,10 @@
 
 | 机制 | 当前值 | 说明 |
 |---|---|---|
-| 回填页间隔 / 批休 | `humanBackfillDelay()`（15–110 秒连续右偏分布）；每 `humanBatchPages()`（8–12 页）休 3–5 分钟（连续分布） | 单次上限 **220 页**后暂停等确认 |
-| 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时；连续 3 次 429 升级硬熔断 | 回填、入站、出站、手动更新、排期同步共用，到期成功读取后清零 |
-| 账号异常硬熔断 | 命中 HTTP 401/403、连续 3 次 429、`cf-mitigated`、非 5xx HTML 挑战页或账号异常错误码（32/64/89/226/326、`Bounce` 等）立即熔断 | 强制关闭 `fetchEnabled` / `outAutoSync`、清空全部闹钟与续读、记 `cursor.circuitBroken` 与红字告警；绝不自动恢复，仅用户手动重开或手动更新后解除 |
-| 入站每日自动 | 08:00–11:30 与 18:00–22:30 完整窗口各随机 1 次 | 页间 `humanIncDelay()`（4–28 秒连续右偏分布，低于 30 秒回收线），单事件最多 6 页；分段记 `incResume` 休 3–5 分钟，单轮最多 8 段（48 页） |
-| 出站日常同步 | 默认关闭（浏览器 `CreateTweet` 实时旁听）；开启 `outAutoSync` 后按 `nextOutAutoSlot()` 每 2 天（≥ 48 小时）在活跃窗口抽 1 次 | 页间 `humanIncDelay()`，单轮最多 5 页（受 50 次/15 分钟额度限制），不与入站互相触发 |
-| 手动立即更新 | 入站（`updateNowWithReceipt`）与出站（`updateOutNowWithReceipt`）各自独立 10 分钟冷却 | 彼此互不触发；入站成功后顺延下一次自动时段；`fetchEnabled` 不限制补历史与手动更新 |
-| 时段与前台门控 | 本地 08:00–24:00、同账号页面 `visible`；自动更新额外要求 `activeInteractionMs`（5 分钟内有真实交互） | `fetchViaTab` 统一拦截夜间与后台标签页；`hasActivePage` 拦住白天亮屏挂机空发，窗口内回到页面交互时经 `xir:active` 顺带唤醒 |
+| 回填页间隔 / 批休 | `humanBackfillDelay()`（15–110 秒连续右偏分布）；每 `humanBatchPages()`（8–12 页）休 3–5 分钟（连续分布） | 仅手动触发；单次上限 **220 页**后暂停等确认 |
+| 账号级 429 退避 | `max(X 重置时间, 15 分钟 × 2^n)` 上限 4 小时；连续 3 次 429 升级硬熔断 | 回填、手动立即更新、排期同步共用，到期成功读取后清零 |
+| 账号异常硬熔断 | 命中 HTTP 401/403、连续 3 次 429、`cf-mitigated`、非 5xx HTML 挑战页或账号异常错误码（32/64/89/226/326、`Bounce` 等）立即熔断 | 立即中止当前手动任务、清空全部闹钟与续读、记 `cursor.circuitBroken` 与红字告警；绝不自动恢复，仅用户确认账号正常后再次手动触发读取才解除 |
+| 日常数据收集 | 零后台定时 `fetch`；默认由 `tapInEnabled` / `tapOutEnabled` 旁听浏览器自然请求入库 | 浏览通知页/提及页、发回复、浏览本人回复栏时即时去重写入，零额外网络请求 |
+| 手动立即更新 | 入站（`updateNowWithReceipt`，单轮 8 段/48 页、页间 `humanIncDelay()`）与出站（`updateOutNowWithReceipt`，单轮 45 轮/225 页）各自独立 10 分钟冷却 | 仅用户手动点击触发，彼此互不牵连，不受旁听收集开关影响 |
+| 时段与前台门控 | 本地 08:00–24:00、同账号页面 `visible` | `fetchViaTab` 统一拦截夜间与后台标签页；后台不发任何无人值守定时请求 |
 | 并发与串行队列 | 全局 `busy` 锁 + `serial` 排队更新 `cursor` | 固定写法：先检查 → `tryAcquireBusy()`（无 `await`）→ 占住后再核对一次 |

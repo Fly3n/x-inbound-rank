@@ -30,15 +30,15 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | Service Worker 入口：初始化与集中注册 Chrome 事件监听（`tabs.onActivated`/`tabs.onUpdated`/`windows.onFocusChanged`/`runtime.onInstalled`/`runtime.onStartup`/`alarms.onAlarm`/`runtime.onMessage`） | 增删顶级事件入口 |
 | `src/bg/runtime.js` | 后台公共常量 `PACE`、模拟真人停顿函数（`humanIncDelay`/`humanBackfillDelay`/`humanBatchPages`）、双窗口调度（含 `nextOutAutoSlot`）、并发 `busy` 锁、串行 `cursor` 队列、`board` 与快照节流计算 | 调风控节奏或锁 |
-| `src/bg/alarms.js` | 按账号命名闹钟清理、重试与恢复（`job:` / `inc:` / `out:`） | 改闹钟恢复条件 |
-| `src/bg/accounts.js` | 账号升级迁移、会话校验 `senderAccount`、启停控制、`hasVisiblePage`/`hasActivePage` 活跃门控、`refreshStaleTabs` 各窗口前台旧内容脚本刷新与 `stale_tab_refresh` 日志记录 | 改账号隔离或刷新策略 |
-| `src/bg/transport.js` | `fetchViaTab`、`recordRateLimit`/`clearRateLimit` 账号级 429 退避、提及 `pull` 入库与诊断记录 | 改请求退避或入库流程 |
-| `src/bg/backfill.js` | 别人回我历史补读状态机（启动、逐页、暂停、恢复、唤醒） | 改回填流程 |
-| `src/bg/incremental.js` | 别人回我日常通知页/提及页旁听入库 `handleInboundTap`（写诊断日志并推桥），以及增量拉取（免补历史直启、发现重叠即停、单轮 8 段/48 页安全上限） | 改入站旁听或增量逻辑 |
-| `src/bg/outbound.js` | 我回别人浏览器发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`，以及免补历史建起点、手动补历史与可选 2 天低频自动同步（`syncOut` / `syncOutNow`） | 改出站旁听或同步策略 |
+| `src/bg/alarms.js` | 按账号命名闹钟清理、重试与恢复未完成的手动任务（`job:` / 手动 `inc:` / 手动 `out:`），清理历史遗留的自动定时闹钟 | 改闹钟恢复条件 |
+| `src/bg/accounts.js` | 账号升级迁移、会话校验 `senderAccount`、启停控制、`hasVisiblePage` 前台检查、`refreshStaleTabs` 各窗口前台旧内容脚本刷新与 `stale_tab_refresh` 日志记录 | 改账号隔离或刷新策略 |
+| `src/bg/transport.js` | `fetchViaTab`、`recordRateLimit`/`clearRateLimit` 账号级 429 退避、账号异常硬熔断、提及 `pull` 入库与诊断记录 | 改请求退避或入库流程 |
+| `src/bg/backfill.js` | 别人回我手动历史补读状态机（启动、逐页、暂停、恢复、唤醒） | 改回填流程 |
+| `src/bg/incremental.js` | 别人回我通知页/提及页旁听收集 `handleInboundTap`（受 `tapInEnabled` 控制，写诊断日志并推桥），以及手动「立即更新」增量拉取（发现重叠即停、单轮 8 段/48 页安全上限，不再定时自动跑） | 改入站旁听或手动增量逻辑 |
+| `src/bg/outbound.js` | 我回别人发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`（受 `tapOutEnabled` 控制），以及手动补历史与手动「立即更新」（`syncOut` / `syncOutNow`，不再定时自动跑） | 改出站旁听或手动同步策略 |
 | `src/bg/scheduled.js` | 发帖排期按需同步、`xir:scheduled:tap` 与 `xir:postEvent`（排期增删缓存失效）处理 | 改排期同步与退避 |
-| `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:inbound:tap`、`xir:replies:tap`、`xir:outbound:tap`、`xir:active` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
-| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`countsFromMe`、规则默认值 `DEFAULT_RULES`（含 `outAutoSync: false`）与 `cleanRules` | 改统计口径或规则范围 |
+| `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立手动立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:inbound:tap`、`xir:replies:tap`、`xir:outbound:tap` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
+| `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`countsFromMe`、规则默认值 `DEFAULT_RULES`（含 `tapInEnabled: true`、`tapOutEnabled: true`）与 `cleanRules` | 改统计口径或规则范围 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 `keys`；重读同一条按 `mergeKnown` 合并；整表冻结缓存 | 改数据模型或存储键 |
 | `src/diagnostics.js` | 本机诊断日志按小时分键静默写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
 | `src/ui/popup-helpers.js` | 弹窗纯函数与常量：格式化、状态文案、步进与 CSV 导出构造 | 改弹窗文案或导出格式 |
@@ -60,7 +60,7 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 
 ## 关键实现约定
 
-- **账号识别与会话隔离**：新账号数据键为 `uid-<用户 ID>`，升级旧账号沿用原键；启用状态独立于 `fetchEnabled`。页面层仅旁听已启用会话，切号清空页面缓存；主动请求前及响应后均校验会话 `userId` 与 `activation`。
+- **账号识别与会话隔离**：新账号数据键为 `uid-<用户 ID>`，升级旧账号沿用原键；启用状态独立于 `tapInEnabled` / `tapOutEnabled` 旁听开关。页面层仅旁听已启用会话，切号清空页面缓存；主动请求前及响应后均校验会话 `userId` 与 `activation`。
 - **两个范围与向后兼容**：`windowDays`（`WINDOWS = [7, 15, 30, 60, 90]`）控制榜单、「我回 N」、时间线标签和汇总；`initDays`（`INIT_WINDOWS = [7, 15]`）只管点击「补历史」时回溯多远，旧设置里的 `30` 由 `cleanRules` 平滑降级为 `15`。`getSettings` 故意不从 `DEFAULT_SETTINGS` 补 `initDays`，以便 `cleanRules` 为 0.11.0 之前无此字段的设置沿用当时的 `windowDays`。
 - **规则校验单点化**：默认值、上下限与合法化集中在 `src/rank.js`（`DEFAULT_RULES`、`LIMITS`、`cleanRules`）；读出时统一走 `cleanRules`，「恢复默认」只重置 `topN`、`minCount`、`tiers`、`baseColor`。
 - **标签渲染与显示开关**：`rank.js` `COLORS` 对应 `src/content/badge.css` `[data-xir-c]`（实心底色+固定字色，不随 X 主题变；弹窗复用该 CSS）。名次标签不带自定义悬浮详情，关系/`M` 小标保留原生 `title`。`showRank` / `showOut` / `showRel` / `showPlace` / `showSchedule` 随快照 `show` 字段下发。
