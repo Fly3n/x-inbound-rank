@@ -8,6 +8,13 @@
   const POST_OP = /^(CreateScheduledTweet|DeleteScheduledTweet)$/;
   const BOOT_INIT = 'ui:ch:i';
   const BOOT_READY = 'ui:ch:r';
+  // 在 document_start 缓存原生引用，避免页面脚本后续改写 CustomEvent / JSON / document 事件方法
+  const docAdd = document.addEventListener.bind(document);
+  const docRemove = document.removeEventListener.bind(document);
+  const docDispatch = document.dispatchEvent.bind(document);
+  const CE = CustomEvent;
+  const jsonParse = JSON.parse;
+  const jsonStringify = JSON.stringify;
   // 只有隔离脚本确认本页账号已开启后，才读取响应。请求发出时固定会话，切号后丢弃迟到的结果。
   let approval = null;
   let toIso = null;
@@ -20,7 +27,7 @@
   const emit = (payload) => {
     if (!toIso) return;
     try {
-      document.dispatchEvent(new CustomEvent(toIso, { detail: JSON.stringify(payload) }));
+      docDispatch(new CE(toIso, { detail: jsonStringify(payload) }));
     } catch {
       // 忽略
     }
@@ -28,26 +35,28 @@
   const onBoot = (event) => {
     if (toIso || typeof event?.detail !== 'string') return;
     try {
-      const ch = JSON.parse(event.detail);
+      const ch = jsonParse(event.detail);
       if (typeof ch?.a !== 'string' || typeof ch?.b !== 'string' || !ch.a || !ch.b) return;
       toIso = ch.b;
-      document.removeEventListener(BOOT_INIT, onBoot);
-      document.addEventListener(ch.a, (ev) => {
+      docRemove(BOOT_INIT, onBoot);
+      docAdd(ch.a, (ev) => {
         if (typeof ev?.detail !== 'string') return;
         try {
-          const msg = JSON.parse(ev.detail);
+          const msg = jsonParse(ev.detail);
           if (msg?.t === 's') approval = msg.s;
         } catch {
           // 忽略
         }
       });
+      // 通知隔离脚本握手已完成，立即摘掉 BOOT_READY 监听，防止页面脚本伪造握手探出通道名
+      emit({ ack: 1 });
     } catch {
       // 忽略
     }
   };
-  document.addEventListener(BOOT_INIT, onBoot);
+  docAdd(BOOT_INIT, onBoot);
   try {
-    document.dispatchEvent(new CustomEvent(BOOT_READY));
+    docDispatch(new CE(BOOT_READY));
   } catch {
     // 忽略
   }

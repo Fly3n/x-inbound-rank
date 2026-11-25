@@ -160,10 +160,25 @@ const XIRRel = (() => {
   };
 
   if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.addEventListener && typeof chrome !== 'undefined') {
+    let readyArmed = true;
+    const onReady = () => {
+      disarmReady();
+      sendBoot();
+      pushSession(lastSessionMsg);
+    };
+    const disarmReady = () => {
+      if (!readyArmed) return;
+      readyArmed = false;
+      document.removeEventListener(BOOT_READY, onReady);
+    };
     document.addEventListener(toIso, (e) => {
       if (typeof e?.detail !== 'string') return;
       let data;
       try { data = JSON.parse(e.detail); } catch { return; }
+      if (data?.ack === 1) {
+        disarmReady();
+        return;
+      }
       if (!data?.s) return;
       const current = api.session();
       if (!current || data.s.userId !== current.userId || data.s.activation !== current.activation) return;
@@ -217,11 +232,6 @@ const XIRRel = (() => {
         // 结构对不上就当没看到
       }
     });
-    const onReady = () => {
-      document.removeEventListener(BOOT_READY, onReady);
-      sendBoot();
-      pushSession(lastSessionMsg);
-    };
     document.addEventListener(BOOT_READY, onReady);
     sendBoot();
 

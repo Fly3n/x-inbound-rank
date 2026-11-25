@@ -74,6 +74,12 @@ test('页面仅旁听已启用会话（走私有随机通道、零 window.postMe
     }
     await flush();
 
+    // P2-1: 无论哪种加载顺序，握手完成后 BOOT_READY 监听已摘除，页面脚本重放 ui:ch:r 拿不到随机通道名
+    const leaked = [];
+    doc.addEventListener('ui:ch:i', (e) => leaked.push(e.detail));
+    doc.dispatchEvent(new globals.CustomEvent('ui:ch:r'));
+    assert.equal(leaked.length, 0, `${order}: 握手完成后页面脚本伪造 ui:ch:r 不得再泄露通道名`);
+
     const fetchResponse = {
       status: 200, headers: new Map(),
       clone() {
