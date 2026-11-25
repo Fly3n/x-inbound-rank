@@ -7,6 +7,7 @@ import {
   COLOR_NAMES, SHOW_KEYS, STORAGE_WATCH,
   pad, fmtDay, fmtShortDay, fmtTime, fullTime, windowLabel,
   jobText, readSummary, formatDurationLabel, suggestFetchWindow, stepRuleValue,
+  fmtCompactTime, latestOf, inTaskPhase, outTaskState,
   buildCsv, buildBoardExportRows, buildAllExportRows,
 } from './popup-helpers.js';
 
@@ -175,8 +176,32 @@ function render() {
   return drawing;
 }
 
+// draw 只负责取数据并按区块分发；每个 render* 只管自己那一块 DOM，改哪块界面就找哪个函数。
 async function draw() {
   const g = await call('getState');
+  renderAccountPicker(g);
+  if (!view.account) return banners([]);
+
+  const { handle, userId } = g.accounts[view.account];
+  const disableAccount = $('disableAccount');
+  disableAccount.textContent = `关闭 ${handle ? `@${handle}` : `用户 ID ${userId}`} 的 X 友`;
+  disableAccount.dataset.account = view.account;
+
+  const s = await call('getAccountState', { account: view.account });
+  if (s.error) return banners([['warn', s.error]]);
+  const rules = s.settings;
+  const isSession = g.online.includes(view.account);
+  renderBanners(s, isSession);
+  renderTabs(s);
+
+  const outState = outTaskState(s.cursor.out);
+  await renderBoardPage(s, rules, { handle, isSession, outState });
+  renderDataSettings(s, rules, { isSession, outState });
+  renderRuleSettings(rules);
+}
+
+/** 账号下拉与「开启 X 友」引导；决定 view.account。 */
+function renderAccountPicker(g) {
   const handles = Object.keys(g.accounts);
   const inactivePage = !!g.active && !g.active.account;
   if (view.selected === undefined || (view.selected ? !g.accounts[view.selected] : !inactivePage)) {
@@ -190,7 +215,6 @@ async function draw() {
   view.account = view.selected;
   view.activationUserId = inactivePage ? g.active.userId : null;
 
-  const items = [];
   $('bind').hidden = !!view.account;
   $('bindBtn').hidden = !inactivePage;
   $('bindStatus').textContent = inactivePage
@@ -203,36 +227,31 @@ async function draw() {
   if (inactivePage) accountOptions.unshift(el('option', { value: '', selected: !view.account, textContent: g.active.handle ? `@${g.active.handle}（未开启）` : '当前账号（未开启）' }));
   $('account').hidden = accountOptions.length < 2;
   $('account').replaceChildren(...accountOptions);
+}
 
-  if (!view.account) return banners(items);
-
-  const { handle, userId } = g.accounts[view.account];
-  const disableAccount = $('disableAccount');
-  disableAccount.textContent = `关闭 ${handle ? `@${handle}` : `用户 ID ${userId}`} 的 X 友`;
-  disableAccount.dataset.account = view.account;
-
-  const s = await call('getAccountState', { account: view.account });
-  if (s.error) return banners([['warn', s.error]]);
-  const rules = s.settings;
-  const isSession = g.online.includes(view.account);
+function renderBanners(s, isSession) {
+  const items = [];
   if (!isSession) items.push(['warn', '此账号没有可用的 X 页面。打开此账号的 X 页面后即可旁听收集或手动更新。']);
   if (s.domWarning) items.push(['warn', 'X 页面结构可能变了，暂时无法显示时间线标签。']);
   if (s.alert) items.push(['err', `${fmtTime(s.alert.at)} ${s.alert.message}`]);
   banners(items);
+}
 
+function renderTabs(s) {
   // 还没有任何数据时先落在设置页，那里有启动按钮
   view.tab ??= s.db.in.count || s.job ? 'board' : 'settings';
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === view.tab);
   $('view-board').hidden = view.tab !== 'board';
   $('view-settings').hidden = view.tab !== 'settings';
+}
 
-  // 榜单页
+/** 榜单页：保存期限提示、「我回别人」待处理提示、汇总句、任务行与名单。 */
+async function renderBoardPage(s, rules, { handle, isSession, outState }) {
   const { rows, people, replies } = await call('getBoard', { account: view.account });
   const out = s.cursor.out;
   const label = windowLabel(rules.windowDays);
   const outHasData = s.db.out.count > 0 || !!out?.lastAt;
   Object.assign(view, { rows, rules, eventCount: s.db.in.count, outCountable: outHasData });
-  const lbIn = s.cursor.lastBackfill;
 
   // 保存期限：最早的数据存满 80 天时挂红字提示先导出；第一次清理之后数据每天滚动清，改成一行小字
   const oldest = Math.min(s.db.in.from ?? Infinity, s.db.out.from ?? Infinity);
@@ -248,14 +267,7 @@ async function draw() {
   if (inOldest) $('shortLine').textContent = `本机最早只有 ${fmtDay(inOldest)} 的数据，榜单按已有的算。`;
 
   // 「我回别人」这份数据的状态：设置页总是显示；榜单页只在需要用户处理时提一句
-  const outBad = out?.message || '';
-  const running = out?.running && Date.now() - out.running.at < 120000 ? out.running : null; // 超过两分钟没动静就当它已经停了
-  const outPhase = running ? '进行中' : out?.status === 'queued' ? '排队中'
-    : out?.status === 'need_tpl' ? '等待回复页' : out?.status === 'waiting_tab' ? '等待 X 页面'
-    : out?.resume && out.status !== 'error' ? '等待续读' : '';
-  const outPending = !!outPhase || out?.fullFor === 0 && out?.status !== 'error';
-  const outProgress = running ? `进行中，本轮已读 ${running.pages} 页。`
-    : outPhase ? `${outPhase}。` : '';
+  const { progress: outProgress, error: outBad } = outState;
   $('outIssue').textContent = outBad + (out?.limitReached && out?.attemptCoverTs ? ` 实际最早读到 ${fmtDay(out.attemptCoverTs)}。` : '');
   $('outIssue').hidden = !outBad;
   view.handle = handle;
@@ -279,29 +291,24 @@ async function draw() {
   if (unfinished) $('jobLine').textContent = `别人回我 · ${jobText(job)}`;
   await loadDetail();
   renderList();
+}
 
-  // 设置页：数据
+/** 设置页「数据」区：补历史任务控制、两路最近读取/旁听、补读建议与按钮、旁听与显示开关。 */
+function renderDataSettings(s, rules, { isSession, outState }) {
+  const out = s.cursor.out;
+  const lbIn = s.cursor.lastBackfill;
+  const job = s.job;
   $('jobStatus').hidden = !job || job.status === 'done';
   if (job) $('jobStatus').textContent = jobText(job);
   $('pause').hidden = !(job && ['running', 'waiting_tab'].includes(job.status)) && !(job && job.status === 'paused' && job.auto);
   $('resume').hidden = !(job && (job.status === 'error' || (job.status === 'paused' && !job.auto)));
   $('jobControls').hidden = $('jobStatus').hidden;
-  const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
-    : job?.status === 'paused' ? '已暂停' : '';
+  const inPhase = inTaskPhase(job);
   $('resume').disabled = !isSession;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const inboundTapAt = s.cursor.inLastTapAt || null;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
   const outboundTapAt = s.cursor.outLastTapAt || null;
-  const fmtCompactTime = (ts) => {
-    if (!ts) return '未读取';
-    const d = new Date(ts);
-    const nowD = new Date();
-    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    const sameDay = d.getFullYear() === nowD.getFullYear() && d.getMonth() === nowD.getMonth() && d.getDate() === nowD.getDate();
-    return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
-  };
-  const latestOf = (...vals) => Math.max(0, ...vals.map((v) => v || 0)) || null;
   const inTapTag = { All: '全部', Mentions: '提及', Verified: '已认证' }[s.cursor.inLastTapCounts?.timeline] || '';
   const outTapTag = s.cursor.outLastTapCounts?.source === 'replies_timeline' ? '回复栏' : s.cursor.outLastTapCounts?.source === 'create_tweet' ? '发帖' : '';
   $('inLastAt').textContent = fmtCompactTime(latestOf(inboundAt, inboundTapAt));
@@ -330,11 +337,13 @@ async function draw() {
   $('tapOutEnabled').checked = rules.tapOutEnabled;
   $('fetchInBtn').disabled = !isSession || !!inPhase || updatingNow;
   $('fetchInBtn').textContent = updatingNow ? '补读中…' : inPhase ? `别人回我（${inPhase}）` : '补读 [别人回我]';
-  $('fetchOutBtn').disabled = !isSession || outPending || updatingOutNow;
-  $('fetchOutBtn').textContent = updatingOutNow ? '补读中…' : outPhase ? `我回别人（${outPhase}）` : '补读 [我回别人]';
+  $('fetchOutBtn').disabled = !isSession || outState.pending || updatingOutNow;
+  $('fetchOutBtn').textContent = updatingOutNow ? '补读中…' : outState.phase ? `我回别人（${outState.phase}）` : '补读 [我回别人]';
   for (const k of SHOW_KEYS) $(k).checked = rules[k];
+}
 
-  // 设置页：口径与颜色
+/** 设置页「口径与颜色」区。 */
+function renderRuleSettings(rules) {
   setValue($('topN'), rules.topN);
   setValue($('minCount'), rules.minCount);
   renderTiers(rules);

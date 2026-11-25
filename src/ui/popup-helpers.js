@@ -95,3 +95,34 @@ export function buildAllExportRows(inbound, outAll) {
   ].sort((x, y) => y.ts - x.ts);
   return [['类型', '时间', '对方名字', '对方 ID（我回别人时是帖子的主人）', '是否计入统计', '内容摘要', '链接'], ...rows.map((r) => r.line)];
 }
+
+/** 紧凑的「上次读到」时间：今天只显示时分，其余显示月/日 时分。 */
+export function fmtCompactTime(ts, now = Date.now()) {
+  if (!ts) return '未读取';
+  const d = new Date(ts);
+  const nowD = new Date(now);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const sameDay = d.getFullYear() === nowD.getFullYear() && d.getMonth() === nowD.getMonth() && d.getDate() === nowD.getDate();
+  return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+/** 几个时间戳里最新的一个；都没有返回 null。 */
+export const latestOf = (...vals) => Math.max(0, ...vals.map((v) => v || 0)) || null;
+
+/** 「别人回我」补历史任务当前阶段的短文案；没在跑返回空串。 */
+export const inTaskPhase = (job) => (job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
+  : job?.status === 'paused' ? '已暂停' : '');
+
+/** 「我回别人」手动任务的状态：阶段文案、是否有未结束任务、进度句与报错句。running 超过两分钟没动静当它已停。 */
+export function outTaskState(out, now = Date.now()) {
+  const running = out?.running && now - out.running.at < 120000 ? out.running : null;
+  const phase = running ? '进行中' : out?.status === 'queued' ? '排队中'
+    : out?.status === 'need_tpl' ? '等待回复页' : out?.status === 'waiting_tab' ? '等待 X 页面'
+      : out?.resume && out.status !== 'error' ? '等待续读' : '';
+  return {
+    phase,
+    pending: !!phase || (out?.fullFor === 0 && out?.status !== 'error'),
+    progress: running ? `进行中，本轮已读 ${running.pages} 页。` : phase ? `${phase}。` : '',
+    error: out?.message || '',
+  };
+}

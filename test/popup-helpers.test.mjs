@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   jobText, readSummary, formatDurationLabel, suggestFetchWindow, stepRuleValue,
   buildCsv, buildBoardExportRows, buildAllExportRows,
+  fmtCompactTime, latestOf, inTaskPhase, outTaskState,
 } from '../src/ui/popup-helpers.js';
 
 test('jobText 与 readSummary：展示进行中、等待、完成与精确扫描/新增条数', () => {
@@ -66,4 +67,23 @@ test('导出构造：CSV BOM 转义、榜单导出和全量导出过滤 own 并�
   assert.equal(all[2][4], '是');
   assert.equal(all[3][4], '否');
   assert.equal(all[4][3], '用户编号 4', '入站记录缺少 handle 时导出数字 ID 而非空 @');
+});
+
+test('弹窗状态纯函数：紧凑时间、最新时间、两路任务阶段', () => {
+  const now = new Date(2026, 10, 21, 10, 0, 0).getTime();
+  assert.equal(fmtCompactTime(null, now), '未读取');
+  assert.equal(fmtCompactTime(new Date(2026, 10, 21, 8, 5).getTime(), now), '今天 08:05');
+  assert.equal(fmtCompactTime(new Date(2026, 10, 19, 23, 9).getTime(), now), '11/19 23:09');
+  assert.equal(latestOf(null, 3, undefined, 7), 7);
+  assert.equal(latestOf(null, undefined), null);
+  assert.equal(inTaskPhase({ status: 'paused' }), '已暂停');
+  assert.equal(inTaskPhase(null), '');
+  assert.deepEqual(outTaskState({ running: { at: now - 1000, pages: 2 }, status: 'reading' }, now),
+    { phase: '进行中', pending: true, progress: '进行中，本轮已读 2 页。', error: '' });
+  // 超过两分钟没动静的 running 不算进行中
+  assert.equal(outTaskState({ running: { at: now - 200_000, pages: 2 }, status: 'reading' }, now).phase, '');
+  assert.deepEqual(outTaskState({ status: 'error', message: '失败', resume: { cursor: 'x' } }, now),
+    { phase: '', pending: false, progress: '', error: '失败' });
+  assert.equal(outTaskState({ status: 'ok', fullFor: 0 }, now).pending, true);
+  assert.equal(outTaskState({ status: 'need_tpl' }, now).progress, '等待回复页。');
 });
