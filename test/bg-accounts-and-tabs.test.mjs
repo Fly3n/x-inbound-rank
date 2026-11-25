@@ -32,12 +32,15 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
 
   const newest = feed[0].id_str;
   for (const account of ['me', 'uid-9']) {
-    store[`settings:${account}`] = { fetchEnabled: true };
-    store[`cursor:${account}`] = { syncedId: newest, nextIncAt: 0 };
+    store[`cursor:${account}`] = { syncedId: newest, nextIncAt: 0, lastManualAt: 0 };
   }
+  // 启动时不安排任何后台定时抓取闹钟，并清理旧版遗留的非手动闹钟
+  await chrome.alarms.create('inc:me', { when: Date.now() + 1_000 });
+  await chrome.alarms.create('out:uid-9', { when: Date.now() + 1_000 });
   await listeners.startup();
-  assert.ok(alarms['inc:me']);
-  assert.ok(alarms['inc:uid-9']);
+  assert.equal(alarms['inc:me'], undefined, '启动后清理旧版非手动入站闹钟');
+  assert.equal(alarms['inc:uid-9'], undefined, '启动后不安排后台定时入站闹钟');
+  assert.equal(alarms['out:uid-9'], undefined, '启动后清理旧版非手动出站闹钟');
   const originalSend = chrome.tabs.sendMessage;
   const requested = [];
   let mismatch = false;
@@ -65,17 +68,14 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
   };
   try {
     await pageSend({ type: 'xir:tpl', kind: 'mentions', url: 'https://x.com/i/api/graphql/Q9/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D' }, 9);
-    const both = Promise.all([fire('inc', 'me'), fire('inc', 'uid-9')]);
-    await until(() => requested.length === 1, '第一份请求开始');
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(requested.length, 1, '同时到期时只有一份请求占用读取锁');
-    const firstUid = requested[0][1];
-    const waiting = firstUid === '1' ? 'uid-9' : 'me';
-    assert.ok(alarms[`inc:${waiting}`], '未拿到锁的账号保留自己的闹钟');
+    const firstManual = send({ type: 'updateNowWithReceipt', account: 'me' });
+    await until(() => requested.length === 1, '第一份手动请求开始');
+    const secondManual = await send({ type: 'updateNowWithReceipt', account: 'uid-9' });
+    assert.match(secondManual.error, /已有读取任务正在运行/, '同时手动更新时只有一份占用全局读取锁');
+    assert.equal(requested.length, 1);
     releaseFirst();
-    await both;
-    assert.ok(requested.every(([, uid]) => uid === firstUid), '一轮读取期间不串到另一个账号');
-    await fire('inc', waiting);
+    assert.equal((await firstManual).ok, true);
+    assert.equal((await send({ type: 'updateNowWithReceipt', account: 'uid-9' })).ok, true);
     assert.deepEqual([...new Set(requested.map(([id, uid]) => `${id}:${uid}`))].sort(), ['1:1', '9:9']);
     assert.ok(store['cursor:me'].inLastReadAt);
     assert.ok(store['cursor:uid-9'].inLastReadAt);
@@ -103,25 +103,24 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     assert.equal(scheduledCalls(), before429 + 1, '退避期内不再发请求');
     assert.equal(store['cursor:uid-9'].rate429Count, 1, '账号级连续 429 计数从一处累加');
 
-    // 一个入口被限流后，回填和出站也不能绕过去继续请求
+    // 一个入口被限流后，回填、手动更新和出站也不能绕过去继续请求
     const blockedBefore = requested.length;
     assert.match((await send({ type: 'syncOutNow', account: 'uid-9' })).error, /退避/);
     assert.match((await send({ type: 'startBackfill', account: 'uid-9' })).error, /退避/);
-    await fire('inc', 'uid-9');
-    await fire('out', 'uid-9');
+    store['cursor:uid-9'].lastManualAt = 0;
+    assert.match((await send({ type: 'updateNowWithReceipt', account: 'uid-9' })).error, /退避/);
     assert.equal(requested.length, blockedBefore, '退避期内所有主动读取都不发请求');
 
     // 退避只属于当前账号，不能把另一个正常账号一起封住
     const meCalls = requested.filter(([, uid]) => uid === '1').length;
-    Object.assign(store['cursor:me'], { nextIncAt: 0, lastAttemptAt: 0, rateUntil: 0, rate429Count: 0 });
-    await fire('inc', 'me');
-    assert.ok(requested.filter(([, uid]) => uid === '1').length > meCalls, '另一个账号照常更新');
+    Object.assign(store['cursor:me'], { nextIncAt: 0, lastManualAt: 0, lastAttemptAt: 0, rateUntil: 0, rate429Count: 0 });
+    assert.equal((await send({ type: 'updateNowWithReceipt', account: 'me' })).ok, true);
+    assert.ok(requested.filter(([, uid]) => uid === '1').length > meCalls, '另一个账号照常手动更新');
 
     await send({ type: 'setAccountEnabled', enabled: false, account: 'uid-9' });
     assert.equal(alarms['inc:uid-9'], undefined);
-    assert.ok(alarms['inc:me'], '关闭另一账号不影响旧账号任务');
     const before = requested.length;
-    await fire('inc', 'uid-9');
+    assert.match((await send({ type: 'updateNowWithReceipt', account: 'uid-9' })).error, /尚未开启/);
     assert.equal(requested.length, before);
     assert.ok(store['cursor:uid-9'].inLastReadAt, '关闭账号保留已读进度');
     const logs = (await readDiagnostics()).filter((r) => r.account === 'me');

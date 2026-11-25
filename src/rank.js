@@ -34,7 +34,8 @@ export function outboundInitCovered(out, initDays, now = Date.now()) {
 export const DEFAULT_RULES = {
   windowDays: 7, // 榜单范围
   initDays: 7, // 补历史范围
-  outAutoSync: false, // 我回别人默认走浏览器实时旁听，不定时刷个人回复栏
+  tapInEnabled: true, // 旁听收集 [别人回我]（默认开启，零主动请求）
+  tapOutEnabled: true, // 旁听收集 [我回别人]（默认开启，零主动请求）
   topN: 100,
   minCount: 2,
   tiers: [
@@ -76,7 +77,8 @@ export function cleanRules(raw = {}) {
         : INIT_WINDOWS.includes(raw.windowDays)
           ? raw.windowDays
           : d.initDays,
-    outAutoSync: raw.outAutoSync === true,
+    tapInEnabled: raw.tapInEnabled !== false,
+    tapOutEnabled: raw.tapOutEnabled !== false,
     topN: clampInt(raw.topN, LIMITS.topN, d.topN),
     minCount: clampInt(raw.minCount, LIMITS.minCount, d.minCount),
     tiers,

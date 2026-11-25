@@ -148,8 +148,8 @@ export async function kvGet(key, fallback = null) {
 export const kvSet = (key, value) => chrome.storage.local.set({ [key]: value });
 export const kvRemove = (keys) => chrome.storage.local.remove(keys);
 
-// 设置 = 抓取总开关 + 榜单规则（统计窗口、名次上限、最少次数、颜色档位，定义和默认值在 rank.js）
-export const DEFAULT_SETTINGS = { fetchEnabled: true, ...DEFAULT_RULES };
+// 设置 = 旁听收集开关 + 榜单规则（统计窗口、名次上限、最少次数、颜色档位，定义和默认值在 rank.js）
+export const DEFAULT_SETTINGS = { ...DEFAULT_RULES };
 
 export const keys = {
   accounts: 'accounts', // { [dataKey]: { handle, userId, enabled, activation } }
@@ -170,5 +170,5 @@ export const keys = {
 export async function getSettings(a) {
   // initDays 不从默认值补：0.11.0 之前存的设置没有它，cleanRules 会沿用当时的统计范围
   const raw = { ...DEFAULT_SETTINGS, initDays: undefined, ...(await kvGet(keys.settings(a), {})) };
-  return { fetchEnabled: raw.fetchEnabled !== false, ...cleanRules(raw) };
+  return cleanRules(raw);
 }

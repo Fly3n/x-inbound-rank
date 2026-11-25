@@ -1,7 +1,7 @@
-// 后台闹钟管理：清理、重试与按账号恢复待续任务。
-import { kvGet, keys, getSettings } from '../db.js';
+// 后台闹钟管理：清理、重试与按账号恢复未完成的手动续读任务（不再安排后台定时自动抓取）。
+import { kvGet, keys } from '../db.js';
 import {
-  enabledAccount, alarmFor, now, inAutoSlot, nextAutoSlot, nextOutAutoSlot,
+  enabledAccount, alarmFor, now,
   JOB_ALARM, INC_ALARM, OUT_ALARM,
 } from './runtime.js';
 
@@ -20,8 +20,6 @@ export async function retryAlarm(kind, account) {
 
 export async function recoverAlarms(account) {
   if (!await enabledAccount(account)) return;
-  const settings = await getSettings(account);
-  const autoEnabled = settings.fetchEnabled;
   const cur = await kvGet(keys.cursor(account), {});
   if (cur.circuitBroken) return;
   const job = await kvGet(keys.job(account));
@@ -33,22 +31,19 @@ export async function recoverAlarms(account) {
   if (['running', 'waiting_tab'].includes(job?.status) || (job?.status === 'paused' && job.auto)) {
     await ensure(JOB_ALARM, job.nextAt || 0);
   }
-  // 免初始化直启：只要开启自动更新（或有未完成的手动续读）且未撞安全上限，就安排入站增量
-  if ((autoEnabled || cur.incResume?.manual) && !cur.incLimitReached) {
-    const nextIncAt = cur.nextIncAt > now() && inAutoSlot(cur.nextIncAt) ? cur.nextIncAt : nextAutoSlot();
-    await ensure(INC_ALARM, nextIncAt);
+  // 仅恢复用户手动触发且尚未读完的分段续读；清理旧版遗留的非手动自动抓取闹钟
+  if (cur.incResume?.manual && !cur.incLimitReached) {
+    await ensure(INC_ALARM, cur.nextIncAt || 0);
+  } else {
+    await chrome.alarms.clear(alarmFor(INC_ALARM, account));
   }
-  // 进行中的手动出站同步独立续跑；日常低频定时仅在显式开启 outAutoSync 时安排（新账号免补历史即可排期）
-  if (out?.status === 'need_tpl' && !out.limitReached && await kvGet(keys.tpl(account))) {
+  const outPending = !!(out?.manualTask && !out.limitReached && (out.fullFor === 0 || out.resume || out.retryAt || ['queued', 'waiting_tab', 'reading'].includes(out.status)));
+  if (out?.manualTask && out.status === 'need_tpl' && !out.limitReached && await kvGet(keys.tpl(account))) {
     await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + 3000 });
-  } else if (!out?.limitReached && out?.status !== 'need_tpl') {
+  } else if (outPending && out?.status !== 'need_tpl') {
     const retryAt = Math.max(out?.resume?.nextAt || 0, out?.retryAt || 0);
-    const pending = !!(out && (out.fullFor === 0 || out.resume || ['queued', 'waiting_tab', 'reading'].includes(out.status)));
-    if (pending) await ensure(OUT_ALARM, retryAt);
-    else if (autoEnabled && settings.outAutoSync) {
-      const saved = out?.nextAutoAt;
-      const routine = saved > now() && inAutoSlot(saved) ? saved : nextOutAutoSlot();
-      await ensure(OUT_ALARM, routine);
-    }
+    await ensure(OUT_ALARM, retryAt);
+  } else {
+    await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
   }
 }

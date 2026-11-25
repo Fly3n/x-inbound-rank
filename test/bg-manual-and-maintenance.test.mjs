@@ -42,7 +42,7 @@ test('快照字段补齐、双向明细、状态汇总与全量导出', async ()
 });
 
 test('立即更新收据、冷却、退避与切后台续读', { timeout: 20_000 }, async () => {
-  await setSettings({ fetchEnabled: false });
+  await setSettings({ tapInEnabled: false, tapOutEnabled: false });
 
   store['cursor:me'].inLastReadAt = 1;
   store['cursor:me'].out.lastReadAt = 1;
@@ -58,11 +58,9 @@ test('立即更新收据、冷却、退避与切后台续读', { timeout: 20_000
     },
   });
   const firstManualCalls = server.calls - before;
-  assert.ok(firstManualCalls > 0, '自动更新关闭时，立即更新仍会读取别人回我');
+  assert.ok(firstManualCalls > 0, '旁听开关关闭时，手动立即更新仍会读取别人回我');
   assert.equal(server.outCalls, beforeOut, '别人回我立即更新不顺带请求我回别人');
-  const nextAutoGap = store['cursor:me'].nextIncAt - Date.now();
-  assert.ok(nextAutoGap >= 8 * 60 * 60_000 && nextAutoGap <= 13.5 * 60 * 60_000 + 1_000,
-    '立即更新后顺延到下一个自动时段');
+  assert.equal(alarms['inc:me'], undefined, '手动更新完成后不排下次后台定时闹钟');
   assert.equal(alarms['inc:me'], undefined, '自动更新关闭时不安排自动读取');
   assert.equal(await count(), countBeforeManual, '这次没有新增入站记录');
   assert.ok(store['cursor:me'].inLastReadAt > 1, '零新增仍记录成功读取时间');
@@ -174,7 +172,8 @@ test('清空数据并发保护与 90 天过期数据滚动清理', async () => {
   assert.deepEqual(await boardRows(), []);
   assert.equal(store['snap:me'], undefined);
   assert.equal(store['cursor:me'], undefined);
-  assert.equal(store['settings:me'].fetchEnabled, false);
+  assert.equal(store['settings:me'].tapInEnabled, false);
+  assert.equal(store['settings:me'].tapOutEnabled, false);
 
   // 过期清理：只留最近 90 天，一天最多清一次；清掉过数据就记下（弹窗据此不再挂红字提示）
   const old = (id, daysAgo) => ({ id, actor_id: '2', actor_handle: 'Fan', actor_name: 'Fan', actor_avatar: '', created_at: Date.now() - daysAgo * env.DAY, conversation_id: '1', root_mine: true });
@@ -187,11 +186,10 @@ test('清空数据并发保护与 90 天过期数据滚动清理', async () => {
   assert.equal(await count(), 4, '24 小时内不重复清');
 });
 
-test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自动抓取、不自动恢复，仅用户手动重开后解除', async () => {
-  await setSettings({ fetchEnabled: true, outAutoSync: true });
+test('账号异常硬熔断：命中 403/验证锁定信号、连续 3 次 429 或 HTML 挑战立即中止读取、不自动恢复，仅手动重试后解除', async () => {
+  await setSettings({ tapInEnabled: true, tapOutEnabled: true });
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/FetchScheduledTweets?variables=%7B%7D' });
-  assert.ok(alarms['inc:me'], '熔断前已安排入站自动闹钟');
-  assert.ok(alarms['out:me'], '熔断前已安排出站自动闹钟');
+  store['cursor:me'] = { ...store['cursor:me'], syncedId: '1000', lastManualAt: 0 };
 
   const realSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (id, msg) => {
@@ -206,16 +204,13 @@ test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自
     return realSend(id, msg);
   };
   try {
-    store['cursor:me'].nextIncAt = 0;
-    store['cursor:me'].lastAttemptAt = 0;
-    await fire('inc');
+    const res = await send({ type: 'updateNowWithReceipt', account: 'me' });
+    assert.match(res.error, /熔断/);
   } finally {
     chrome.tabs.sendMessage = realSend;
   }
 
-  // 立即硬熔断：自动更新与低频同步均强制关闭、全部闹钟清空、写红字告警与熔断标记
-  assert.equal(store['settings:me'].fetchEnabled, false, '熔断后强制关闭自动更新');
-  assert.equal(store['settings:me'].outAutoSync, false, '熔断后强制关闭低频同步');
+  // 立即硬熔断：全部闹钟清空、写红字告警与熔断标记（不影响旁听收集开关）
   assert.equal(alarms['inc:me'], undefined, '熔断后清空入站闹钟');
   assert.equal(alarms['out:me'], undefined, '熔断后清空出站闹钟');
   assert.equal(alarms['job:me'], undefined, '熔断后清空补历史闹钟');
@@ -233,28 +228,27 @@ test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自
   const schedRes = await pageSend({ type: 'xir:scheduled:sync', force: false });
   assert.equal(schedRes.status, 'error');
   assert.match(schedRes.message, /熔断/);
-  assert.deepEqual([server.calls, server.outCalls], beforeNoAuto, '熔断期间任何自动路径均不得发请求');
-  assert.equal(alarms['inc:me'], undefined, '熔断期间页面上线与 tick 不重新排期');
+  assert.deepEqual([server.calls, server.outCalls], beforeNoAuto, '熔断期间任何路径均不得发请求');
+  assert.equal(alarms['inc:me'], undefined, '熔断期间页面上线与 tick 不排期');
 
-  // 仅用户手动重新开启自动更新后才解除熔断并恢复排期
-  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
-  assert.equal(store['cursor:me'].circuitBroken, undefined, '用户手动重开后解除熔断标记');
+  // 仅用户显式手动触发读取时解除熔断并正常执行
+  store['cursor:me'].lastManualAt = 0;
+  const recovered = await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.equal(recovered.ok, true);
+  assert.equal(store['cursor:me'].circuitBroken, undefined, '用户手动更新后解除熔断标记');
   assert.equal(store['alert:me'], undefined, '解除熔断后清除告警');
-  assert.ok(alarms['inc:me'], '用户手动重开后恢复自动排期');
 
-  // 连续 3 次 429 升级为硬熔断（前 2 次正常指数退避，第 3 次直接停抓）
+  // 连续 3 次 429 升级为硬熔断（前 2 次正常指数退避，第 3 次直接硬熔断）
   store['cursor:me'].rate429Count = 2;
   store['cursor:me'].rateUntil = 0;
   store['cursor:me'].nextIncAt = 0;
-  store['cursor:me'].lastAttemptAt = 0;
+  store['cursor:me'].lastManualAt = 0;
   server.fail429Once = true;
-  await fire('inc');
-  assert.equal(store['settings:me'].fetchEnabled, false, '连续第 3 次 429 升级硬熔断并关闭自动更新');
-  assert.equal(store['cursor:me'].circuitBroken.code, 429);
+  await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.equal(store['cursor:me'].circuitBroken.code, 429, '连续第 3 次 429 升级硬熔断');
   assert.equal(alarms['inc:me'], undefined);
 
   // 非 5xx HTML 挑战页（not_json）同样触发硬熔断
-  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true } });
   const realSendHtml = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (id, msg) => {
     if (msg.type === 'xir:fetch') {
@@ -266,11 +260,10 @@ test('账号异常硬熔断：命中 403/验证锁定信号立即关停全部自
     store['cursor:me'].rateUntil = 0;
     store['cursor:me'].rate429Count = 0;
     store['cursor:me'].nextIncAt = 0;
-    store['cursor:me'].lastAttemptAt = 0;
-    await fire('inc');
+    store['cursor:me'].lastManualAt = 0;
+    await send({ type: 'updateNowWithReceipt', account: 'me' });
   } finally {
     chrome.tabs.sendMessage = realSendHtml;
   }
-  assert.equal(store['settings:me'].fetchEnabled, false, 'HTML 挑战页落入 not_json 也触发硬熔断');
-  assert.equal(store['cursor:me'].circuitBroken.code, 'html_challenge');
+  assert.equal(store['cursor:me'].circuitBroken.code, 'html_challenge', 'HTML 挑战页落入 not_json 触发硬熔断');
 });

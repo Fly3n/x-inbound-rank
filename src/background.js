@@ -43,7 +43,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await maybePrune(account);
       await refreshSnapshot(account);
       await recoverAlarms(account);
-      await maybeIncremental(account);
     }));
     queueBridgePush();
     return;

@@ -69,7 +69,7 @@ export const handlers = {
     await kvSet(template(account), { url, at: now() });
     if (template === keys.tpl) {
       const out = (await kvGet(keys.cursor(account), {})).out;
-      if (out?.status === 'need_tpl' && !out.limitReached) {
+      if (out?.manualTask && out.status === 'need_tpl' && !out.limitReached) {
         await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + 3000 });
       }
     } else if (template === keys.tplMentions) {
@@ -81,8 +81,6 @@ export const handlers = {
         if (job?.needTpl && job.status === 'error') {
           await kvSet(keys.job(account), { ...job, status: 'running', needTpl: false, message: '' });
           await chrome.alarms.create(alarmFor(JOB_ALARM, account), { when: now() + 3000 });
-        } else if ((await getSettings(account)).fetchEnabled) {
-          await recoverAlarms(account);
         }
       }
     }
@@ -110,9 +108,6 @@ export const handlers = {
   async 'xir:active'(msg, sender) {
     const account = await senderAccount(msg, sender);
     if (!account) return {};
-    await maybeIncremental(account);
-    const settings = await getSettings(account);
-    if (settings.fetchEnabled && settings.outAutoSync) await syncOut(account);
     return { ok: true };
   },
   'xir:scheduled:tap': handleScheduledTap,
@@ -221,24 +216,8 @@ export const handlers = {
     if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '榜单范围只能是 7 天、15 天、30 天、2 个月或 3 个月' };
     if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '补历史范围只能是 7 天或 15 天' };
     const merged = { ...(await getSettings(account)), ...patch };
-    const next = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) }; // 其余越界的值夹回范围
+    const next = cleanRules(merged); // 其余越界的值夹回范围
     await kvSet(keys.settings(account), next);
-    if (!next.fetchEnabled) {
-      // 开关只停日常自动读取；正在跑的手动初始化和立即更新仍可续完。
-      const cur = await kvGet(keys.cursor(account), {});
-      if (!cur.incResume?.manual) await chrome.alarms.clear(alarmFor(INC_ALARM, account));
-      const out = cur.out;
-      const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);
-      if (!outPending) await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
-    } else {
-      if (patch.fetchEnabled === true) await clearAccountCircuit(account);
-      if ('outAutoSync' in patch && !next.outAutoSync) {
-        const out = (await kvGet(keys.cursor(account), {})).out;
-        const outPending = !!out?.resume || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(out?.status);
-        if (!outPending) await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
-      }
-      if ('fetchEnabled' in patch || ('outAutoSync' in patch && next.outAutoSync)) await recoverAlarms(account);
-    }
     await refreshSnapshot(account); // 口径或颜色变了，标签立刻跟着变
     queueBridgePush();
     return { ok: true };

@@ -77,7 +77,7 @@
             <option value="15">最近半个月</option>
           </select>
         </div>
-        <div class="tip" id="tip-backfill" hidden><p>按需一次性把过去 7 天或半个月的历史补齐；不补也能靠自动更新和发帖旁听慢慢攒。仅在 X 页面前台可见时继续，切走自动暂停。</p></div>
+        <div class="tip" id="tip-backfill" hidden><p>按需手动拉取过去 7 天或半个月的历史补齐；不补也能靠日常「旁听收集」慢慢攒。仅在 X 页面前台可见时继续，切走自动暂停。</p></div>
 
         <div class="src">
           <div class="row between">
@@ -114,28 +114,28 @@
 
         <div class="row between sync-row">
           <span class="inline-opt sync-opt">
-            <label class="line"><input type="checkbox" id="fetchEnabled"> 自动更新 <span class="scope">[别人回我]</span></label>
-            <button class="q" data-tip="tip-in-auto" aria-label="自动更新（别人回我）说明">?</button>
+            <label class="line"><input type="checkbox" id="tapInEnabled"> 旁听收集 <span class="scope">[别人回我]</span></label>
+            <button class="q" data-tip="tip-in-auto" aria-label="旁听收集（别人回我）说明">?</button>
             <span class="read-at" id="inLastAt"></span>
           </span>
           <button id="updateNow" aria-describedby="updateStatus">立即更新</button>
         </div>
         <div class="tip" id="tip-in-auto" hidden>
-          <p>在电脑浏览 X「通知 / 提及」页时已通过页面旁听自动入库（零主动请求，关掉此开关即纯旁听模式）。开启后每天上午（08:00–11:30）和晚间（18:00–22:30）在当前 X 页面可见且近 5 分钟有真实交互时各随机补扫一次，发现重叠即停（单轮上限 48 页）。右侧「立即更新」手动增量更新别人回我（10 分钟冷却）。</p>
+          <p>开启后，你在电脑浏览 X「通知 / 提及」页时自动旁听并去重记录回复（零主动请求，后台不再定时抓接口）。右侧「立即更新」为按需手动拉取（10 分钟冷却），仅在你主动点击时发请求。</p>
           <p id="inReadSummary"></p>
         </div>
         <p class="hint" id="updateStatus" role="status"></p>
 
         <div class="row between sync-row">
           <span class="inline-opt sync-opt">
-            <label class="line"><input type="checkbox" id="outAutoSync"> 低频同步 <span class="scope">[我回别人]</span></label>
-            <button class="q" data-tip="tip-out-auto" aria-label="低频同步（我回别人）说明">?</button>
+            <label class="line"><input type="checkbox" id="tapOutEnabled"> 旁听收集 <span class="scope">[我回别人]</span></label>
+            <button class="q" data-tip="tip-out-auto" aria-label="旁听收集（我回别人）说明">?</button>
             <span class="read-at" id="outLastAt"></span>
           </span>
           <button id="updateOutNow" aria-describedby="updateOutStatus">立即更新</button>
         </div>
         <div class="tip" id="tip-out-auto" hidden>
-          <p>电脑端发送回复及浏览本人主页「回复」栏已通过页面旁听实时记录（零主动请求）；勾选此项仅用于手机端回复兜底，在自动更新开启时每 2 天抽一次同步，与旁听记录按帖子去重。右侧「立即更新」手动增量同步我回别人（10 分钟冷却，首次无需先补历史）。</p>
+          <p>开启后，你在电脑发回复或浏览本人主页「回复」栏时自动旁听并去重记录（零主动请求，后台不再定时抓接口）。右侧「立即更新」为按需手动拉取（10 分钟冷却），可用于补齐手机端回复。</p>
           <p id="outReadSummary"></p>
         </div>
         <p class="hint" id="updateOutStatus" role="status"></p>
@@ -207,10 +207,10 @@
         <details class="sub-fold">
           <summary>口径与风险说明</summary>
           <ul>
-            <li><b>别人回我</b>：根帖是我的帖子，直接回复我的每一条都算（不分层），决定榜单排名。</li>
-            <li><b>我回别人</b>：只算我直接评论对方根帖的第一层。默认在电脑浏览器发帖时实时旁听（零主动请求），可选每 2 天低频同步兜底手机端。</li>
-            <li><b>安全节律</b>：主动读取仅在本地时间 08:00–24:00 且 X 页面前台可见时执行；自动更新额外要求近 5 分钟内有真实页面交互，发现重叠即停（单轮最多 48 页）、连续随机停顿。</li>
-            <li><b>隐私与风险</b>：全程只读 GET，不点赞、不关注、不发帖，数据仅存本机（滚动保留最近 90 天）。使用网页内部接口仍无法保证风险为零。</li>
+            <li><b>别人回我</b>：根帖是我的帖子，直接回复我的每一条都算（不分层），决定榜单排名。默认在浏览 X「通知 / 提及」页时零请求旁听收集。</li>
+            <li><b>我回别人</b>：只算我直接评论对方根帖的第一层。默认在电脑浏览器发回复及浏览本人「回复」栏时零请求旁听收集。</li>
+            <li><b>零后台定时抓取</b>：后台不再自动定时请求 X 接口；仅在你手动点「立即更新」或「补历史」时在 08:00–24:00 前台按需读取，命中账号异常或连续限流立即硬熔断。</li>
+            <li><b>隐私与风险</b>：全程只读 GET，不点赞、不关注、不发帖，数据仅存本机（滚动保留最近 90 天）。手动拉取使用网页内部接口仍无法保证风险为零。</li>
           </ul>
         </details>
       </details>

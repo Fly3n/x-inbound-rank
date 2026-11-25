@@ -41,10 +41,10 @@ test('我回别人：首次手动初始化、模板获取、范围切换与规�
   assert.equal((await boardRows())[0].replied, 2, '7 天内我在 Fan 的帖子下回复了 2 次（回 Other 的那条不算他的）');
   assert.equal(store['snap:me'].users.fan.replied, 2, '读完后时间线标签也带上');
 
-  // 下一次自动时间未到时，遗留闹钟也不会发请求；若启用低频同步，间距至少 48 小时
+  // 读完后不安排任何后台定时闹钟，空触发也不会再发请求
   await fire('out');
   assert.equal(server.outCalls, 3);
-  assert.ok(store['cursor:me'].out.nextAutoAt - Date.now() >= 48 * 60 * 60_000);
+  assert.equal(alarms['out:me'], undefined, '手动补历史完成后不安排后台定时闹钟');
 
   // 榜单范围切到半个月、一个月：榜单和标签快照立刻按新范围重算，不发请求
   assert.ok((await setWindow(45)).error, '只接受 7、15、30、60、90');
@@ -74,30 +74,24 @@ test('我回别人：首次手动初始化、模板获取、范围切换与规�
   assert.equal(server.calls, callsBeforeSwitch, '改设置不发请求');
 });
 
-test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界', { timeout: 20_000 }, async () => {
-  // 默认方案 A（outAutoSync: false）下：就算次日窗口到了也不自动发回复栏请求；手动开启方案 B 才定时同步
+test('改初始化范围重读、模板 404 恢复与限流/分页边界（纯手动触发）', { timeout: 20_000 }, async () => {
+  // 无后台定时出站同步：fire('out') / xir:active / tick 均零请求
   let outBefore = server.outCalls;
-  store['cursor:me'].out.nextAutoAt = 0;
   await fire('out');
-  assert.equal(server.outCalls, outBefore, '默认关闭低频同步时，自动闹钟不请求回复栏');
-
-  await setSettings({ initDays: 15, outAutoSync: true });
-  // 即使开启方案 B，页面亮屏但超过 5 分钟无真实交互也不自动请求；恢复交互后由 xir:active 顺带唤醒
-  idleTabs.add(1);
-  idleTabs.add(4);
-  outBefore = server.outCalls;
-  store['cursor:me'].out.nextAutoAt = 0;
-  await fire('out');
-  assert.equal(server.outCalls, outBefore, '出站自动同步同样受 5 分钟真实交互门控约束');
-  idleTabs.delete(1);
-  idleTabs.delete(4);
-  store['cursor:me'].nextIncAt = Date.now() + 60 * 60_000; // 入站未到期，只测试出站被交互唤醒
   await pageSend({ type: 'xir:active' }, 1);
+  await listeners.alarm({ name: 'tick' });
+  assert.equal(server.outCalls, outBefore, '后台不再自动请求回复栏');
+
+  await setSettings({ initDays: 15 });
+  // 手动「立即更新」我回别人：增量读取最新 1 页
+  store['cursor:me'].out.lastManualAt = 0;
+  const incRes = await send({ type: 'updateOutNowWithReceipt', account: 'me' });
+  assert.equal(incRes.ok, true);
   assert.equal(server.outCalls - outBefore, 1);
   assert.equal((await boardRows())[0].replied, 4);
   assert.equal(store['cursor:me'].out.lastFullDays, 7, '还是上次初始化的范围');
 
-  // 手动点「初始化」：不管上次读到哪，按范围重新读一遍
+  // 手动点「补历史」：不管上次读到哪，按范围重新读一遍
   outBefore = server.outCalls;
   await send({ type: 'syncOutNow', account: 'me' });
   const redone = () => server.outCalls - outBefore === 3 && store['cursor:me'].out.fullFor === 15;
@@ -105,11 +99,11 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual([server.outCalls - outBefore, store['cursor:me'].out.fullFor], [3, 15], '手动初始化我回别人');
 
-  // X 换了接口参数（404）：丢掉旧地址，保留已有计数；页面提供新地址后继续
-  store['cursor:me'].out.nextAutoAt = 0;
+  // X 换了接口参数（404）：丢掉旧地址，保留已有计数；页面提供新地址后继续未完的手动任务
+  store['cursor:me'].out.lastManualAt = 0;
   const realSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (id, msg) => msg.type === 'xir:ping' ? realSend(id, msg) : { ok: false, status: 404, userId: '1' };
-  await fire('out');
+  await send({ type: 'updateOutNowWithReceipt', account: 'me' });
   chrome.tabs.sendMessage = realSend;
   assert.equal(store['cursor:me'].out.status, 'need_tpl');
   assert.equal(store['tpl:replies:me'], undefined);
@@ -117,23 +111,26 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
   delete alarms['out:me'];
   store['tpl:replies:me'] = { url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D', at: Date.now() };
   await listeners.startup();
-  assert.ok(alarms['out:me'], '模板已存在但闹钟丢失时，恢复闹钟');
+  assert.ok(alarms['out:me'], '手动任务待模板且模板已存在时，恢复闹钟续完');
   delete alarms['out:me'];
   delete store['tpl:replies:me'];
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D' });
-  assert.ok(alarms['out:me'], '页面提供新地址后安排续读');
+  assert.ok(alarms['out:me'], '页面提供新地址后安排续完当前手动任务');
   await fire('out');
   assert.deepEqual([store['cursor:me'].out.status, server.opened, server.outUrls.at(-1).includes('QID2')], ['ok', [], true]);
   assert.equal(store['cursor:me'].out.lastFullDays, 15, '记下完整读完成的时间和范围');
+  assert.equal(alarms['out:me'], undefined, '手动任务完成后清空闹钟');
 
-  // 出站 429 指数退避
+  // 出站 429 指数退避（手动任务中途遇 429 后退避续读）
   {
     const savedCursor = structuredClone(store['cursor:me']);
     const savedNow = env.getNow();
     try {
-      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, rate429Count: 0 });
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, lastManualAt: 0, rate429Count: 0 });
+      store['cursor:me'].rateUntil = 0;
+      store['cursor:me'].rate429Count = 0;
       server.outFail429Once = true;
-      await fire('out');
+      await send({ type: 'updateOutNowWithReceipt', account: 'me' });
       const first = store['cursor:me'].out;
       assert.equal(first.rate429Count, 1);
       assert.equal(store['cursor:me'].rate429Count, 1);
@@ -159,10 +156,10 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
     const savedCursor = structuredClone(store['cursor:me']);
     const beforeCover = savedCursor.out.coverTs;
     try {
-      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, syncedId: '9000' });
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, resume: null, lastManualAt: 0, syncedId: '9000' });
       const runSync = store['cursor:me'].out.syncedId;
       server.repeatOutCursor = true;
-      await fire('out');
+      await send({ type: 'updateOutNowWithReceipt', account: 'me' });
       const out = store['cursor:me'].out;
       assert.equal(out.status, 'error');
       assert.match(out.message, /重复的翻页位置/);
@@ -183,13 +180,13 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
     try {
       const checkpoint = '9002';
       Object.assign(store['cursor:me'].out, {
-        status: 'ok', retryAt: 0, resume: null, nextAutoAt: 0, manualTask: false,
+        status: 'ok', retryAt: 0, resume: null, lastManualAt: 0, manualTask: false,
         syncedId: checkpoint, fullFor: 15, schema: 2,
       });
       store['cursor:me'].rateUntil = 0;
       store['cursor:me'].rate429Count = 0;
       server.earlyEndOutAfterFirstPage = true;
-      await fire('out');
+      await send({ type: 'updateOutNowWithReceipt', account: 'me' });
       const out = store['cursor:me'].out;
       assert.equal(out.status, 'error');
       assert.match(out.message, /提前结束/);
@@ -197,11 +194,11 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
       assert.equal(out.lastAt, beforeLastAt, '提前结束不冒充读完');
       assert.equal(out.coverTs, beforeCover, '提前结束不冒充覆盖');
 
-      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, nextAutoAt: 0, resume: null, syncedId: checkpoint });
+      Object.assign(store['cursor:me'].out, { status: 'ok', retryAt: 0, lastManualAt: 0, resume: null, syncedId: checkpoint });
       store['cursor:me'].rateUntil = 0;
       store['cursor:me'].rate429Count = 0;
       server.emptyOutOnce = true;
-      await fire('out');
+      await send({ type: 'updateOutNowWithReceipt', account: 'me' });
       assert.match(store['cursor:me'].out.message, /提前结束/, '首屏空页也不能当成接上旧位置');
     } finally {
       store['cursor:me'] = savedCursor;
@@ -210,32 +207,10 @@ test('改初始化范围重读、模板 404 恢复与限流/分页/窗口边界'
       server.emptyOutOnce = false;
     }
   }
-
-  // 自动出站的等待/续读不能绕到上午、晚间窗口之外
-  {
-    const savedOut = structuredClone(store['cursor:me'].out);
-    const savedNow = env.getNow();
-    try {
-      env.setNow(new Date(2026, 10, 21, 11, 40, 0, 0).getTime());
-      store['cursor:me'].out = {
-        ...savedOut, status: 'queued', retryAt: 0, nextAutoAt: 0,
-        resume: { cursor: '2', topId: '9005', rounds: 0, full: false, stopAt: '9000', nextAt: 0 },
-      };
-      const before = server.outCalls;
-      await fire('out');
-      assert.equal(server.outCalls, before, '自动出站等待期间不绕过窗口');
-      assert.ok(alarms['out:me'].when >= new Date(2026, 10, 21, 18, 0, 0, 0).getTime(), '改到晚间窗口再继续');
-      assert.equal(store['cursor:me'].out.resume.nextAt, alarms['out:me'].when);
-    } finally {
-      env.setNow(savedNow);
-      store['cursor:me'].out = savedOut;
-      delete alarms['out:me'];
-    }
-  }
 });
 
 test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeout: 20_000 }, async () => {
-  await setSettings({ fetchEnabled: true, initDays: 15 });
+  await setSettings({ initDays: 15 });
   Object.assign(store['cursor:me'].out, { coverTs: null, lastFullDays: null, lastFullAt: null });
   const removedOldest = outFeed.pop(); // 剩下最早一条是 13 天前，会在 15 天前到底
   let outBefore = server.outCalls;
@@ -258,7 +233,7 @@ test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeou
     ...Array.from({ length: 12 }, (_, i) => mine(String(9005 - (i % 6)), 1 + i, '2')));
   store['cursor:me'].out = {
     ...savedOutState,
-    status: 'ok', message: null, limitReached: null, attemptCoverTs: null,
+    status: 'ok', message: null, limitReached: null, attemptCoverTs: null, manualTask: true,
     coverTs: null,
     fullFor: 0, initDays: 15, targetTs: Date.now() - 20 * env.DAY,
     resume: { cursor: '0', topId: null, rounds: 44, full: true, stopAt: null, nextAt: 0 },
@@ -275,23 +250,20 @@ test('出站列表先到底与达到单次轮数上限的覆盖边界', { timeou
     assert.equal(afterLimit.syncedId, savedOutState.syncedId, '没读完时接续点不动');
     const callsAtLimit = server.outCalls;
     await fire('out');
-    assert.equal(server.outCalls, callsAtLimit, '达到上限后自动闹钟不再继续读');
+    assert.equal(server.outCalls, callsAtLimit, '达到上限后闹钟不再继续读');
     assert.equal(store['cursor:me'].out.status, 'error');
     delete alarms['out:me'];
     await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
-    assert.equal(alarms['out:me'], undefined, '达到上限后页面上线也不再安排自动读取');
-    await send({ type: 'setSettings', account: 'me', patch: { outAutoSync: false } });
-    await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
-    assert.equal(alarms['out:me'], undefined, '关闭低频同步且无上限挂起时不安排自动出站闹钟');
+    assert.equal(alarms['out:me'], undefined, '达到上限后页面上线也不再安排读取');
   } finally {
     outFeed.splice(0, outFeed.length, ...savedFeed);
     store['cursor:me'].out = savedOutState;
   }
 });
 
-test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留日志且不动手机端游标', { timeout: 20_000 }, async () => {
+test('方案 A 默认浏览器回复旁听：受 tapOutEnabled 控制，实时入库、去重、错构留日志且不动手机端游标', { timeout: 20_000 }, async () => {
   assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
-  await setSettings({ fetchEnabled: true, outAutoSync: false, windowDays: 15 });
+  await setSettings({ tapOutEnabled: true, windowDays: 15 });
   await send({ type: 'startBackfill', account: 'me' });
   await until(() => job()?.status === 'done' || job()?.nextAt, '重新放入入站基线');
   while (job()?.status === 'running') await fireJob();
@@ -356,6 +328,21 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
   });
   assert.ok(store['lastPostAt:me'] > 0, '原创主帖应刷新发帖排期的主帖缓冲时间');
 
+  // 关闭「旁听收集 [我回别人]」：停止收集回复，但原创主帖仍刷新发帖排期缓冲
+  await setSettings({ tapOutEnabled: false });
+  assert.deepEqual(await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9905', replyTo: '50', toUid: '2', toHandle: 'Fan', conv: '50', text: '@Fan 关掉旁听不记' }),
+  }), { skipped: 'tap_disabled' });
+  assert.equal((await boardRows())[0].replied, 1, '关闭旁听收集后回复不再写入');
+  delete store['lastPostAt:me'];
+  await pageSend({
+    type: 'xir:outbound:tap',
+    text: createPayload({ id: '9906', replyTo: null, toUid: null, toHandle: null, conv: '9906', text: '再发一条主帖' }),
+  });
+  assert.ok(store['lastPostAt:me'] > 0, '关闭我回别人旁听收集不影响原创主帖排期缓冲');
+  await setSettings({ tapOutEnabled: true });
+
   // 3. 异常载荷记入后台诊断日志，不污染数据
   await pageSend({ type: 'xir:outbound:tap', text: JSON.stringify({ data: { unexpected: true } }) });
   const logs = (await readDiagnostics()).filter((e) => e.account === 'me');
@@ -371,35 +358,28 @@ test('方案 A 默认浏览器回复旁听：实时入库、去重、错构留�
   assert.equal(server.outCalls, beforeOutCalls);
 });
 
-test('我回别人免补历史直接建起点：新账号开启低频同步与独立立即更新均最多读 2 页建立接续点', { timeout: 20_000 }, async () => {
+test('我回别人免补历史手动建起点：新账号点独立立即更新最多读 2 页建立接续点，不排自动闹钟', { timeout: 20_000 }, async () => {
   assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
   await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
   delete alarms['out:me'];
-  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true, outAutoSync: true } });
-  assert.ok(alarms['out:me'], '未补过历史的新账号开启低频同步时应自动安排出站闹钟');
+  await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+  assert.equal(alarms['out:me'], undefined, '新账号不安排后台自动出站闹钟');
 
-  const beforeCalls = server.outCalls;
-  await fire('out');
-  const out = store['cursor:me'].out;
-  assert.equal(out.status, 'ok');
-  assert.ok(out.syncedId, '首次免补历史读取后应建立接续点');
-  assert.equal(out.lastFullAt, undefined, '免补历史建起点不冒充已完成补历史');
-  assert.ok(server.outCalls - beforeCalls >= 1 && server.outCalls - beforeCalls <= 2, '首次建起点最多读 2 页');
-
-  // 未补历史的新账号直接点「我回别人」独立立即更新，也能直接建立接续点
-  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
-  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
   const beforeManualOut = server.outCalls;
   const manualOut = await send({ type: 'updateOutNowWithReceipt', account: 'me' });
   assert.equal(manualOut.ok, true);
   assert.ok(manualOut.readAt.outbound > 0);
-  assert.ok(store['cursor:me'].out.syncedId, '手动立即更新也能为新账号建立出站接续点');
-  assert.ok(server.outCalls - beforeManualOut >= 1 && server.outCalls - beforeManualOut <= 2);
+  const out = store['cursor:me'].out;
+  assert.equal(out.status, 'ok');
+  assert.ok(out.syncedId, '手动立即更新也能为新账号建立出站接续点');
+  assert.equal(out.lastFullAt, undefined, '免补历史建起点不冒充已完成补历史');
+  assert.ok(server.outCalls - beforeManualOut >= 1 && server.outCalls - beforeManualOut <= 2, '首次建起点最多读 2 页');
+  assert.equal(alarms['out:me'], undefined, '手动更新结束后不安排下次自动闹钟');
 });
 
-test('本人主页「回复」栏旁听入库：只收本人主页、静默跳过他人主页、不动 cur.out 且记录诊断日志', { timeout: 20_000 }, async () => {
+test('本人主页「回复」栏旁听收集：受 tapOutEnabled 控制、只收本人主页、静默跳过他人主页、不动 cur.out 且记录诊断日志', { timeout: 20_000 }, async () => {
   assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
-  await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false, outAutoSync: false, windowDays: 15 } });
+  await send({ type: 'setSettings', account: 'me', patch: { tapOutEnabled: true, windowDays: 15 } });
   const beforeOutCalls = server.outCalls;
   const nowStr = new Date(Date.now()).toUTCString();
   const repliesBody = JSON.stringify({
@@ -455,13 +435,19 @@ test('本人主页「回复」栏旁听入库：只收本人主页、静默跳�
     },
   });
 
+  // 0. 关闭「旁听收集 [我回别人]」时不收本人主页回复栏
+  const ownUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '1', count: 20, cursor: 'CUR1' }));
+  await send({ type: 'setSettings', account: 'me', patch: { tapOutEnabled: false } });
+  assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 200, text: repliesBody }), { skipped: 'tap_disabled' });
+  assert.equal((await send({ type: 'exportAll', account: 'me' })).out.length, 0);
+  await send({ type: 'setSettings', account: 'me', patch: { tapOutEnabled: true } });
+
   // 1. 浏览他人主页回复栏：静默跳过，不入库、不写噪点日志
   const otherUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '999', count: 20 }));
   assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: otherUrl, status: 200, text: repliesBody }), { skipped: 'other_user' });
   assert.equal((await send({ type: 'exportAll', account: 'me' })).out.length, 0);
 
   // 2. 浏览本人主页回复栏：入库直评 + own 自回复，记录 cur.outLastTapAt，绝不碰 cur.out
-  const ownUrl = 'https://x.com/i/api/graphql/QID/UserRepliesTimeline?variables=' + encodeURIComponent(JSON.stringify({ userId: '1', count: 20, cursor: 'CUR1' }));
   assert.deepEqual(await pageSend({ type: 'xir:replies:tap', url: ownUrl, status: 200, text: repliesBody }), { ok: true, added: 2, parsed: 2 });
   assert.equal(server.outCalls, beforeOutCalls, '回复栏旁听零主动请求');
   assert.equal(store['cursor:me']?.out, undefined, '回复栏旁听绝不伪造 cur.out 同步游标');

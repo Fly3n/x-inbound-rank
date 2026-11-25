@@ -25,7 +25,7 @@ test('账号升级迁移、网页提及脱敏证据与入站回填完整流程',
   await listeners.installed();
   assert.deepEqual(await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' }), { account: 'me' });
   assert.equal(server.calls, 0, '识别账号时不立刻向 X 发请求');
-  assert.ok(env.alarms['inc:me'], '免补历史也能直接安排日常增量闹钟');
+  assert.equal(env.alarms['inc:me'], undefined, '不再安排后台定时自动抓取闹钟');
   assert.equal(store.accounts.me.enabled, true);
   assert.equal(store.accounts.seen.enabled, false);
 
@@ -163,7 +163,7 @@ test('重新初始化去重、防重入与重复游标异常', { timeout: 20_000
 
 test('入站和出站可信空列表初始化', { timeout: 20_000 }, async () => {
   assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
-  await env.setSettings({ initDays: 7, fetchEnabled: false });
+  await env.setSettings({ initDays: 7 });
   store['tpl:replies:me'] = { url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D', at: Date.now() };
 
   const emptySavedInbound = feed.splice(0, feed.length);
@@ -175,17 +175,16 @@ test('入站和出站可信空列表初始化', { timeout: 20_000 }, async () =>
     assert.equal(store['cursor:me'].syncedId, '0');
     assert.equal(inboundInitCovered(store['cursor:me'].lastBackfill, store['cursor:me'].syncedId, 7), true);
 
-    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: true, outAutoSync: true } });
     await send({ type: 'syncOutNow', account: 'me' });
     await until(() => store['cursor:me'].out?.lastAt, '空的我回别人初始化完成');
     const emptyOut = store['cursor:me'].out;
     assert.deepEqual([emptyOut.reachedEnd, emptyOut.coverTs, emptyOut.syncedId], [true, null, '0']);
     assert.equal(outboundInitCovered(emptyOut, 7), true);
 
-    emptyOut.nextAutoAt = 0;
-    await fire('out');
-    assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId], ['ok', '0'], '可信空列表的日常增量不会报假异常');
-    await send({ type: 'setSettings', account: 'me', patch: { fetchEnabled: false } });
+    store['cursor:me'].out.lastManualAt = 0;
+    const manualRes = await send({ type: 'updateOutNowWithReceipt', account: 'me' });
+    assert.equal(manualRes.ok, true);
+    assert.deepEqual([store['cursor:me'].out.status, store['cursor:me'].out.syncedId], ['ok', '0'], '可信空列表的手动增量不会报假异常');
   } finally {
     feed.splice(0, feed.length, ...emptySavedInbound);
     outFeed.splice(0, outFeed.length, ...emptySavedOutbound);

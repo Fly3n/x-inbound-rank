@@ -214,7 +214,7 @@ async function draw() {
   if (s.error) return banners([['warn', s.error]]);
   const rules = s.settings;
   const isSession = g.online.includes(view.account);
-  if (!isSession) items.push(['warn', '此账号没有可用的 X 页面。重新连上后，定时更新会继续。']);
+  if (!isSession) items.push(['warn', '此账号没有可用的 X 页面。打开此账号的 X 页面后即可旁听收集或手动更新。']);
   if (s.domWarning) items.push(['warn', 'X 页面结构可能变了，暂时无法显示时间线标签。']);
   if (s.alert) items.push(['err', `${fmtTime(s.alert.at)} ${s.alert.message}`]);
   banners(items);
@@ -335,8 +335,8 @@ async function draw() {
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
     () => {},
   );
-  $('fetchEnabled').checked = rules.fetchEnabled;
-  $('outAutoSync').checked = !!rules.outAutoSync;
+  $('tapInEnabled').checked = rules.tapInEnabled;
+  $('tapOutEnabled').checked = rules.tapOutEnabled;
   $('updateNow').disabled = !isSession || updatingNow;
   $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
   $('updateOutNow').disabled = !isSession || updatingOutNow;
@@ -535,8 +535,8 @@ $('keepExport').addEventListener('click', () => $('exportAll').click());
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));
 for (const k of SHOW_KEYS) $(k).addEventListener('change', (e) => saveRules({ [k]: e.target.checked }));
-$('fetchEnabled').addEventListener('change', (e) => saveRules({ fetchEnabled: e.target.checked }));
-$('outAutoSync').addEventListener('change', (e) => saveRules({ outAutoSync: e.target.checked }));
+$('tapInEnabled').addEventListener('change', (e) => saveRules({ tapInEnabled: e.target.checked }));
+$('tapOutEnabled').addEventListener('change', (e) => saveRules({ tapOutEnabled: e.target.checked }));
 $('clear').addEventListener('click', () => {
   if (confirm(`清空此账号在本机的全部回复数据（别人回我、我回别人）？榜单和时间线标签都会消失，不可恢复。`)) act('clearData');
 });

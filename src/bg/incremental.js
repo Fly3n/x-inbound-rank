@@ -1,4 +1,4 @@
-// 别人回我：日常通知页/提及页零请求旁听入库、增量读取、重叠即停与免补历史直启。
+// 别人回我：日常通知页/提及页零请求旁听收集，以及按需手动「立即更新」增量拉取（无后台定时抓取）。
 import { putEvents, kvGet, keys, getSettings } from '../db.js';
 import { DAY_MS, KEEP_DAYS } from '../rank.js';
 import { record } from '../diagnostics.js';
@@ -7,12 +7,12 @@ import { mentionsEvidence } from '../x/mentions-diagnostics.js';
 import { parseNotificationsTap, ParseError, idGt } from '../x/parser.js';
 import {
   PACE, EMPTY_SYNC_ID, INC_ALARM, alarmFor,
-  enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, inAutoSlot, nextActiveAt, nextAutoSlot,
+  enabledAccount, now, sleep, humanIncDelay, humanRestDelay, inActiveHours, nextActiveAt,
   serviceWait, tryAcquireBusy, releaseBusy, updateCursor,
-  refreshSnapshot, flushSnapshot, setAlert, scheduleNextInc, completeIncRound, armInc,
+  refreshSnapshot, flushSnapshot, setAlert, completeIncRound,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
-import { hasVisiblePage, hasActivePage, senderAccount } from './accounts.js';
+import { hasVisiblePage, senderAccount } from './accounts.js';
 import { pull } from './transport.js';
 
 /** 旁听浏览器通知页 / 提及页响应，零请求写入入站库并记录完整诊断（不推 syncedId，不遮蔽未翻到的漏项）。 */
@@ -20,6 +20,8 @@ export async function handleInboundTap(msg, sender) {
   const account = await senderAccount(msg, sender);
   const { url, status, metadata, text } = msg;
   if (!account || typeof text !== 'string' || text.length > 8_000_000) return {};
+  const settings = await getSettings(account);
+  if (!settings.tapInEnabled) return { skipped: 'tap_disabled' };
   const tabId = sender?.tab?.id ?? null;
   const validStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
   let body = null;
@@ -108,29 +110,27 @@ export async function handleInboundTap(msg, sender) {
   return { ok: true, added, parsed: parsed.events.length, timeline };
 }
 
-/** 自动任务未到期返回 null，手动任务受阻时返回具体原因。 */
+/** 仅允许手动触发或续完进行中的手动增量；无后台定时自动抓取。 */
 async function incDue(account, manual) {
   const blocked = (error) => manual ? { error } : null;
   if (!await enabledAccount(account)) return blocked('请先为此账号开启插件。');
   const settings = await getSettings(account);
   const cur = await kvGet(keys.cursor(account), {});
-  if (!manual && !cur.incResume && cur.incLimitReached) return null;
+  const resumeManual = !!cur.incResume?.manual;
+  if (!manual && !resumeManual) return null;
+  if (!manual && cur.incLimitReached) return null;
   const job = await kvGet(keys.job(account));
   if (job && ['running', 'waiting_tab'].includes(job.status)) return blocked('「别人回我」正在补历史，请等它结束。');
   if (job?.status === 'paused' && job.auto) return blocked(job.message || '补历史正在退避，稍后自动继续。');
   const t = now();
-  if (!inActiveHours(t)) return blocked('读取只在每天 08:00–24:00 进行，夜间不自动发请求。');
+  if (!inActiveHours(t)) return blocked('读取只在每天 08:00–24:00 进行，夜间不发请求。');
   const until = Math.max(cur.rateUntil || 0, cur.serviceRetries ? cur.nextIncAt || 0 : 0);
   if (until > t) return blocked(`接口正在退避，请在 ${new Date(until).toLocaleTimeString()} 后再试。`);
   if (t < (cur.nextIncAt || 0)) {
     if (cur.incResume) return blocked('上一轮还有数据等待续读，插件会自动继续。');
     if (!manual) return null;
   }
-  const resumeManual = !!cur.incResume?.manual;
-  if (!manual && !resumeManual && !settings.fetchEnabled) return null;
-  if (!manual && !resumeManual && !inAutoSlot(t)) return null;
-  if (!manual && !cur.incResume && !cur.serviceRetries && t - (cur.lastAttemptAt || 0) < PACE.incRetryGapMs) return null;
-  if (!manual && !(await (resumeManual ? hasVisiblePage(account) : hasActivePage(account)))) return null;
+  if (!manual && !(await hasVisiblePage(account))) return null;
   return { account, cur, settings };
 }
 
@@ -189,30 +189,37 @@ export async function maybeIncremental(account, manual = false) {
       }
       if (!await enabledAccount(account)) return false;
       if (res.kind === 'no_tab') {
-        const when = nextActiveAt(now() + (cursor ? 60_000 : PACE.incRetryGapMs));
-        await updateCursor(account, (c) => saveResume(c, when));
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        if (cursor) {
+          const when = nextActiveAt(now() + 60_000);
+          await updateCursor(account, (c) => saveResume(c, when));
+          await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        }
         return false; // 没有本账号的 X 页面，等它重新连上
       }
       if (res.kind === 'outside_window') {
-        const when = nextActiveAt(now());
-        await updateCursor(account, (c) => saveResume(c, when));
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        if (cursor) {
+          const when = nextActiveAt(now());
+          await updateCursor(account, (c) => saveResume(c, when));
+          await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        }
         return { message: '已到夜间休息时间，明天 08:00 后继续。' };
       }
       if (res.kind === 'backoff') {
-        const when = Math.max(res.retryAt || 0, nextActiveAt(now() + PACE.incRetryGapMs));
-        await updateCursor(account, (c) => saveResume(c, when));
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        if (cursor) {
+          const when = Math.max(res.retryAt || 0, nextActiveAt(now() + PACE.incRetryGapMs));
+          await updateCursor(account, (c) => saveResume(c, when));
+          await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        }
         return { message: '账号正在限流退避，本轮没有继续发请求。' };
       }
       if (res.kind === 'tpl_bad') {
-        // 通知模板缺失或已过期：不再降级打废弃旧 REST，等待用户自行打开一次 X 通知页后自动恢复
+        // 通知模板缺失或已过期：不再降级打废弃旧 REST，等待用户自行打开一次 X 通知页后重试
         await updateCursor(account, (c) => {
           delete c.incResume;
         });
-        await setAlert(account, 'X 通知读取方式尚未就绪或已更新，请打开一次 X 的「通知」页，插件会自动恢复读取。');
-        return { message: '请打开一次 X 的「通知」页，插件会自动连接并继续读取。' };
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
+        await setAlert(account, 'X 通知读取方式尚未就绪或已更新，请打开一次 X 的「通知」页后再点立即更新。');
+        return { message: '请打开一次 X 的「通知」页，再点立即更新。' };
       }
       await updateCursor(account, (c) => {
         c.lastAttemptAt = now();
@@ -221,26 +228,29 @@ export async function maybeIncremental(account, manual = false) {
         const wait = serviceWait(cur.serviceRetries);
         const when = nextActiveAt(now() + wait);
         await updateCursor(account, (c) => {
-          c.nextIncAt = when;
+          if (cursor) saveResume(c, when);
+          else c.nextIncAt = when;
           c.serviceRetries = (c.serviceRetries || 0) + 1;
         });
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
-        await setAlert(account, `X 暂时不可用（HTTP ${res.status}），稍后重试`);
+        if (cursor) await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        await setAlert(account, `X 暂时不可用（HTTP ${res.status}），请稍后重试`);
         await record('retry_scheduled', { ...trace, source: 'incremental', status: res.status, waitMs: wait });
-        return { message: `别人回我读取失败（HTTP ${res.status}），已安排重试。` };
+        return { message: `别人回我读取失败（HTTP ${res.status}），请稍后重试。` };
       }
       if (res.kind === 'rate') {
-        await armInc(account, await updateCursor(account, (c) => {
-          const next = scheduleNextInc(c, now());
-          c.rateUntil = Math.max(c.rateUntil || 0, next, res.resetAt ? nextActiveAt(res.resetAt) : 0);
+        await updateCursor(account, (c) => {
+          delete c.incResume;
+          c.rateUntil = Math.max(c.rateUntil || 0, res.resetAt ? nextActiveAt(res.resetAt) : now() + PACE.backoffStartMs);
           c.nextIncAt = c.rateUntil;
-          return c.nextIncAt;
-        }));
-        await setAlert(account, '增量更新被 X 限流（429），本轮已放弃，下个周期再试');
+        });
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
+        await setAlert(account, '手动更新被 X 限流（429），本轮已停止，请退避结束后再试');
         return { message: '别人回我遇到限流，已退避。' };
       }
       if (res.kind === 'circuit_broken') return { error: res.message };
       if (res.kind === 'error') {
+        await updateCursor(account, (c) => { delete c.incResume; });
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
         await setAlert(account, res.message);
         return { error: res.message };
       }
@@ -249,13 +259,11 @@ export async function maybeIncremental(account, manual = false) {
       if (page === 0 && !resume) topId = p.newestId;
       const repeatedCursor = !!cursor && p.bottomCursor === cursor;
       if (repeatedCursor) {
-        const when = nextAutoSlot(nextActiveAt(now() + humanRestDelay(PACE.restMs)));
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'repeated_cursor', checkpoint: stopAt });
         await updateCursor(account, (c) => {
           delete c.incResume;
-          c.nextIncAt = when;
         });
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
         await setAlert(account, 'X 的提及列表返回了重复的翻页位置，本轮已停止；接续点没有前移。');
         return { error: '别人回我翻页异常，已停止本轮。' };
       }
@@ -278,13 +286,11 @@ export async function maybeIncremental(account, manual = false) {
       const endedBeforeCheckpoint = stopAt !== EMPTY_SYNC_ID && !overlapped &&
         (stopReason === 'empty_page' || stopReason === 'no_next_page');
       if (endedBeforeCheckpoint) {
-        const when = nextAutoSlot(now() + humanRestDelay(PACE.restMs));
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'ended_before_checkpoint', checkpoint: stopAt });
         await updateCursor(account, (c) => {
           delete c.incResume;
-          c.nextIncAt = when;
         });
-        await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
+        await chrome.alarms.clear(alarmFor(INC_ALARM, account));
         await setAlert(account, 'X 的提及列表在接上上次位置前提前结束，本轮已停止；接续点没有前移。');
         return { error: '别人回我列表提前结束，已停止本轮。' };
       }
@@ -298,47 +304,44 @@ export async function maybeIncremental(account, manual = false) {
     if (!caughtUp) {
       const rounds = (resume?.rounds || 0) + 1;
       if (rounds >= PACE.incMaxRounds) {
-        const when = nextAutoSlot(now());
         await updateCursor(account, (c) => {
           delete c.incResume;
           c.incLimitReached = true;
-          c.nextIncAt = when;
         });
         await chrome.alarms.clear(alarmFor(INC_ALARM, account));
         await setAlert(account, `本轮新增回复较多，已达到安全页数上限（${PACE.incMaxRounds * PACE.incPagesPerEvent} 页），请稍后手动更新或补读历史`);
-        await record('inc_limit_reached', { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, rounds, read: batch.read, added: batch.added });
+        await record('inc_limit_reached', { account, mode: 'inbound_manual', run, rounds, read: batch.read, added: batch.added });
         return { error: '别人回我本轮达到安全页数上限，已停止。' };
       }
       const when = nextActiveAt(now() + humanRestDelay(PACE.restMs));
       await updateCursor(account, (c) => {
         if ((c.syncedId || null) !== stopAt) return; // 读的过程中被补历史或清空改掉了
-        c.incResume = { cursor, topId, stopAt, api, manual: taskManual, startedAt: roundStartedAt, rounds, pages: (resume?.pages || 0) + pagesRead };
+        c.incResume = { cursor, topId, stopAt, api, manual: true, startedAt: roundStartedAt, rounds, pages: (resume?.pages || 0) + pagesRead };
         c.nextIncAt = when;
       });
       await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
       return { message: '别人回我已读完一批，等待续读。', deferred: true };
     }
     let nextSyncedId = stopAt;
-    const next = await updateCursor(account, (c) => {
+    await updateCursor(account, (c) => {
       if (!c.syncedId) c.syncedId = topId || EMPTY_SYNC_ID;
       else if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
       nextSyncedId = c.syncedId;
       delete c.incResume;
       delete c.serviceRetries;
       delete c.incLimitReached;
-      // 手动更新已经拿到最新数据，下一次自动更新顺延到下一个上午或晚间时段，避免当天再扫一遍。
-      return completeIncRound(c, roundStartedAt);
+      completeIncRound(c, roundStartedAt);
     });
+    await chrome.alarms.clear(alarmFor(INC_ALARM, account));
     await record('inc_round_end', {
       account,
-      mode: taskManual ? 'inbound_manual' : 'inbound_auto',
+      mode: 'inbound_manual',
       run,
       pages: (resume?.pages || 0) + pagesRead,
       read: batch.read,
       added: batch.added,
       syncedId: nextSyncedId,
     });
-    if ((await getSettings(account)).fetchEnabled) await armInc(account, next);
     return { ok: true };
   } finally {
     if (account) await flushSnapshot(account, true).catch(() => {});

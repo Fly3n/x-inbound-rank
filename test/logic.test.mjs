@@ -47,10 +47,11 @@ test('回复榜：名次上限可调，默认 100', () => {
 
 test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
   assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  assert.equal(DEFAULT_RULES.outAutoSync, false);
-  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', outAutoSync: true, showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
-  // 显示开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, initDays: 7, outAutoSync: true, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
+  assert.equal(DEFAULT_RULES.tapInEnabled, true);
+  assert.equal(DEFAULT_RULES.tapOutEnabled, true);
+  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', tapInEnabled: false, tapOutEnabled: 0, showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
+  // 布尔开关：只有明确写 false 才是关
+  assert.deepEqual(r, { windowDays: 7, initDays: 7, tapInEnabled: false, tapOutEnabled: true, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
   assert.equal(cleanRules({ topN: 3 }).topN, 10);
   assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
   assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);

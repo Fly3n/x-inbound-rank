@@ -71,7 +71,6 @@ async function finishJob(account, job, { reachedEnd }) {
     return completeBackfillRound(cur, now()); // 回填期间新来的回复留给下一次增量
   });
   await record('backfill_finished', { account, rangeDays: job.rangeDays, pages: job.pages, added: job.added, reachedEnd, oldestTs: job.oldestTs });
-  if ((await getSettings(account)).fetchEnabled) await armInc(account, next);
   await refreshSnapshot(account);
   queueBridgePush();
 }

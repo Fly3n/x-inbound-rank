@@ -30,7 +30,7 @@ const state = {
     [accountKey]: { handle: 'flynn_demo', userId: '10001', enabled: true, activation: 1 },
   },
   settings: {
-    [accountKey]: { fetchEnabled: true, ...DEFAULT_RULES },
+    [accountKey]: { ...DEFAULT_RULES },
   },
   inbound: [
     { id: '901', actor_id: '2001', actor_handle: 'alice', actor_name: 'Alice', actor_avatar: '', created_at: NOW - 2 * 3600_000, target_post_id: '10', conversation_id: '10', root_mine: true, text: '很认同这个拆解！' },
@@ -60,7 +60,7 @@ window.chrome = {
     getManifest: () => ({ version: ${JSON.stringify(version)} }),
     async sendMessage(msg) {
       const account = msg.account || accountKey;
-      const settings = state.settings[account] || { fetchEnabled: true, ...DEFAULT_RULES };
+      const settings = state.settings[account] || { ...DEFAULT_RULES };
       const cur = state.cursor[account] || {};
       switch (msg.type) {
         case 'getState':
@@ -77,7 +77,7 @@ window.chrome = {
           if ('windowDays' in msg.patch && !WINDOWS.includes(msg.patch.windowDays)) return { error: '无效的榜单范围' };
           if ('initDays' in msg.patch && !INIT_WINDOWS.includes(msg.patch.initDays)) return { error: '无效的初始化范围' };
           const merged = { ...settings, ...msg.patch };
-          state.settings[account] = { fetchEnabled: merged.fetchEnabled !== false, ...cleanRules(merged) };
+          state.settings[account] = cleanRules(merged);
           for (const fn of listeners) fn({ [\`settings:\${account}\`]: { newValue: state.settings[account] } }, 'local');
           return { ok: true };
         }

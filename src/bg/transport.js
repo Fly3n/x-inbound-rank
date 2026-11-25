@@ -1,5 +1,5 @@
 // 经由 x.com 标签页发请求、统一限流退避、账号异常硬熔断与提及拉取入库。
-import { putEvents, kvGet, kvSet, kvRemove, keys, getSettings } from '../db.js';
+import { putEvents, kvGet, kvSet, kvRemove, keys } from '../db.js';
 import { record } from '../diagnostics.js';
 import { queueBridgePush } from '../bridge.js';
 import { parseMentions, detectAccountAnomaly, ParseError, idGt } from '../x/parser.js';
@@ -11,12 +11,8 @@ import {
 import { clearAccountAlarms } from './alarms.js';
 import { pingTab } from './accounts.js';
 
-/** 命中 X 账号侧异常信号时立即硬熔断：关闭全部自动抓取、清空闹钟与续读、挂红字告警，绝不自动恢复。 */
+/** 命中 X 账号侧异常信号时立即硬熔断：中止全部手动读取、清空闹钟与续读、挂红字告警，绝不自动恢复。 */
 export async function tripAccountCircuit(account, anomaly, source) {
-  const settings = await getSettings(account);
-  if (settings.fetchEnabled || settings.outAutoSync) {
-    await kvSet(keys.settings(account), { ...settings, fetchEnabled: false, outAutoSync: false });
-  }
   await clearAccountAlarms(account);
   await updateCursor(account, (cur) => {
     cur.circuitBroken = { at: now(), code: anomaly.code, reason: anomaly.reason, source };
@@ -37,12 +33,12 @@ export async function tripAccountCircuit(account, anomaly, source) {
   if (job && job.status !== 'done') {
     await kvSet(keys.job(account), { ...job, status: 'error', nextAt: null, message: '检测到 X 账号异常，已熔断停止读取。' });
   }
-  await setAlert(account, `检测到 X 账号异常/验证限制（${anomaly.reason}），已立即熔断并关闭全部自动抓取；请先在 X 确认账号正常后，再手动重新开启自动更新。`);
+  await setAlert(account, `检测到 X 账号异常/验证限制（${anomaly.reason}），已立即熔断并停止读取；请先在 X 确认账号正常后再手动重试。`);
   await record('circuit_breaker', { account, source, code: anomaly.code, reason: anomaly.reason });
   queueBridgePush();
 }
 
-/** 仅在用户手动重新开启自动更新或显式触发手动读取时解除熔断。 */
+/** 仅在用户显式触发手动读取（立即更新 / 补历史 / 继续）时解除熔断。 */
 export async function clearAccountCircuit(account) {
   const had = await updateCursor(account, (cur) => {
     if (!cur.circuitBroken) return false;
