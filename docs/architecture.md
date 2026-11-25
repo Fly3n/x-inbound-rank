@@ -20,8 +20,8 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 
 | 文件 / 目录 | 职责 | 何时改 |
 |---|---|---|
-| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头；`fetchMentions` / `fetchMyReplies` / `fetchScheduled` 均返回 `{ ok, status, body, rateResetAt, userId, error }` 不抛异常；`own` 集合上限 500 | X 改接口 |
-| `src/x/parser.js` | 解析层：`parseMentions`、`parseNotificationsTap`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`、`repliesTapTargetUserId` / `repliesTapHasCursor`；结构不符抛 `ParseError` | X 改返回结构 |
+| `src/x/fetcher.js` | 抓取层：接口路径、参数、请求头；`fetchMentions` / `fetchMyReplies` 均返回 `{ ok, status, body, rateResetAt, userId, error }` 不抛异常；`own` 集合上限 500 | X 改接口 |
+| `src/x/parser.js` | 解析层：`parseMentions`、`parseNotificationsTap`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`、`parseScheduledCreate`、`parseScheduledDelete`、`repliesTapTargetUserId` / `repliesTapHasCursor`；结构不符抛 `ParseError` | X 改返回结构 |
 | `src/x/mentions-diagnostics.js` | 提及诊断：裁剪请求与响应为条件指纹、帖子编号与时间线结构，不保存完整地址、游标或正文 | X 改提及返回结构或排查漏收 |
 | `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：在 `document_start` 缓存原生事件与 JSON 引用，包住 XHR / `fetch`，经页面加载时协商的随机通道名通过 `document` `CustomEvent` 传给 `rel.js`（握手完成后立即发 `{ ack: 1 }` 摘除引导监听，不走全局 `window.postMessage` 广播），并附带通知页/个人回复栏旁听元数据；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
 | `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、推文完整原文（`note_tweet` / 外链展开 / 媒体直链）、请求模板（`tplKind`）、通知页/个人回复栏/`CreateTweet` 旁听数据（含加载期短缓冲）与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条、`tweetTexts` 最多 2000 条），不落盘、不发请求 | 改旁听字段、关系判断或原文提取 |
@@ -37,7 +37,7 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/bg/backfill.js` | 别人回我手动历史补读状态机（启动、逐页、暂停、恢复、唤醒） | 改回填流程 |
 | `src/bg/incremental.js` | 别人回我通知页/提及页旁听收集 `handleInboundTap`（受 `tapInEnabled` 控制，写诊断日志并推桥），以及手动「立即更新」增量拉取（发现重叠即停、单轮 8 段/48 页安全上限，不再定时自动跑） | 改入站旁听或手动增量逻辑 |
 | `src/bg/outbound.js` | 我回别人发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`（受 `tapOutEnabled` 控制），以及手动补历史与手动「立即更新」（`syncOut` / `syncOutNow`，不再定时自动跑）；`syncOut` 按阶段拆为 `gateOutRun`（该不该读）→ `planOutRun`（读法）→ `handleFetchFailure`（请求失败收场）→ `judgePage`（是否到停点）→ `finishOutRun`（推进接续点与覆盖） | 改出站旁听或手动同步策略 |
-| `src/bg/scheduled.js` | 发帖排期按需同步、`xir:scheduled:tap` 与 `xir:postEvent`（排期增删缓存失效）处理 | 改排期同步与退避 |
+| `src/bg/scheduled.js` | 发帖排期纯旁听与本地增量维护：`xir:scheduled:tap` 全量校准与 `xir:postEvent`（排期增删增量维护 + 24 小时已到点排期留存），零主动请求 | 改排期旁听与缓存维护 |
 | `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立手动立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:inbound:tap`、`xir:replies:tap`、`xir:outbound:tap` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
 | `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`countsFromMe`、规则默认值 `DEFAULT_RULES`（含 `tapInEnabled: true`、`tapOutEnabled: true`）与 `cleanRules` | 改统计口径或规则范围 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 `keys`；重读同一条按 `mergeKnown` 合并；整表冻结缓存 | 改数据模型或存储键 |

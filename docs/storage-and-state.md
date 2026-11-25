@@ -42,8 +42,8 @@
 |---|---|
 | `accounts` | `{ [dataKey]: { handle, userId, enabled, activation } }`；以 `userId` 为唯一身份基准 |
 | `settings:<账号>` | `{ tapInEnabled, tapOutEnabled, windowDays, initDays, topN, minCount, tiers: [{ min, color }], baseColor, show* }`（旧版 `fetchEnabled` / `outAutoSync` 静默废弃） |
-| `tpl:replies:<账号>` / `tpl:mentions:<账号>` / `tpl:scheduled:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
-| `scheduled:<账号>` | `{ items, syncedAt, retryAt, errorCount }`：已排期列表缓存与失败退避 |
+| `tpl:replies:<账号>` / `tpl:mentions:<账号>` | `{ url, at }`：从 X 页面旁听到的请求模板 |
+| `scheduled:<账号>` | `{ items, recentSent, syncedAt }`：已排期列表本地缓存（`items` 为待发、`recentSent` 为近 24 小时已到点发出的排期，纯旁听增量维护，零主动请求） |
 | `lastPostAt:<账号>` | 最近一次电脑端原创/引用主帖时间戳（由 `CreateTweet` 旁听记录，不含回复评论） |
 | `cursor:<账号>` | `{ newestId, syncedId, earliestTs, lastIncrementalAt, inLastReadAt, inLastReadCounts, inLastTapAt, inLastTapCounts, outLastTapAt, outLastTapCounts, nextIncAt, lastManualAt, lastAttemptAt, lastBackfill, lastPruneAt, incResume, incLimitReached, rateUntil, rate429Count, circuitBroken, out }` |
 | `job:<账号>` | 入站历史补读任务状态 |
