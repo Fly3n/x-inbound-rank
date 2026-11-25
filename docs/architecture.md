@@ -24,10 +24,10 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/x/parser.js` | 解析层：`parseMentions`、`parseNotificationsTap`、`parseMyReplies`、`parseCreatedReply`、`parseScheduledTweets`、`repliesTapTargetUserId` / `repliesTapHasCursor`；结构不符抛 `ParseError` | X 改返回结构 |
 | `src/x/mentions-diagnostics.js` | 提及诊断：裁剪请求与响应为条件指纹、帖子编号与时间线结构，不保存完整地址、游标或正文 | X 改提及返回结构或排查漏收 |
 | `src/content/tap.js` | 页面脚本环境（`world: MAIN`、`document_start`）旁听层：在 `document_start` 缓存原生事件与 JSON 引用，包住 XHR / `fetch`，经页面加载时协商的随机通道名通过 `document` `CustomEvent` 传给 `rel.js`（握手完成后立即发 `{ ack: 1 }` 摘除引导监听，不走全局 `window.postMessage` 广播），并附带通知页/个人回复栏旁听元数据；吞掉全部异常，不改请求/返回 | X 改页面请求方式 |
-| `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、请求模板（`tplKind`）、通知页/个人回复栏/`CreateTweet` 旁听数据（含加载期短缓冲）与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条），不落盘、不发请求 | 改旁听字段或关系判断 |
+| `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、推文完整原文（`note_tweet` / 外链展开 / 媒体直链）、请求模板（`tplKind`）、通知页/个人回复栏/`CreateTweet` 旁听数据（含加载期短缓冲）与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条、`tweetTexts` 最多 2000 条），不落盘、不发请求 | 改旁听字段、关系判断或原文提取 |
 | `src/content/schedule.js` | 发帖排期纯逻辑：07:00–24:00 半小时档、±15 分钟归档、25 分钟硬防撞、中点均分 / 30–40 分钟顺排、具体档 ±1–3 分钟微调与前后参考时间差；无 DOM/Chrome 依赖 | 改档位规则 |
 | `src/content/schedule-ui.js` | X 原生排期弹窗快捷档期条：找原生表单（`data-testid` 优先、语义兜底）、上下空档切换、左右分栏前后参考卡、展示占用并点击填入日期/时间，不代点确认或发布 | X 改排期弹窗结构 |
-| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、分享菜单注入「复制原文」（优先读 `rel.js` 原文内存，无则退回纯 DOM 解析）、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
 | `src/background.js` | Service Worker 入口：初始化与集中注册 Chrome 事件监听（`tabs.onActivated`/`tabs.onUpdated`/`windows.onFocusChanged`/`runtime.onInstalled`/`runtime.onStartup`/`alarms.onAlarm`/`runtime.onMessage`） | 增删顶级事件入口 |
 | `src/bg/runtime.js` | 后台公共常量 `PACE`、模拟真人停顿函数（`humanIncDelay`/`humanBackfillDelay`/`humanBatchPages`）、双窗口调度（含 `nextOutAutoSlot`）、并发 `busy` 锁、串行 `cursor` 队列、`board` 与快照节流计算 | 调风控节奏或锁 |
 | `src/bg/alarms.js` | 按账号命名闹钟清理、重试与恢复未完成的手动任务（`job:` / 手动 `inc:` / 手动 `out:`），清理历史遗留的自动定时闹钟 | 改闹钟恢复条件 |
