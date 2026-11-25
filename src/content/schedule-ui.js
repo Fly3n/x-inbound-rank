@@ -115,6 +115,7 @@
       if (target) break;
     }
     if (!target) return false;
+    if (select.value === target.value) return true;
     if (nativeSelectSetter) nativeSelectSetter.call(select, target.value);
     else select.value = target.value;
     select.dispatchEvent(new Event('input', { bubbles: true }));
@@ -136,10 +137,10 @@
     }
   }
 
-  /** 按轻微人类错开节奏填写 5 个下拉框，并带单调序号防连续快点竞态；被后续点击取代时返回 null。 */
+  /** 按轻微人类错开节奏填写 5 个下拉框，并带单调序号防连续快点竞态；被后续点击取代或页面切后台时返回 null。 */
   async function fillNativeForm(form, targetTs) {
     const seq = ++fillToken;
-    const stale = () => seq !== fillToken || (activeDialog && !document.contains(activeDialog));
+    const stale = () => seq !== fillToken || document.visibilityState !== 'visible' || (activeDialog && !document.contains(activeDialog));
     const current = () => (activeDialog && document.contains(activeDialog) && findScheduleForm(activeDialog)) || form;
     const d = new Date(targetTs);
     const y = d.getFullYear();

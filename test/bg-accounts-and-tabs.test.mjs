@@ -84,6 +84,19 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     await pageSend(tpl, 9);
     assert.equal(store['tpl:scheduled:me'], undefined);
     assert.equal((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).items[0].id, 'requested');
+    // P1-4: 已有缓存且非强制刷新时，即便超过 30 秒也不发主动 GET；发/删排期作废缓存后才重拉并绑定原标签页
+    const beforeCacheSync = requested.filter(([, , kind]) => kind === 'scheduled').length;
+    env.advanceNow(10 * 60_000);
+    const cachedSync = await pageSend({ type: 'xir:scheduled:sync', force: false }, 9);
+    assert.equal(cachedSync.status, 'ok');
+    assert.equal(cachedSync.items[0].id, 'requested');
+    assert.equal(requested.filter(([, , kind]) => kind === 'scheduled').length, beforeCacheSync, '排期已有缓存且非强制刷新时不发主动 GET');
+    await pageSend({ type: 'xir:postEvent', op: 'CreateScheduledTweet', at: Date.now() }, 9);
+    const afterInvalidated = await pageSend({ type: 'xir:scheduled:sync', force: false }, 9);
+    assert.equal(afterInvalidated.status, 'ok');
+    assert.equal(requested.filter(([, , kind]) => kind === 'scheduled').length, beforeCacheSync + 1, '排期变更作废缓存后拉一次最新');
+    assert.equal(requested.at(-1)[0], 9, '排期同步优先绑定发起弹窗的标签页');
+
     mismatch = true;
     const drift = await pageSend({ type: 'xir:scheduled:sync', force: true }, 9);
     assert.equal(drift.status, 'error', '请求返回前标签页换号，拒绝使用响应');
@@ -149,6 +162,13 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   assert.equal(staleTabs.has(1), false);
   assert.equal(sessionStore.staleTabsRetries, undefined);
 
+  // 同一标签页 5 分钟冷却内不重复刷新，防止离线/挑战页陷入循环刷新
+  staleTabs.add(1);
+  const cooldownBefore = reloadCalls.length;
+  await listeners.startup();
+  assert.equal(reloadCalls.length, cooldownBefore, '单标签页 5 分钟冷却期内不重复刷新');
+  env.advanceNow(6 * 60_000);
+
   // 后台标签页不刷新；切回前台时再补刷
   hiddenTabs.add(1);
   staleTabs.add(1);
@@ -160,17 +180,34 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   await listeners.activated({ tabId: 1, windowId: 1 });
   assert.deepEqual(reloadCalls.slice(hiddenBefore), [1], '切回前台后刷新旧内容脚本');
 
-  // 通知页不自动刷新，离开通知页后再补刷
-  tabUrls.set(1, 'https://x.com/notifications');
-  staleTabs.add(1);
-  const noticeBefore = reloadCalls.length;
-  await listeners.startup();
-  assert.equal(reloadCalls.length, noticeBefore, '不替用户刷新通知页');
+  // 通知页、发帖页、登录/挑战/设置页及已熔断账号绝不自动刷新
+  env.advanceNow(6 * 60_000);
+  for (const blockedUrl of [
+    'https://x.com/notifications',
+    'https://x.com/compose/post',
+    'https://x.com/account/access',
+    'https://x.com/i/flow/login',
+    'https://x.com/login',
+    'https://x.com/settings/account',
+  ]) {
+    tabUrls.set(1, blockedUrl);
+    staleTabs.add(1);
+    const guardBefore = reloadCalls.length;
+    await listeners.startup();
+    assert.equal(reloadCalls.length, guardBefore, `敏感页面不自动刷新: ${blockedUrl}`);
+  }
   tabUrls.delete(1);
+  store['cursor:me'] = { ...(store['cursor:me'] || {}), circuitBroken: { at: Date.now(), code: 326, reason: 'locked' } };
+  const brokenBefore = reloadCalls.length;
+  await listeners.startup();
+  assert.equal(reloadCalls.length, brokenBefore, '已熔断账号不自动刷新页面');
+  delete store['cursor:me'].circuitBroken;
+  const noticeBefore = reloadCalls.length;
   await listeners.updated(1, { status: 'complete', url: 'https://x.com/home' });
-  assert.deepEqual(reloadCalls.slice(noticeBefore), [1], '离开通知页并导航完成后补刷');
+  assert.deepEqual(reloadCalls.slice(noticeBefore), [1], '离开敏感页并导航完成后补刷');
 
   // 跨窗口切回 X 窗口：失去焦点忽略，聚焦新窗口补刷该窗口前台旧页面，且不限制 lastFocusedWindow 并写诊断日志
+  env.advanceNow(6 * 60_000);
   staleTabs.add(1);
   const focusBefore = reloadCalls.length;
   await listeners.windowFocus(-1);
@@ -178,6 +215,7 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   await listeners.windowFocus(2);
   assert.deepEqual(reloadCalls.slice(focusBefore), [1], '跨窗口切换焦点后补刷前台旧页面');
 
+  env.advanceNow(6 * 60_000);
   const realQuery = chrome.tabs.query;
   const queries = [];
   staleTabs.add(1);
@@ -197,6 +235,7 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   assert.ok((await readDiagnostics()).some((r) => r.event === 'stale_tab_refresh' && r.queried === 2 && r.reloaded === 2 && r.pending === 0));
 
   // 并发触发竞态：第一轮未结束时切换到新旧脚本页，第一轮结束后不丢事件自动补跑
+  env.advanceNow(6 * 60_000);
   const realRaceSend = chrome.tabs.sendMessage;
   let releaseFirstPing;
   const firstPingBlocked = new Promise((resolve) => { releaseFirstPing = resolve; });
@@ -225,12 +264,14 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   }
 
   // 打开弹窗检测到当前账号离线/旧版时立即兜底补刷（常规 X 页刷新，通知页保持不动）
+  env.advanceNow(6 * 60_000);
   staleTabs.add(1);
   const popupBefore = reloadCalls.length;
   await send({ type: 'getState' });
   await until(() => reloadCalls.length > popupBefore, '打开弹窗触发未连接常规页补刷');
   assert.deepEqual(reloadCalls.slice(popupBefore), [1]);
 
+  env.advanceNow(6 * 60_000);
   tabUrls.set(1, 'https://x.com/notifications');
   staleTabs.add(1);
   const popupNoticeBefore = reloadCalls.length;
@@ -239,6 +280,8 @@ test('扩展重载只刷新旧内容脚本', { timeout: 10_000 }, async () => {
   assert.equal(reloadCalls.length, popupNoticeBefore, '打开弹窗兜底补刷也绝不碰通知页');
   tabUrls.delete(1);
   staleTabs.delete(1);
+
+  env.advanceNow(6 * 60_000);
 
   const daytime = env.getNow();
   try {

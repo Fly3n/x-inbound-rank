@@ -53,8 +53,8 @@ export async function handleScheduledSync(msg, sender) {
     await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'need_tpl' });
     return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '点一下下方「已排期帖子」完成首次同步' };
   }
-  // 30 秒防抖：连续开关排期弹窗不重复发请求
-  if (!force && cached.syncedAt && now() - cached.syncedAt < 30_000) {
+  // 已有缓存且非手动强制刷新时直接返回本地缓存（旁听或发/删排期事件会自动刷新或置 0 失效），不发无谓 GET
+  if (!force && cached.syncedAt > 0) {
     return { items: cached.items || [], syncedAt: cached.syncedAt, lastPostAt, status: 'ok' };
   }
   if ((cached.retryAt || 0) > now()) {
@@ -63,7 +63,11 @@ export async function handleScheduledSync(msg, sender) {
   if (!tryAcquireBusy()) return cachedReply('正在读取其他数据，已显示上次排期缓存');
   let r;
   try {
-    r = await fetchViaTab(account, { kind: 'scheduled', tpl: tpl.url }, { account, mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 });
+    r = await fetchViaTab(
+      account,
+      { kind: 'scheduled', tpl: tpl.url, preferTabId: sender?.tab?.id },
+      { account, mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 },
+    );
   } finally {
     releaseBusy();
   }

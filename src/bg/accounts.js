@@ -59,11 +59,15 @@ export const pingTab = async (tab) => {
 
 /**
  * 扩展重载/更新后，已打开页面里的旧内容脚本不会自己换新。
- * 只刷新当前前台、连不上或版本对不上的 X 常规页面；正常页面、后台页和通知页都不主动刷新。
+ * 只刷新当前前台、连不上或版本对不上的 X 常规页面；正常页面、后台页、通知页、发帖/登录/挑战/设置页及已熔断账号均不主动刷新，
+ * 且同一标签页在冷却窗口内最多刷新一次，防止离线或验证页陷入循环刷新。
  */
 const isXTabUrl = (url) => /^https:\/\/(?:x|twitter)\.com\//.test(url || '');
 const isRefreshableXTabUrl = (url) =>
-  isXTabUrl(url) && !/^https:\/\/(?:x|twitter)\.com\/(?:i\/)?notifications(?:[/?#]|$)/.test(url);
+  isXTabUrl(url)
+  && !/^https:\/\/(?:x|twitter)\.com\/(?:(?:i\/)?notifications|compose|account\/access|i\/flow|login|logout|settings)(?:[/?#]|$)/.test(url);
+const STALE_TABS_RELOADED = 'staleTabsReloaded';
+const TAB_RELOAD_COOLDOWN_MS = 5 * 60_000;
 
 export async function reloadStaleXirTabs() {
   if (!chrome.tabs?.query || !chrome.tabs?.get || !chrome.tabs?.reload) return { reloaded: 0, pending: 0 };
@@ -71,14 +75,42 @@ export async function reloadStaleXirTabs() {
     await chrome.alarms.create(STALE_TABS_ALARM, { when: nextActiveAt() });
     return { reloaded: 0, pending: 0 };
   }
+  const accounts = await kvGet(keys.accounts, {});
+  const enabledEntries = Object.entries(accounts).filter(([, a]) => a?.enabled && a.userId);
+  if (!enabledEntries.length) return { reloaded: 0, pending: 0 };
+  const brokenAccounts = new Set();
+  for (const [acc] of enabledEntries) {
+    const cur = await kvGet(keys.cursor(acc), {});
+    if (cur?.circuitBroken) brokenAccounts.add(acc);
+  }
+  if (brokenAccounts.size === enabledEntries.length) return { reloaded: 0, pending: 0 };
+
+  const savedCooldown = await chrome.storage.session?.get?.(STALE_TABS_RELOADED).catch(() => null);
+  const cooldownMap = { ...(savedCooldown?.[STALE_TABS_RELOADED] || {}) };
+  const tsNow = now();
+  let cooldownDirty = false;
+  for (const [k, at] of Object.entries(cooldownMap)) {
+    if (!Number.isFinite(at) || tsNow - at >= TAB_RELOAD_COOLDOWN_MS) {
+      delete cooldownMap[k];
+      cooldownDirty = true;
+    }
+  }
+  const isBlockedPageAccount = (page) => {
+    if (!page?.userId) return false;
+    const acc = accountForUser(accounts, page.userId);
+    return !acc || !accounts[acc]?.enabled || brokenAccounts.has(acc);
+  };
+
   // 处理各窗口正在前台的 X 页面（覆盖多窗口并排开 X 且跨窗口点击切换的场景）；
-  // 后台标签页不强刷（切过去时由 tabs.onActivated 补上），通知页绝不自动刷新，避免代改未读状态。
+  // 后台标签页不强刷（切过去时由 tabs.onActivated 补上），敏感路由绝不自动刷新。
   const tabs = await chrome.tabs.query({ ...X_TABS, active: true }).catch(() => []);
   let reloaded = 0;
   let pending = 0;
   for (const tab of tabs) {
     if (!tab?.id || tab.discarded) continue;
     if (!isRefreshableXTabUrl(tab.url)) continue;
+    const tabKey = String(tab.id);
+    if (cooldownMap[tabKey] && tsNow - cooldownMap[tabKey] < TAB_RELOAD_COOLDOWN_MS) continue;
     if (tab.status === 'loading') {
       pending++;
       continue;
@@ -86,6 +118,7 @@ export async function reloadStaleXirTabs() {
     const page = await probeTab(tab);
     if (page?.visible === false) continue;
     if (page?.version === chrome.runtime.getManifest().version) continue;
+    if (isBlockedPageAccount(page)) continue;
     // 失败可能刚好碰上页面开始导航。刷新前再查一次，避免打断已经换到新文档的页面。
     const current = await chrome.tabs.get(tab.id).catch(() => null);
     if (!current || current.discarded || !isRefreshableXTabUrl(current.url)) continue;
@@ -96,12 +129,18 @@ export async function reloadStaleXirTabs() {
     const currentPage = await probeTab(current);
     if (currentPage?.visible === false) continue;
     if (currentPage?.version === chrome.runtime.getManifest().version) continue;
+    if (isBlockedPageAccount(currentPage)) continue;
     try {
       await chrome.tabs.reload(tab.id);
+      cooldownMap[tabKey] = now();
+      cooldownDirty = true;
       reloaded++;
     } catch {
       pending++; // 标签页可能刚关闭或暂时拒绝刷新；留下一次补查。
     }
+  }
+  if (cooldownDirty) {
+    await chrome.storage.session?.set?.({ [STALE_TABS_RELOADED]: cooldownMap }).catch(() => {});
   }
   const queried = tabs.length;
   if (reloaded || pending) {
