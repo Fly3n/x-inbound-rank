@@ -43,22 +43,16 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
   assert.equal(alarms['out:uid-9'], undefined, '启动后清理旧版非手动出站闹钟');
   const originalSend = chrome.tabs.sendMessage;
   const requested = [];
-  let mismatch = false;
   let releaseFirst;
   const firstFetchHeld = new Promise((resolve) => { releaseFirst = resolve; });
   let held = false;
+  let fail429Once = false;
   chrome.tabs.sendMessage = async (id, msg) => {
     if (msg.type !== 'xir:fetch') return originalSend(id, msg);
     requested.push([id, msg.userId, msg.kind]);
-    if (msg.kind === 'scheduled') {
-      if (server.scheduledFail429Once) {
-        server.scheduledFail429Once = false;
-        return { ok: false, status: 429, userId: msg.userId, rateResetAt: null };
-      }
-      if (mismatch) {
-        sessions.set(id, { userId: '8', handle: 'Changed' });
-      }
-      return { ok: true, status: 200, userId: msg.userId, body: scheduled('requested') };
+    if (fail429Once && msg.userId === '9') {
+      fail429Once = false;
+      return { ok: false, status: 429, userId: msg.userId, rateResetAt: null };
     }
     if (!held) {
       held = true;
@@ -80,43 +74,45 @@ test('多账号启用、定时更新、排期与切号隔离', { timeout: 10_000
     assert.ok(store['cursor:me'].inLastReadAt);
     assert.ok(store['cursor:uid-9'].inLastReadAt);
 
-    const tpl = { type: 'xir:tpl', kind: 'scheduled', url: 'https://x.com/i/api/graphql/QID/FetchScheduledTweets' };
-    await pageSend(tpl, 9);
-    assert.equal(store['tpl:scheduled:me'], undefined);
-    assert.equal((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).items[0].id, 'requested');
-    // P1-4: 已有缓存且非强制刷新时，即便超过 30 秒也不发主动 GET；发/删排期作废缓存后才重拉并绑定原标签页
-    const beforeCacheSync = requested.filter(([, , kind]) => kind === 'scheduled').length;
+    // 排期纯旁听增量维护（零主动请求）：新建追加、删除移除、自然到点后全量校准保留 24 小时已发参考
+    const beforeSchedOps = requested.length;
+    const tCreate = Date.now() + 2 * 3_600_000;
+    const createRes = await pageSend({
+      type: 'xir:postEvent',
+      op: 'CreateScheduledTweet',
+      at: Date.now(),
+      req: JSON.stringify({ variables: { execute_at: Math.floor(tCreate / 1000), post_tweet_request: { status: '新增测试排期' } } }),
+      res: JSON.stringify({ data: { tweet: { rest_id: 'sched-new' } } }),
+    }, 9);
+    assert.equal(createRes.ok, true);
+    assert.ok(store['scheduled:uid-9'].items.some((x) => x.id === 'sched-new' && x.text === '新增测试排期'));
+    assert.equal(requested.length, beforeSchedOps, '排期新建零主动请求');
+
+    const delRes = await pageSend({
+      type: 'xir:postEvent',
+      op: 'DeleteScheduledTweet',
+      at: Date.now(),
+      req: JSON.stringify({ variables: { scheduled_tweet_id: 'sched-new' } }),
+      res: JSON.stringify({ data: { scheduledtweet_delete: 'Done' } }),
+    }, 9);
+    assert.equal(delRes.ok, true);
+    assert.equal(delRes.removed, 1);
+    assert.equal(store['scheduled:uid-9'].items.some((x) => x.id === 'sched-new'), false);
+
+    // 旧排期 'second' 到点后，即便点开「已排期帖子」全量校准返回不含它的新列表，也会归档进 recentSent 保留 24 小时
     env.advanceNow(10 * 60_000);
-    const cachedSync = await pageSend({ type: 'xir:scheduled:sync', force: false }, 9);
-    assert.equal(cachedSync.status, 'ok');
-    assert.equal(cachedSync.items[0].id, 'requested');
-    assert.equal(requested.filter(([, , kind]) => kind === 'scheduled').length, beforeCacheSync, '排期已有缓存且非强制刷新时不发主动 GET');
-    await pageSend({ type: 'xir:postEvent', op: 'CreateScheduledTweet', at: Date.now() }, 9);
-    const afterInvalidated = await pageSend({ type: 'xir:scheduled:sync', force: false }, 9);
-    assert.equal(afterInvalidated.status, 'ok');
-    assert.equal(requested.filter(([, , kind]) => kind === 'scheduled').length, beforeCacheSync + 1, '排期变更作废缓存后拉一次最新');
-    assert.equal(requested.at(-1)[0], 9, '排期同步优先绑定发起弹窗的标签页');
+    await pageSend(native('third'), 9);
+    assert.deepEqual(store['scheduled:uid-9'].items.map((x) => x.id), ['third']);
+    assert.deepEqual(store['scheduled:uid-9'].recentSent.map((x) => x.id), ['second'], '到点发出的排期在全量校准后保留为近期已发参考');
+    assert.equal(requested.length, beforeSchedOps, '排期全程零主动请求');
 
-    mismatch = true;
-    const drift = await pageSend({ type: 'xir:scheduled:sync', force: true }, 9);
-    assert.equal(drift.status, 'error', '请求返回前标签页换号，拒绝使用响应');
-    assert.deepEqual((await send({ type: 'getState' })).online, ['me']);
-    assert.equal(store['scheduled:uid-9'].items[0].id, 'requested');
-
-    // 排期同步 429 后同样退避，反复打开排期弹窗不能继续发请求
-    mismatch = false;
-    sessions.set(9, { userId: '9', handle: 'New' });
-    const scheduledCalls = () => requested.filter(([, , kind]) => kind === 'scheduled').length;
-    const before429 = scheduledCalls();
-    server.scheduledFail429Once = true;
-    assert.equal((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).status, 'error');
-    assert.ok(store['scheduled:uid-9'].retryAt > Date.now(), '记下排期同步退避时间');
-    assert.ok(store['cursor:uid-9'].rateUntil >= store['scheduled:uid-9'].retryAt, '同一个账号的主动读取一起暂停');
-    assert.match((await pageSend({ type: 'xir:scheduled:sync', force: true }, 9)).message, /退避/);
-    assert.equal(scheduledCalls(), before429 + 1, '退避期内不再发请求');
+    // 任一入口 429 后整个账号统一进入退避，回填、手动更新和出站都不能绕过去继续请求
+    store['cursor:uid-9'].lastManualAt = 0;
+    fail429Once = true;
+    await send({ type: 'updateNowWithReceipt', account: 'uid-9' });
+    assert.ok(store['cursor:uid-9'].rateUntil > Date.now(), '同一个账号的主动读取一起暂停');
     assert.equal(store['cursor:uid-9'].rate429Count, 1, '账号级连续 429 计数从一处累加');
 
-    // 一个入口被限流后，回填、手动更新和出站也不能绕过去继续请求
     const blockedBefore = requested.length;
     assert.match((await send({ type: 'syncOutNow', account: 'uid-9' })).error, /退避/);
     assert.match((await send({ type: 'startBackfill', account: 'uid-9' })).error, /退避/);

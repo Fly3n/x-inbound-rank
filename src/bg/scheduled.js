@@ -1,109 +1,182 @@
-// 发帖排期同步与旁听事件处理：只在打开排期弹窗时按需只读同步，共用账号级退避与并发锁。
-import { kvGet, kvSet, kvRemove, keys } from '../db.js';
+// 发帖排期纯旁听与本地增量维护：零主动请求；通过旁听 FetchScheduledTweets 全量校准、
+// CreateScheduledTweet / DeleteScheduledTweet 增量维护，并保留最近 24 小时已到点发出的排期作为上一条参考。
+import { kvGet, kvSet, keys } from '../db.js';
 import { record } from '../diagnostics.js';
-import { parseScheduledTweets, ParseError } from '../x/parser.js';
-import { PACE, now, serviceWait, isBusy, tryAcquireBusy, releaseBusy, updateCursor } from './runtime.js';
+import { queueBridgePush } from '../bridge.js';
+import { parseScheduledTweets, parseScheduledCreate, parseScheduledDelete, ParseError } from '../x/parser.js';
+import { now, serial } from './runtime.js';
 import { senderAccount } from './accounts.js';
-import { fetchViaTab } from './transport.js';
+
+const RECENT_SENT_WINDOW_MS = 24 * 3_600_000;
+
+function validEntry(x) {
+  return x && typeof x === 'object' && Number.isFinite(x.executeAt) && x.executeAt > 0;
+}
+
+function dedupeSort(list) {
+  const byKey = new Map();
+  for (const item of list) {
+    if (!validEntry(item)) continue;
+    const id = String(item.id ?? item.executeAt);
+    const prev = byKey.get(id);
+    if (!prev || (!prev.text && item.text)) {
+      byKey.set(id, { id, executeAt: item.executeAt, text: item.text || '' });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.executeAt - b.executeAt);
+}
+
+/**
+ * 归档已到点的旧排期并清理 24 小时以外的历史。
+ * - full = true（来自 FetchScheduledTweets 全量校准）：用 nextItems 替换未来待发列表，
+ *   但旧列表里已经到点（executeAt <= nowTs）的条目保留进 recentSent，不被覆盖抹除；
+ * - full = false（仅做时间流转整理）：把 items 里已到点的条目移入 recentSent。
+ */
+export function reconcileScheduled(prev, nextItems, nowTs, { full = false } = {}) {
+  const prevItems = Array.isArray(prev?.items) ? prev.items.filter(validEntry) : [];
+  const prevSent = Array.isArray(prev?.recentSent) ? prev.recentSent.filter(validEntry) : [];
+  const cutoff = nowTs - RECENT_SENT_WINDOW_MS;
+
+  const sentPool = prevSent.filter((x) => x.executeAt <= nowTs && x.executeAt >= cutoff);
+  for (const x of prevItems) {
+    if (x.executeAt <= nowTs && x.executeAt >= cutoff) sentPool.push(x);
+  }
+
+  const futurePool = [];
+  const source = full ? (Array.isArray(nextItems) ? nextItems : []) : prevItems;
+  for (const x of source) {
+    if (!validEntry(x)) continue;
+    if (x.executeAt <= nowTs) {
+      if (x.executeAt >= cutoff) sentPool.push(x);
+    } else {
+      futurePool.push(x);
+    }
+  }
+
+  return {
+    items: dedupeSort(futurePool),
+    recentSent: dedupeSort(sentPool),
+  };
+}
 
 export async function handleScheduledTap(msg, sender) {
   const { text } = msg;
   const account = await senderAccount(msg, sender);
   if (!account || typeof text !== 'string') return {};
+  let parsed;
   try {
-    const items = parseScheduledTweets(JSON.parse(text));
-    const syncedAt = now();
-    await kvSet(keys.scheduled(account), { items, syncedAt, error: null });
-    await record('scheduled_sync', { account, source: 'scheduled', mode: 'tap', outcome: 'ok', count: items.length, scheduledTimes: items.map(({ executeAt }) => executeAt) });
-    return { ok: true, items, syncedAt };
+    parsed = parseScheduledTweets(JSON.parse(text));
   } catch (e) {
-    await record('parse_failed', { account, source: 'scheduled', mode: 'tap', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
+    await record('parse_failed', {
+      account,
+      source: 'scheduled',
+      mode: 'tap',
+      category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception',
+    });
+    queueBridgePush();
     return {};
   }
+  const ts = now();
+  const next = await serial(async () => {
+    const prev = await kvGet(keys.scheduled(account), {});
+    const reconciled = reconcileScheduled(prev, parsed, ts, { full: true });
+    const value = { ...reconciled, syncedAt: ts };
+    await kvSet(keys.scheduled(account), value);
+    return value;
+  });
+  await record('scheduled_sync', {
+    account,
+    source: 'scheduled',
+    mode: 'tap',
+    outcome: 'ok',
+    count: next.items.length,
+    recentSentCount: next.recentSent.length,
+    scheduledTimes: next.items.map(({ executeAt }) => executeAt),
+  });
+  queueBridgePush();
+  return { ok: true, items: next.items, recentSent: next.recentSent, syncedAt: ts };
 }
 
 export async function handlePostEvent(msg, sender) {
-  const { op, at } = msg;
+  const { op, req, res } = msg;
   const account = await senderAccount(msg, sender);
-  if (!account) return {};
-  const ts = Number.isFinite(at) ? at : now();
-  if (op === 'CreateScheduledTweet' || op === 'DeleteScheduledTweet') {
-    const cached = await kvGet(keys.scheduled(account));
-    if (cached) await kvSet(keys.scheduled(account), { ...cached, syncedAt: 0 }); // 下次打开排期弹窗立刻拉最新
-  }
-  return {};
-}
+  if (!account || (op !== 'CreateScheduledTweet' && op !== 'DeleteScheduledTweet')) return {};
+  const ts = now();
 
-export async function handleScheduledSync(msg, sender) {
-  const { force } = msg;
-  const account = await senderAccount(msg, sender);
-  if (!account) return { items: [], syncedAt: 0, lastPostAt: 0, status: 'error', message: '未识别到当前 X 账号' };
-  const cached = (await kvGet(keys.scheduled(account))) || { items: [], syncedAt: 0, error: null };
-  const lastPostAt = (await kvGet(keys.lastPostAt(account))) || 0;
-  const cachedReply = (message) => ({
-    items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message,
-  });
-  if (isBusy()) return cachedReply('正在读取其他数据，已显示上次排期缓存');
-  const cursor = await kvGet(keys.cursor(account), {});
-  if (cursor.circuitBroken) return cachedReply('账号异常已熔断，已显示上次排期缓存');
-  const pausedUntil = Math.max(cursor.rateUntil || 0, cursor.out?.retryAt || 0);
-  if (pausedUntil > now()) return cachedReply('接口正在退避，已显示上次排期缓存');
-  const tpl = await kvGet(keys.tplScheduled(account));
-  if (!tpl) {
-    await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'need_tpl' });
-    return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '点一下下方「已排期帖子」完成首次同步' };
-  }
-  // 已有缓存且非手动强制刷新时直接返回本地缓存（旁听或发/删排期事件会自动刷新或置 0 失效），不发无谓 GET
-  if (!force && cached.syncedAt > 0) {
-    return { items: cached.items || [], syncedAt: cached.syncedAt, lastPostAt, status: 'ok' };
-  }
-  if ((cached.retryAt || 0) > now()) {
-    return cachedReply(`接口正在退避，将在 ${new Date(cached.retryAt).toLocaleTimeString()} 后重试；已显示上次排期缓存`);
-  }
-  if (!tryAcquireBusy()) return cachedReply('正在读取其他数据，已显示上次排期缓存');
-  let r;
-  try {
-    r = await fetchViaTab(
-      account,
-      { kind: 'scheduled', tpl: tpl.url, preferTabId: sender?.tab?.id },
-      { account, mode: force ? 'scheduled_manual' : 'scheduled_auto', run: now(), page: 1 },
-    );
-  } finally {
-    releaseBusy();
-  }
-  if (r.error === 'circuit_broken') return cachedReply('账号异常已熔断，已显示上次排期缓存');
-  if (r.error === 'no_tab') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '未连接到 X 页面，已显示上次缓存' };
-  if (r.error === 'outside_window') return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '读取只在每天 08:00–24:00 进行，已显示上次缓存' };
-  if (r.error === 'backoff') {
-    return cachedReply(`接口正在退避，将在 ${new Date(r.rateResetAt || 0).toLocaleTimeString()} 后重试；已显示上次排期缓存`);
-  }
-  if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
-    await kvRemove(keys.tplScheduled(account));
-    await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'tpl_expired', status: r.status || 0 });
-    return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'need_tpl', message: '接口参数已更新，请点一下「已排期帖子」重新连接' };
-  }
-  if (r.status === 429) {
-    const retryAt = r.backoffUntil || r.rateResetAt || now() + PACE.backoffStartMs;
-    await updateCursor(account, (c) => {
-      c.rateUntil = Math.max(c.rateUntil || 0, retryAt);
+  if (op === 'CreateScheduledTweet') {
+    const parsed = parseScheduledCreate(req, res);
+    if (!parsed.item) {
+      await record('scheduled_event', {
+        account,
+        source: 'scheduled',
+        op,
+        outcome: 'unmatched',
+        reason: parsed.reason,
+        reqKeys: parsed.diag.reqKeys,
+        resKeys: parsed.diag.resKeys,
+      });
+      queueBridgePush();
+      return { ok: false, reason: parsed.reason };
+    }
+    const next = await serial(async () => {
+      const prev = await kvGet(keys.scheduled(account), {});
+      const base = reconcileScheduled(prev, null, ts, { full: false });
+      const items = dedupeSort([...base.items, parsed.item]).filter((x) => x.executeAt > ts);
+      const recentSent = parsed.item.executeAt <= ts
+        ? dedupeSort([...base.recentSent, parsed.item])
+        : base.recentSent;
+      const value = { items, recentSent, syncedAt: ts };
+      await kvSet(keys.scheduled(account), value);
+      return value;
     });
-    await kvSet(keys.scheduled(account), { ...cached, retryAt });
-    return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: '暂时被 X 限流（429），已显示上次缓存' };
+    await record('scheduled_event', {
+      account,
+      source: 'scheduled',
+      op,
+      outcome: 'ok',
+      executeAt: parsed.item.executeAt,
+      count: next.items.length,
+      reqKeys: parsed.diag.reqKeys,
+      resKeys: parsed.diag.resKeys,
+    });
+    queueBridgePush();
+    return { ok: true, item: parsed.item, count: next.items.length };
   }
-  if (!r.ok) {
-    const retryAt = now() + serviceWait(cached.errorCount || 0);
-    await kvSet(keys.scheduled(account), { ...cached, retryAt, errorCount: (cached.errorCount || 0) + 1 });
-    return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `同步排期失败（${r.error || 'HTTP ' + r.status}），已显示缓存` };
+
+  const parsed = parseScheduledDelete(req, res);
+  if (!parsed.id) {
+    await record('scheduled_event', {
+      account,
+      source: 'scheduled',
+      op,
+      outcome: 'unmatched',
+      reason: parsed.reason,
+      reqKeys: parsed.diag.reqKeys,
+      resKeys: parsed.diag.resKeys,
+    });
+    queueBridgePush();
+    return { ok: false, reason: parsed.reason };
   }
-  try {
-    const items = parseScheduledTweets(r.body);
-    const syncedAt = now();
-    await kvSet(keys.scheduled(account), { items, syncedAt, retryAt: null, errorCount: 0, error: null });
-    await record('scheduled_sync', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', outcome: 'ok', count: items.length, scheduledTimes: items.map(({ executeAt }) => executeAt) });
-    return { items, syncedAt, lastPostAt, status: 'ok' };
-  } catch (e) {
-    await record('parse_failed', { account, source: 'scheduled', mode: force ? 'manual' : 'auto', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
-    const why = e instanceof ParseError ? e.message : String(e);
-    return { items: cached.items || [], syncedAt: cached.syncedAt || 0, lastPostAt, status: 'error', message: `排期解析失败：${why}` };
-  }
+  const result = await serial(async () => {
+    const prev = await kvGet(keys.scheduled(account), {});
+    const base = reconcileScheduled(prev, null, ts, { full: false });
+    const items = base.items.filter((x) => x.id !== parsed.id);
+    const recentSent = base.recentSent.filter((x) => x.id !== parsed.id);
+    const removed = (base.items.length - items.length) + (base.recentSent.length - recentSent.length);
+    const value = { items, recentSent, syncedAt: prev?.syncedAt || ts };
+    await kvSet(keys.scheduled(account), value);
+    return { value, removed };
+  });
+  await record('scheduled_event', {
+    account,
+    source: 'scheduled',
+    op,
+    outcome: 'ok',
+    removed: result.removed,
+    count: result.value.items.length,
+    reqKeys: parsed.diag.reqKeys,
+    resKeys: parsed.diag.resKeys,
+  });
+  queueBridgePush();
+  return { ok: true, removed: result.removed, count: result.value.items.length };
 }

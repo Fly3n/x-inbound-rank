@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ranking, outboundCounts, countsFromMe, badgeSnapshot, DAY_MS } from '../src/rank.js';
-import { parseCreatedReply, parseMentions, parseNotificationsTap, parseMyReplies, parseScheduledTweets, repliesTapTargetUserId, repliesTapHasCursor, detectAccountAnomaly, ParseError } from '../src/x/parser.js';
+import { parseCreatedReply, parseMentions, parseNotificationsTap, parseMyReplies, parseScheduledTweets, parseScheduledCreate, parseScheduledDelete, repliesTapTargetUserId, repliesTapHasCursor, detectAccountAnomaly, ParseError } from '../src/x/parser.js';
 import { NOW, ev, rules } from './helpers/fixtures.mjs';
 
 // ---- 旧版提及接口（REST globalObjects）样本 ----
@@ -311,6 +311,34 @@ test('解析已排期列表：兼容秒和毫秒时间戳，按时间升序，�
   assert.throws(() => parseScheduledTweets({ errors: [{ message: 'denied' }] }), /denied/);
   assert.throws(() => parseScheduledTweets({ data: {} }), ParseError);
   assert.throws(() => parseScheduledTweets({ data: { viewer: { scheduled_tweet_list: [{ rest_id: 'bad' }] } } }), ParseError);
+});
+
+test('解析排期增删旁听：提取 ID/执行时间/正文，并输出不含正文的脱敏字段骨架', () => {
+  const sec = 1_795_100_000;
+  const created = parseScheduledCreate(
+    JSON.stringify({ variables: { execute_at: sec, post_tweet_request: { status: '隐私正文内容  测试' } } }),
+    JSON.stringify({ data: { tweet: { rest_id: 's-99' } } }),
+  );
+  assert.deepEqual(created.item, { id: 's-99', executeAt: sec * 1000, text: '隐私正文内容 测试' });
+  assert.equal(created.reason, null);
+  assert.ok(created.diag.reqKeys.includes('variables.execute_at'));
+  assert.ok(created.diag.resKeys.includes('data.tweet.rest_id'));
+  assert.equal(JSON.stringify(created.diag).includes('隐私正文'), false, '脱敏骨架不得泄露正文');
+
+  const createErr = parseScheduledCreate('{}', JSON.stringify({ errors: [{ message: 'denied' }] }));
+  assert.equal(createErr.item, null);
+  assert.equal(createErr.reason, 'api_error');
+
+  const deleted = parseScheduledDelete(
+    JSON.stringify({ variables: { scheduled_tweet_id: 's-99' } }),
+    JSON.stringify({ data: { scheduledtweet_delete: 'Done' } }),
+  );
+  assert.equal(deleted.id, 's-99');
+  assert.equal(deleted.reason, null);
+
+  const delMissing = parseScheduledDelete('{}', '{}');
+  assert.equal(delMissing.id, null);
+  assert.equal(delMissing.reason, 'missing_id');
 });
 
 test('detectAccountAnomaly：精准识别 401/403、cf-mitigated、非 5xx HTML 挑战与锁定错误码，不误伤 429/503/404', () => {

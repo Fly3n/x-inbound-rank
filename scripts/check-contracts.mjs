@@ -338,7 +338,7 @@ function checkTplAlignment() {
     ['https://x.com/i/api/graphql/QID1/UserRepliesTimeline?variables=%7B%7D', true],
     ['https://x.com/i/api/graphql/QID2/UserTweetsAndReplies?variables=%7B%7D', true],
     ['https://x.com/i/api/graphql/QID3/NotificationsTimeline?variables=%7B%7D', true],
-    ['https://x.com/i/api/graphql/QID4/FetchScheduledTweets?variables=%7B%7D', true],
+    ['https://x.com/i/api/graphql/QID4/FetchScheduledTweets?variables=%7B%7D', false],
     ['https://x.com/i/api/graphql/QID5/HomeTimeline?variables=%7B%7D', false],
     ['https://x.com/i/api/graphql/QID6/CreateTweet?variables=%7B%7D', false],
     ['https://x.com/i/api/graphql/QID7/NotificationsTimelineExtra?variables=%7B%7D', false],

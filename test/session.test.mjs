@@ -87,7 +87,7 @@ test('页面仅旁听已启用会话（走私有随机通道、零 window.postMe
         return { text: async () => '{}' };
       },
     };
-    const url = origin + '/i/api/graphql/example/FetchScheduledTweets';
+    const url = origin + '/i/api/graphql/example/NotificationsTimeline?variables=%7B%22timeline_type%22%3A%22Mentions%22%7D';
     let pending = window.fetch(url);
     h.settle(fetchResponse);
     await pending;
@@ -103,6 +103,25 @@ test('页面仅旁听已启用会话（走私有随机通道、零 window.postMe
     await flush();
     assert.equal(cloned, 1);
     assert.equal(isolated.XIRRel.tpls.at(-1), url);
+
+    // CreateScheduledTweet POST 旁听携带 req / res，且非 2xx 不触发
+    const postEvents = [];
+    isolated.XIRRel.onPostEvent = (ev) => postEvents.push(ev);
+    const schedCreateUrl = origin + '/i/api/graphql/cs1/CreateScheduledTweet';
+    pending = window.fetch(schedCreateUrl, { method: 'POST', body: '{"variables":{"execute_at":1795100000}}' });
+    h.settle({ status: 200, headers: new Map(), clone: () => ({ text: async () => '{"data":{"tweet":{"rest_id":"s1"}}}' }) });
+    await pending;
+    await flush();
+    assert.equal(postEvents.length, 1);
+    assert.equal(postEvents[0].op, 'CreateScheduledTweet');
+    assert.match(postEvents[0].req, /1795100000/);
+    assert.match(postEvents[0].res, /"rest_id":"s1"/);
+
+    pending = window.fetch(schedCreateUrl, { method: 'POST', body: '{"variables":{"execute_at":1795100000}}' });
+    h.settle({ status: 400, headers: new Map(), clone: () => ({ text: async () => '{"errors":[{"message":"bad"}]}' }) });
+    await pending;
+    await flush();
+    assert.equal(postEvents.length, 1, `${order}: 非 2xx 排期请求不触发本地增量事件`);
 
     pending = window.fetch(url);
     doc.cookie = 'twid=u%3D9';

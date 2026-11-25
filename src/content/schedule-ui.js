@@ -21,18 +21,11 @@
 
   let account = null;
   let enabled = false; // 设置页「发帖排期弹窗显示快捷档期」开关
-  let alive = true;
-  let state = { items: [], syncedAt: 0, lastPostAt: 0, status: 'idle', message: '' };
+  let state = { items: [], recentSent: [], syncedAt: 0, lastPostAt: 0 };
   let activeDialog = null;
   let panel = null;
   let dropOpen = false;
   let lastPicked = null; // { slotTs, filledTs }
-
-  const send = (msg) =>
-    chrome.runtime.sendMessage(msg).catch(() => {
-      alive = false;
-      return null;
-    });
 
   // ---------- 识别 X 原生排期表单 ----------
 
@@ -211,7 +204,7 @@
   async function pickSlot(slot, form, closeDrop, mode = 'slot') {
     if (!slot || slot.occupied || XIRRel.session()?.account !== account || !enabled) return;
     const filledTs = XIRSchedule.pickJitteredTime(slot.ts, {
-      nowTs: Date.now(), scheduled: state.items, dayStart: slot.dayStart, lastPostAt: state.lastPostAt, mode,
+      nowTs: Date.now(), scheduled: state.items, recentSent: state.recentSent, dayStart: slot.dayStart, lastPostAt: state.lastPostAt, mode,
     });
     const ok = await fillNativeForm(form, filledTs);
     if (ok === null || XIRRel.session()?.account !== account || !enabled) return;
@@ -239,17 +232,14 @@
     return btn;
   }
 
-  function statusSummary() {
+  function statusSummary(nowTs) {
     if (lastPicked && !lastPicked.ok) {
       const t = XIRSchedule.formatTime(lastPicked.filledTs);
       return { text: `未能自动填入，请手动选 ${t}`, tone: 'warn' };
     }
-    if (state.status === 'loading') return { text: '正在同步已排期列表…', tone: 'muted' };
-    if (state.status === 'need_tpl') return { text: state.message || '点下方「已排期帖子」完成首次同步', tone: 'warn' };
-    if (state.status === 'error') return { text: state.message || '同步失败，已显示缓存', tone: 'warn' };
-    const futureCount = state.items.filter((x) => x.executeAt >= Date.now() - XIRSchedule.CONFLICT_MS).length;
-    if (state.syncedAt) return { text: `已同步 · ${futureCount} 条待发`, tone: 'muted' };
-    return { text: '准备就绪', tone: 'muted' };
+    const futureCount = state.items.filter((x) => x.executeAt > nowTs).length;
+    if (state.syncedAt || futureCount > 0) return { text: `本地记录 · ${futureCount} 条待发`, tone: 'muted' };
+    return { text: '点下方「已排期帖子」可同步已有排期', tone: 'muted' };
   }
 
   function renderPanel(form) {
@@ -261,16 +251,17 @@
       nowTs,
       days: DAYS_AHEAD,
       scheduled: state.items,
+      recentSent: state.recentSent,
       lastPostAt: state.lastPostAt,
     });
     const primary = plan.primary;
     const inlineSlots = primary.slots.slice(0, INLINE_LIMIT);
     const hasMore = primary.slots.length > INLINE_LIMIT || plan.groups.length > 1;
-    const status = statusSummary();
+    const status = statusSummary(nowTs);
 
     panel.innerHTML = '';
 
-    // 顶行：标题 + 状态 + 刷新按钮
+    // 顶行：标题 + 本地缓存状态（零主动请求）
     const head = document.createElement('div');
     head.className = 'xir-sched-head';
     const title = document.createElement('span');
@@ -279,27 +270,16 @@
     const stat = document.createElement('span');
     stat.className = `xir-sched-stat is-${status.tone}`;
     stat.textContent = status.text;
-    const refresh = document.createElement('button');
-    refresh.type = 'button';
-    refresh.className = 'xir-sched-refresh';
-    refresh.title = '立即刷新已排期列表';
-    refresh.setAttribute('aria-label', '立即刷新已排期列表');
-    refresh.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.45-3.72l-1.55.02v1.3h3.7V1.9h-1.3l-.02 1.38A6.8 6.8 0 1 0 14.8 8h-1.3z"/></svg>';
-    refresh.disabled = state.status === 'loading';
-    refresh.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      lastPicked = null;
-      syncScheduled(true, form);
-    });
-    head.append(title, stat, refresh);
+    head.append(title, stat);
     panel.appendChild(head);
 
-    // 选定时间后，单行三段式时间轴展示：上一条 — 间隔 — [本条] — 间隔 — 下一条
+    // 选定时间后，单行三段式时间轴展示：上一条（或刚发/已发） — 间隔 — [本条] — 间隔 — 下一条
     if (lastPicked?.ok) {
       const { prev, next } = XIRSchedule.neighborSummary(lastPicked.filledTs, {
         scheduled: state.items,
+        recentSent: state.recentSent,
         lastPostAt: state.lastPostAt,
+        nowTs,
       });
       const timeline = document.createElement('div');
       timeline.className = 'xir-sched-timeline';
@@ -331,7 +311,7 @@
 
       timeline.append(
         makeNode(
-          prev?.kind === 'post' ? '刚发' : '上一条',
+          prev?.kind === 'post' ? '刚发' : prev?.kind === 'sent' ? '已发' : '上一条',
           prev ? XIRSchedule.formatRefTime(prev.ts, lastPicked.filledTs) : '无',
           prev ? '' : 'is-empty',
         ),
@@ -421,29 +401,6 @@
     }
   }
 
-  async function syncScheduled(force, form) {
-    const session = XIRRel.session();
-    if (!alive || !session || session.account !== account) return;
-    const dialog = activeDialog;
-    state.status = 'loading';
-    renderPanel(form);
-    const res = await send({ type: 'xir:scheduled:sync', userId: session.userId, activation: session.activation, force: !!force });
-    if (XIRRel.session() !== session || activeDialog !== dialog) return;
-    if (!res) {
-      state.status = 'error';
-      state.message = '扩展连接已断开，请刷新页面';
-    } else {
-      state = {
-        items: Array.isArray(res.items) ? res.items : [],
-        syncedAt: res.syncedAt || 0,
-        lastPostAt: res.lastPostAt || 0,
-        status: res.status || 'ok',
-        message: res.message || '',
-      };
-    }
-    if (activeDialog && document.contains(activeDialog)) renderPanel(form);
-  }
-
   function unmount() {
     panel?.remove();
     panel = null;
@@ -453,7 +410,7 @@
   }
 
   function scanDialogs() {
-    if (!alive || !enabled || XIRRel.session()?.account !== account) {
+    if (!enabled || XIRRel.session()?.account !== account) {
       if (panel) unmount();
       return;
     }
@@ -472,12 +429,9 @@
       if (anchor?.parentElement) anchor.parentElement.insertBefore(panel, anchor);
       else dialog.prepend(panel);
 
-      // 先秒显本地缓存，再静默按需同步最新排期列表
+      // 纯读本机排期缓存与近期已发记录，零主动请求
       loadLocalCache().then(() => {
-        if (activeDialog === dialog) {
-          renderPanel(form);
-          syncScheduled(false, form);
-        }
+        if (activeDialog === dialog) renderPanel(form);
       });
       return;
     }
@@ -492,6 +446,7 @@
     const cached = r[keys[0]];
     if (cached) {
       state.items = Array.isArray(cached.items) ? cached.items : [];
+      state.recentSent = Array.isArray(cached.recentSent) ? cached.recentSent : [];
       state.syncedAt = cached.syncedAt || 0;
     }
     state.lastPostAt = r[keys[1]] || 0;
@@ -501,7 +456,7 @@
     unmount();
     account = session?.account || null;
     enabled = false;
-    state = { items: [], syncedAt: 0, lastPostAt: 0, status: 'idle', message: '' };
+    state = { items: [], recentSent: [], syncedAt: 0, lastPostAt: 0 };
     if (!account) return;
     const snapKey = `snap:${account}`;
     const stored = await chrome.storage.local.get(snapKey);
@@ -521,14 +476,11 @@
       }
     }
     if (account && (changes[`scheduled:${account}`] || changes[`lastPostAt:${account}`])) {
-      if (changes[`scheduled:${account}`]?.newValue) {
-        const v = changes[`scheduled:${account}`].newValue;
+      if (changes[`scheduled:${account}`]) {
+        const v = changes[`scheduled:${account}`].newValue || {};
         state.items = Array.isArray(v.items) ? v.items : [];
+        state.recentSent = Array.isArray(v.recentSent) ? v.recentSent : [];
         state.syncedAt = v.syncedAt || 0;
-        if (state.status === 'need_tpl' && state.syncedAt) {
-          state.status = 'ok';
-          state.message = '';
-        }
       }
       if (changes[`lastPostAt:${account}`]) {
         state.lastPostAt = changes[`lastPostAt:${account}`].newValue || 0;
@@ -542,7 +494,7 @@
 
   let pending = false;
   const scheduleScan = () => {
-    if (pending || !alive || !XIRRel.session()) return;
+    if (pending || !XIRRel.session()) return;
     pending = true;
     requestAnimationFrame(() => {
       pending = false;

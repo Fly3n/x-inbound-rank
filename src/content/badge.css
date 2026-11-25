@@ -131,34 +131,6 @@
 .xir-sched-stat.is-ok { color: #16a34a; font-weight: 600; }
 .xir-sched-stat.is-warn { color: #ea580c; }
 
-.xir-sched-refresh {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 1px solid var(--xir-s-bd);
-  border-radius: 999px;
-  background: var(--xir-s-slot-bg);
-  color: var(--xir-s-muted);
-  cursor: pointer;
-}
-.xir-sched-refresh svg {
-  width: 13px;
-  height: 13px;
-  fill: currentColor;
-}
-.xir-sched-refresh:hover:not(:disabled) {
-  border-color: #1d9bf0;
-  color: #1d9bf0;
-}
-.xir-sched-refresh:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
 .xir-sched-timeline {
   display: flex;
   align-items: center;

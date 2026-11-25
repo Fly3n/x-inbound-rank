@@ -217,7 +217,7 @@ test('账号异常硬熔断：命中 403/验证锁定信号、连续 3 次 429 �
   assert.equal(store['cursor:me'].circuitBroken.code, 326);
   assert.match(store['alert:me'].message, /熔断/);
 
-  // 绝不自动恢复：推进到下一时段、触发 tick/inc/out/hello/active/排期同步均零请求
+  // 绝不自动恢复：推进到下一时段、触发 tick/inc/out/hello/active 均零请求
   const beforeNoAuto = [server.calls, server.outCalls];
   env.advanceNow(12 * 60 * 60_000);
   await listeners.alarm({ name: 'tick' });
@@ -225,9 +225,6 @@ test('账号异常硬熔断：命中 403/验证锁定信号、连续 3 次 429 �
   await fire('out');
   await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
   await pageSend({ type: 'xir:active' });
-  const schedRes = await pageSend({ type: 'xir:scheduled:sync', force: false });
-  assert.equal(schedRes.status, 'error');
-  assert.match(schedRes.message, /熔断/);
   assert.deepEqual([server.calls, server.outCalls], beforeNoAuto, '熔断期间任何路径均不得发请求');
   assert.equal(alarms['inc:me'], undefined, '熔断期间页面上线与 tick 不排期');
 

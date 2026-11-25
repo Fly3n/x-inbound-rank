@@ -15,7 +15,7 @@ import { mentionsApi } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
 import { maybeIncremental, handleInboundTap } from './incremental.js';
 import { handleOutboundTap, handleRepliesTap, syncOut, syncOutNow } from './outbound.js';
-import { handleScheduledTap, handlePostEvent, handleScheduledSync } from './scheduled.js';
+import { handleScheduledTap, handlePostEvent } from './scheduled.js';
 
 export async function maybePrune(account) {
   const cur = await kvGet(keys.cursor(account), {});
@@ -65,7 +65,7 @@ export const handlers = {
     const account = await senderAccount(msg, sender);
     const { url, kind } = msg;
     if (!account || typeof url !== 'string' || url.length > 30000) return {};
-    const template = kind === 'mentions' ? keys.tplMentions : kind === 'scheduled' ? keys.tplScheduled : keys.tpl;
+    const template = kind === 'mentions' ? keys.tplMentions : keys.tpl;
     await kvSet(template(account), { url, at: now() });
     if (template === keys.tpl) {
       const out = (await kvGet(keys.cursor(account), {})).out;
@@ -112,7 +112,6 @@ export const handlers = {
   },
   'xir:scheduled:tap': handleScheduledTap,
   'xir:postEvent': handlePostEvent,
-  'xir:scheduled:sync': handleScheduledSync,
   // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
   async 'xir:where'(msg, sender) {
     const { ids } = msg;

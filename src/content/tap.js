@@ -4,7 +4,7 @@
 (() => {
   const API = /\/i\/api\/(graphql|2)\//;
   const OP = /\/i\/api\/graphql\/[\w-]+\/(\w+)/;
-  const TPL_OP = /^User\w*Replies|^NotificationsTimeline$|^FetchScheduledTweets$/;
+  const TPL_OP = /^User\w*Replies|^NotificationsTimeline$/;
   const POST_OP = /^(CreateScheduledTweet|DeleteScheduledTweet)$/;
   const BOOT_INIT = 'ui:ch:i';
   const BOOT_READY = 'ui:ch:r';
@@ -89,6 +89,7 @@
     }
   };
   const MAX = 8_000_000; // 太大的返回不转
+  const MAX_POST = 200_000; // 排期增删请求/响应体上限
 
   const post = (text, meta, readHeader, status) => {
     try {
@@ -105,8 +106,16 @@
         const rv = meta?.repliesUrl ? { url: meta.repliesUrl, status } : undefined;
         emit({ s: current, tap: text, ...(meta?.op ? { top: meta.op } : {}), ...(ev ? { ev } : {}), ...(rv ? { rv } : {}) });
       }
-      if (meta.upper === 'POST' && POST_OP.test(meta.op)) {
-        emit({ s: current, pe: { op: meta.op, at: Date.now() } });
+      if (meta.upper === 'POST' && POST_OP.test(meta.op) && status >= 200 && status < 300) {
+        emit({
+          s: current,
+          pe: {
+            op: meta.op,
+            at: Date.now(),
+            ...(typeof meta.reqBody === 'string' && meta.reqBody.length < MAX_POST ? { req: meta.reqBody } : {}),
+            ...(typeof text === 'string' && text.length < MAX_POST ? { res: text } : {}),
+          },
+        });
       }
     } catch {
       // 忽略
@@ -114,11 +123,14 @@
   };
 
   const open = XMLHttpRequest.prototype.open;
+  const xhrSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (method, url) {
+    this.__xirMeta = null;
     try {
       const session = API.test(String(url)) && approved();
       if (session) {
         const meta = note(String(url), method, session);
+        this.__xirMeta = meta;
         this.addEventListener('load', () => {
           try {
             if (approved() !== session) return;
@@ -135,6 +147,17 @@
     }
     return open.apply(this, arguments);
   };
+  XMLHttpRequest.prototype.send = function (body) {
+    try {
+      const meta = this.__xirMeta;
+      if (meta && meta.upper === 'POST' && POST_OP.test(meta.op) && typeof body === 'string' && body.length < MAX_POST) {
+        meta.reqBody = body;
+      }
+    } catch {
+      // 忽略
+    }
+    return xhrSend.apply(this, arguments);
+  };
 
   const origFetch = window.fetch;
   window.fetch = function (input, init) {
@@ -144,6 +167,9 @@
       const session = API.test(String(url)) && approved();
       if (session) {
         const meta = note(String(url), init?.method || input?.method, session);
+        if (meta.upper === 'POST' && POST_OP.test(meta.op) && typeof init?.body === 'string' && init.body.length < MAX_POST) {
+          meta.reqBody = init.body;
+        }
         p.then((res) => {
           if (approved() !== session) return;
           return res.clone().text().then((text) => post(text, meta, (name) => res.headers.get(name), res.status));

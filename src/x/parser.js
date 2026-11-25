@@ -499,6 +499,96 @@ export function parseScheduledTweets(body) {
   return items;
 }
 
+function safeJson(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+/** 提取脱敏字段骨架路径（仅保留键名，绝不输出任何正文或用户数据），用于旁听诊断核对。 */
+function shapeKeys(obj, maxDepth = 3, maxKeys = 24) {
+  if (!obj || typeof obj !== 'object') return [];
+  const out = [];
+  const visit = (node, prefix, depth) => {
+    if (!node || typeof node !== 'object' || depth > maxDepth || out.length >= maxKeys) return;
+    if (Array.isArray(node)) {
+      if (node.length && node[0] && typeof node[0] === 'object') visit(node[0], `${prefix}[]`, depth + 1);
+      return;
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (out.length >= maxKeys) break;
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v) && depth < maxDepth) {
+        visit(v, path, depth + 1);
+      } else {
+        out.push(path);
+      }
+    }
+  };
+  visit(obj, '', 0);
+  return out;
+}
+
+const normalizeExecTs = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n < 1e12 ? n * 1000 : n;
+};
+
+/** 解析 CreateScheduledTweet 旁听请求体与响应体，返回新增排期条目与脱敏结构诊断。 */
+export function parseScheduledCreate(reqRaw, resRaw) {
+  const req = safeJson(reqRaw);
+  const res = safeJson(resRaw);
+  const diag = { reqKeys: shapeKeys(req), resKeys: shapeKeys(res) };
+  if (Array.isArray(res?.errors) && res.errors.length && !res?.data) {
+    return { item: null, reason: 'api_error', diag };
+  }
+  let executeAt = normalizeExecTs(req?.variables?.execute_at ?? req?.execute_at);
+  let text = schedSnippet(req?.variables?.post_tweet_request?.status ?? req?.variables?.status ?? '');
+  let id = null;
+  walk(res?.data, (n) => {
+    if (!id && typeof n.rest_id === 'string' && n.rest_id) id = n.rest_id;
+    if (!id && typeof n.scheduled_tweet_id === 'string' && n.scheduled_tweet_id) id = n.scheduled_tweet_id;
+    if (!id && typeof n.id === 'string' && n.id) id = n.id;
+    if (!executeAt) executeAt = normalizeExecTs(n.scheduling_info?.execute_at ?? n.execute_at);
+    if (!text) text = schedSnippet(n.tweet_create_request?.status ?? n.post_tweet_request?.status ?? n.status ?? '');
+  });
+  if (!executeAt) {
+    walk(req, (n) => {
+      if (!executeAt) executeAt = normalizeExecTs(n.execute_at);
+      if (!text) text = schedSnippet(n.post_tweet_request?.status ?? n.tweet_create_request?.status ?? n.status ?? '');
+    });
+  }
+  if (!executeAt) return { item: null, reason: 'missing_execute_at', diag };
+  return { item: { id: String(id ?? executeAt), executeAt, text }, reason: null, diag };
+}
+
+/** 解析 DeleteScheduledTweet 旁听请求体与响应体，返回被删排期 ID 与脱敏结构诊断。 */
+export function parseScheduledDelete(reqRaw, resRaw) {
+  const req = safeJson(reqRaw);
+  const res = safeJson(resRaw);
+  const diag = { reqKeys: shapeKeys(req), resKeys: shapeKeys(res) };
+  if (Array.isArray(res?.errors) && res.errors.length && !res?.data) {
+    return { id: null, reason: 'api_error', diag };
+  }
+  let id = req?.variables?.scheduled_tweet_id ?? req?.variables?.id ?? req?.variables?.rest_id ?? null;
+  if (!id) {
+    walk(req, (n) => {
+      if (!id && (typeof n.scheduled_tweet_id === 'string' || typeof n.scheduled_tweet_id === 'number')) {
+        id = String(n.scheduled_tweet_id);
+      }
+    });
+  }
+  if (!id) {
+    walk(res?.data, (n) => {
+      if (!id && typeof n.scheduled_tweet_id === 'string' && n.scheduled_tweet_id) id = n.scheduled_tweet_id;
+      if (!id && typeof n.rest_id === 'string' && n.rest_id) id = n.rest_id;
+    });
+  }
+  const cleanId = id != null && String(id).trim() ? String(id).trim() : null;
+  return { id: cleanId, reason: cleanId ? null : 'missing_id', diag };
+}
+
 const ACCOUNT_ANOMALY_CODES = new Set([32, 64, 89, 226, 326]);
 const ACCOUNT_ANOMALY_RE = /\b(account is locked|temporarily locked|temporarily restricted|suspended|automated|challenge|verify your account|bounce)\b/i;
 const HTML_CHALLENGE_RE = /<!doctype\s+html|<html\b|just a moment|account\/access|arkose|challenge|verify your/i;

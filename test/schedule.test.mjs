@@ -123,6 +123,7 @@ test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–4
   const { neighborSummary, formatGap } = globalThis.XIRSchedule;
   const both = neighborSummary(at(22, 8), {
     scheduled: [{ id: '1', executeAt: at(21, 32) }, { id: '2', executeAt: at(22, 45) }],
+    nowTs: at(20, 0),
   });
   assert.equal(both.prev.kind, 'scheduled');
   assert.equal(formatGap(both.prev.gapMs), '36 分钟');
@@ -132,9 +133,26 @@ test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–4
   const onlyPrevPost = neighborSummary(at(22, 8), {
     scheduled: [{ id: '1', executeAt: at(20, 0) }],
     lastPostAt: at(21, 30),
+    nowTs: at(21, 40),
   });
   assert.equal(onlyPrevPost.prev.kind, 'post');
   assert.equal(formatGap(onlyPrevPost.prev.gapMs), '38 分钟');
   assert.equal(onlyPrevPost.next, null);
   assert.equal(formatGap(95 * 60_000), '1 小时 35 分钟');
+
+  // 已到点发出的排期（无论归档进 recentSent 还是仍留在 scheduled 里自然过点）均参与 30 分钟首档顺延与「上一条」计算
+  const sentRecently = [{ id: 's1', executeAt: at(14, 0), text: '刚发出的排期' }];
+  const afterSentDay = buildDaySlots({ nowTs: at(14, 10), dayOffset: 0, scheduled: [], recentSent: sentRecently });
+  assert.equal(afterSentDay.slots[0].label, '14:30', '14:00 排期刚到点发出，14:10 打开时首档顺延到 14:30 之后');
+  const afterSentPick = pickJitteredTime(at(14, 30), {
+    nowTs: at(14, 10), scheduled: [], recentSent: sentRecently, random: () => 0, mode: 'next',
+  });
+  assert.ok(afterSentPick >= at(14, 30), '14:00 刚到点发出后，下一空档不得早于 14:30');
+  const sentNeighbor = neighborSummary(at(14, 35), { scheduled: [], recentSent: sentRecently, nowTs: at(14, 10) });
+  assert.equal(sentNeighbor.prev.kind, 'sent');
+  assert.equal(formatGap(sentNeighbor.prev.gapMs), '35 分钟');
+  // 未触发全量校准时，scheduled 中自然过点的旧排期也同样被识别为已发参考
+  const staleInList = neighborSummary(at(14, 35), { scheduled: sentRecently, nowTs: at(14, 10) });
+  assert.equal(staleInList.prev.kind, 'sent');
+  assert.equal(formatGap(staleInList.prev.gapMs), '35 分钟');
 });

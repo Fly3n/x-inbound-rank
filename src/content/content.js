@@ -110,9 +110,7 @@
     }
     const run = msg.kind === 'out'
       ? XIRFetcher.fetchMyReplies(msg.tpl, msg.cursor)
-      : msg.kind === 'scheduled'
-        ? XIRFetcher.fetchScheduled(msg.tpl)
-        : XIRFetcher.fetchMentions(msg.cursor, msg.tpl);
+      : XIRFetcher.fetchMentions(msg.cursor, msg.tpl);
     run.then((result) => sendResponse(XIRRel.session() === session && result.userId === session.userId
       ? result : { ok: false, error: 'no_session' }), () => sendResponse({ ok: false, error: 'no_session' }));
     return true;

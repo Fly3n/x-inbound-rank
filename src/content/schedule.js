@@ -88,14 +88,34 @@ const XIRSchedule = (() => {
     return false;
   }
 
+  function mergeAllItems(scheduled = [], recentSent = []) {
+    if (!recentSent?.length) return scheduled;
+    const byKey = new Map();
+    for (const item of [...recentSent, ...scheduled]) {
+      if (!item || !Number.isFinite(item.executeAt)) continue;
+      const key = String(item.id ?? item.executeAt);
+      if (!byKey.has(key) || (!byKey.get(key).text && item.text)) byKey.set(key, item);
+    }
+    return [...byKey.values()].sort((a, b) => a.executeAt - b.executeAt);
+  }
+
   /**
    * 首个可展示档位的最早时间戳：
    * - 必须至少晚于 now + 10 分钟（已过去的、过近的档跳过）；
-   * - 若刚发过主帖（lastPostAt 在近 30 分钟内），再顺延到 lastPostAt + 30 分钟之后。
+   * - 若刚发过主帖（lastPostAt）或刚有排期到点发出（recentSent / scheduled 中 executeAt <= nowTs）在近 30 分钟内，
+   *   再顺延到最近一条已发时间 + 30 分钟之后。
    */
-  function earliestAllowedTs(nowTs, lastPostAt = 0) {
+  function earliestAllowedTs(nowTs, lastPostAt = 0, recentSent = [], scheduled = []) {
     const fromNow = nowTs + LEAD_MS;
-    const fromPost = lastPostAt && lastPostAt <= nowTs && nowTs - lastPostAt < POST_BUFFER_MS ? lastPostAt + POST_BUFFER_MS : 0;
+    let latestSent = lastPostAt && lastPostAt <= nowTs ? lastPostAt : 0;
+    for (const list of [recentSent, scheduled]) {
+      for (const item of list || []) {
+        if (item && Number.isFinite(item.executeAt) && item.executeAt <= nowTs && item.executeAt > latestSent) {
+          latestSent = item.executeAt;
+        }
+      }
+    }
+    const fromPost = latestSent && nowTs - latestSent < POST_BUFFER_MS ? latestSent + POST_BUFFER_MS : 0;
     return Math.max(fromNow, fromPost);
   }
 
@@ -103,25 +123,26 @@ const XIRSchedule = (() => {
    * 生成某一天（从 dayOffset = 0 今天起）的档位列表。
    * 今天自动过滤掉早于 earliestAllowedTs 的档位；未来日期展示完整 07:00–24:00。
    */
-  function buildDaySlots({ nowTs = Date.now(), dayOffset = 0, scheduled = [], lastPostAt = 0 } = {}) {
+  function buildDaySlots({ nowTs = Date.now(), dayOffset = 0, scheduled = [], recentSent = [], lastPostAt = 0 } = {}) {
+    const combined = mergeAllItems(scheduled, recentSent);
     const base = new Date(startOfDay(nowTs));
     base.setDate(base.getDate() + dayOffset);
     const dayStart = base.getTime();
     const dayMin = dayStart + START_MIN * MIN_MS;
     const dayMax = dayStart + END_MIN * MIN_MS;
-    const minTs = dayOffset === 0 ? earliestAllowedTs(nowTs, lastPostAt) : 0;
+    const minTs = dayOffset === 0 ? earliestAllowedTs(nowTs, lastPostAt, recentSent, scheduled) : 0;
     const slots = [];
     for (let m = START_MIN; m <= END_MIN; m += STEP_MIN) {
       const d = new Date(base.getFullYear(), base.getMonth(), base.getDate(), Math.floor(m / 60), m % 60, 0, 0);
       const ts = d.getTime();
       if (dayOffset === 0 && ts < minTs) continue;
-      const items = conflictsFor(ts, scheduled);
+      const items = conflictsFor(ts, combined);
       let tooClose = false;
       let occupied = items.length > 0;
-      if (!occupied && !hasSafeMinuteInSlot(ts, { minTs: Math.max(nowTs + MIN_FUTURE_MS, minTs), dayMin, dayMax, scheduled })) {
+      if (!occupied && !hasSafeMinuteInSlot(ts, { minTs: Math.max(nowTs + MIN_FUTURE_MS, minTs), dayMin, dayMax, scheduled: combined })) {
         occupied = true;
         tooClose = true;
-        for (const item of scheduled) {
+        for (const item of combined) {
           if (item && Number.isFinite(item.executeAt) && Math.abs(item.executeAt - ts) < MIN_GAP_MS + SEARCH_MAX * MIN_MS) {
             items.push(item);
           }
@@ -147,13 +168,13 @@ const XIRSchedule = (() => {
    * - primary：首个有档位的日期（今天或明天）
    * - groups：按天分组的所有档位（去掉空天，供「更多档期」下拉列表使用）
    */
-  function buildSchedulePlan({ nowTs = Date.now(), days = 7, scheduled = [], lastPostAt = 0 } = {}) {
+  function buildSchedulePlan({ nowTs = Date.now(), days = 7, scheduled = [], recentSent = [], lastPostAt = 0 } = {}) {
     const groups = [];
     for (let i = 0; i < days; i++) {
-      const g = buildDaySlots({ nowTs, dayOffset: i, scheduled, lastPostAt });
+      const g = buildDaySlots({ nowTs, dayOffset: i, scheduled, recentSent, lastPostAt });
       if (g.slots.length) groups.push(g);
     }
-    const primary = groups[0] || buildDaySlots({ nowTs, dayOffset: 1, scheduled, lastPostAt });
+    const primary = groups[0] || buildDaySlots({ nowTs, dayOffset: 1, scheduled, recentSent, lastPostAt });
     return { primary, groups };
   }
 
@@ -176,8 +197,9 @@ const XIRSchedule = (() => {
    * - mode === 'slot'（点具体档位，如 22:00）：
    *   · 优先在 ±1–3 分钟内小幅浮动（避开整点/半点）；若不足 25 分钟安全间距，则就近微调到最贴近的安全分钟。
    */
-  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], random = Math.random, dayStart = null, lastPostAt = 0, mode = 'slot' } = {}) {
-    const minTs = Math.max(nowTs + MIN_FUTURE_MS, earliestAllowedTs(nowTs, lastPostAt));
+  function pickJitteredTime(slotTs, { nowTs = Date.now(), scheduled = [], recentSent = [], random = Math.random, dayStart = null, lastPostAt = 0, mode = 'slot' } = {}) {
+    const combined = mergeAllItems(scheduled, recentSent);
+    const minTs = Math.max(nowTs + MIN_FUTURE_MS, earliestAllowedTs(nowTs, lastPostAt, recentSent, scheduled));
     let slotDay = dayStart;
     if (!Number.isFinite(slotDay)) {
       const d = new Date(slotTs);
@@ -186,7 +208,7 @@ const XIRSchedule = (() => {
     }
     const dayMin = slotDay + START_MIN * MIN_MS;
     const dayMax = slotDay + END_MIN * MIN_MS;
-    const ctx = { minTs, dayMin, dayMax, scheduled };
+    const ctx = { minTs, dayMin, dayMax, scheduled: combined };
     const pickRandom = (list) => list[Math.min(list.length - 1, Math.floor(random() * list.length))];
     const isRoundHalfHour = (ts) => new Date(ts).getMinutes() % 30 === 0;
 
@@ -197,7 +219,7 @@ const XIRSchedule = (() => {
     }
 
     if (mode === 'next') {
-      const { prev, next } = neighborSummary(slotTs, { scheduled, lastPostAt });
+      const { prev, next } = neighborSummary(slotTs, { scheduled, recentSent, lastPostAt, nowTs });
       // 1) 前后夹着排期且空隙 50–80 分钟：取中点 ±1–3 分钟均匀居中
       if (prev && next) {
         const span = next.ts - prev.ts;
@@ -269,21 +291,34 @@ const XIRSchedule = (() => {
   }
 
   /**
-   * 计算目标时间 targetTs 的前一条参考（已有排期或 24 小时内刚发主帖）与后一条已有排期。
-   * @returns {{ prev: { ts, gapMs, kind: 'scheduled'|'post' }|null, next: { ts, gapMs, kind: 'scheduled' }|null }}
+   * 计算目标时间 targetTs 的前一条参考（已有排期、24 小时内已到点发出的排期或刚发主帖）与后一条已有排期。
+   * @returns {{ prev: { ts, gapMs, kind: 'scheduled'|'sent'|'post' }|null, next: { ts, gapMs, kind: 'scheduled' }|null }}
    */
-  function neighborSummary(targetTs, { scheduled = [], lastPostAt = 0 } = {}) {
+  function neighborSummary(targetTs, { scheduled = [], recentSent = [], lastPostAt = 0, nowTs = Date.now() } = {}) {
+    const DAY_WINDOW = 24 * 3_600_000;
     let prev = null;
     let next = null;
     for (const item of scheduled) {
       if (!item || !Number.isFinite(item.executeAt)) continue;
-      if (item.executeAt < targetTs && (!prev || item.executeAt > prev.ts)) {
-        prev = { ts: item.executeAt, gapMs: targetTs - item.executeAt, kind: 'scheduled' };
+      if (item.executeAt < targetTs) {
+        const isSent = item.executeAt <= nowTs;
+        if (isSent && targetTs - item.executeAt > DAY_WINDOW) continue;
+        if (!prev || item.executeAt > prev.ts) {
+          prev = { ts: item.executeAt, gapMs: targetTs - item.executeAt, kind: isSent ? 'sent' : 'scheduled' };
+        }
       } else if (item.executeAt > targetTs && (!next || item.executeAt < next.ts)) {
         next = { ts: item.executeAt, gapMs: item.executeAt - targetTs, kind: 'scheduled' };
       }
     }
-    if (lastPostAt > 0 && lastPostAt < targetTs && targetTs - lastPostAt <= 24 * 3_600_000) {
+    for (const item of recentSent) {
+      if (!item || !Number.isFinite(item.executeAt)) continue;
+      if (item.executeAt < targetTs && targetTs - item.executeAt <= DAY_WINDOW) {
+        if (!prev || item.executeAt > prev.ts) {
+          prev = { ts: item.executeAt, gapMs: targetTs - item.executeAt, kind: 'sent' };
+        }
+      }
+    }
+    if (lastPostAt > 0 && lastPostAt < targetTs && targetTs - lastPostAt <= DAY_WINDOW) {
       if (!prev || lastPostAt > prev.ts) {
         prev = { ts: lastPostAt, gapMs: targetTs - lastPostAt, kind: 'post' };
       }
