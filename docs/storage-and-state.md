@@ -73,12 +73,14 @@
 - 仅在 `fullFor === 0` 或已有旧结构升级（`schema < OUT_SCHEMA`）时做完整补历史；新账号无 `syncedId` 直接点出站「立即更新」时进入免补历史建起点模式（`bootstrap`，最多读 2 页即建立 `syncedId` 且不冒充已补历史）。达到 `PACE.outMaxRounds`（45 轮 × 5 页 = 225 页）记 `error` + `limitReached: true`；返回 400/404 删除 `tpl:replies:<账号>` 并在拿到新 `xir:tpl` 后 3 秒续完进行中的手动任务。
 - **显示口径（有啥显示啥）**：`board()` 与 `refreshSnapshot()` 只要 `OUT` 表存在任一条非 `own` 记录，或 `cur.out?.lastAt` 存在，即在榜单与时间线标签按当前 `windowDays` 聚合展示「我回 N」；仅当两者皆无时才显示「—」。
 
-### 手动增量与分页异常边界
+### 手动补读（统一入口：自定义小时/天 + 连续区间智能早停）
 
-- **不再定时自动抓取**：`maybeIncremental` 仅响应用户点击「立即更新」（`manual: true`）或续完该次未结束的分段手动任务（`cur.incResume?.manual === true`）；`tick`、`xir:active` 与 `recoverAlarms` 绝不自动发起入站或出站请求，升级时顺手清理旧版遗留的非手动 `inc:` / `out:` 闹钟。
-- **免补历史直启与重叠即停**：尚未补过历史（无 `syncedId`）的账号手动点「立即更新」时，可直接以启用时间 `activation` 为起点最多翻 2 页建立接续点；已有 `syncedId` 时只要本页 `oldestId` 已与 `syncedId` 重叠（`!idGt(p.oldestId, stopAt)`）或越过 `KEEP_DAYS` 即停。
-- **单轮 48 页安全上限**：入站手动更新单轮最多续读 `PACE.incMaxRounds = 8` 段（`8 × 6 = 48` 页）。第 8 段仍未重叠接续点时清除 `incResume`、置位 `cur.incLimitReached = true`、记录 `inc_limit_reached` 并停下提示。
-- 入站或出站增量在接上旧接续点前遇到空页、无下一页或重复 `bottomCursor` 一律按分页异常中止，**绝不推进** `syncedId` / `lastIncrementalAt` / `coverTs`。
+- **不再区分「补历史」与「立即更新」**：用户手动选择 `1–24 小时` 或 `1–15 天`（`hours ∈ [1, 360]`），从当下往回 `fetch` 到 `targetTs = now - hours * 3_600_000`。
+- **智能双条件早停**：
+  - 入站（`≤ 24 小时` 走 `incremental.js` 轻量节奏 4–28s / 单轮 48 页；`> 24 小时` 走 `backfill.js` 慢速节奏 15–110s / 单次 220 页）：本页 `oldestTs < targetTs`（到达所选时长边界）**或**「上次连续覆盖 `lastBackfill.oldestTs <= targetTs` 且本页 `oldestId` 已重叠 `syncedId`」时立即停下。
+  - 出站（`outbound.js`，50 次/15 分钟节奏，每轮 5 页 / 上限 225 页）：本页 `oldestTs < targetTs`（或长回填 `newestTs < targetTs`）**或**「上次连续覆盖 `out.coverTs <= targetTs` 且本页 `oldestId` 已重叠 `out.syncedId`」时立即停下。
+  - 若本次跨过了未覆盖的空白期（未命中旧 `syncedId`），则以本次实际到达的时间重建连续覆盖区间，不冒充覆盖空白期。
+- 入站或出站分页在达到停止条件前遇到重复 `bottomCursor` 一律按分页异常中止，**绝不推进** `syncedId` / `lastIncrementalAt` / `coverTs`。
 - 解析层遇到已删除/受保护等不可用单条回复只跳过该条；结构未知或作者数字 ID 缺失则整页抛 `ParseError`。
 
 ## 风控与并发参数（`src/bg/runtime.js` `PACE`）
