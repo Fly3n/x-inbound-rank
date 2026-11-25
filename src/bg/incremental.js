@@ -190,8 +190,8 @@ export async function maybeIncremental(account, manual = false, opts = {}) {
     };
     for (let page = 0; page < maxPages; page++) {
       if (page) await sleep(humanIncDelay());
-      const trace = { account, mode: taskManual ? 'inbound_manual' : 'inbound_auto', run, page: page + 1 };
-      const res = await pull(account, cursor, api, batch, trace);
+      const trace = { account, mode: 'inbound_manual', run, page: page + 1 };
+      const res = await pull(account, cursor, api, batch, trace, false, { allowCircuitProbe: manual && page === 0 });
       if (manual && canRequest && !manualMarked && !['no_tab', 'outside_window', 'tpl_bad'].includes(res.kind)) {
         manualMarked = true;
         await updateCursor(account, (c) => { c.lastManualAt = now(); });
@@ -234,12 +234,22 @@ export async function maybeIncremental(account, manual = false, opts = {}) {
         c.lastAttemptAt = now();
       });
       if (res.kind === 'unavailable') {
-        const wait = serviceWait(cur.serviceRetries);
+        const retries = (cur.serviceRetries || 0) + 1;
+        if (retries >= PACE.maxServiceRetries) {
+          await updateCursor(account, (c) => {
+            delete c.incResume;
+            c.serviceRetries = retries;
+          });
+          await chrome.alarms.clear(alarmFor(INC_ALARM, account));
+          await setAlert(account, `X 连续 ${retries} 次暂时不可用（HTTP ${res.status}），本次读取已停止，请稍后重试`);
+          return { error: `别人回我连续 ${retries} 次读取失败（HTTP ${res.status}），已停止。` };
+        }
+        const wait = serviceWait(retries - 1);
         const when = nextActiveAt(now() + wait);
         await updateCursor(account, (c) => {
           if (cursor) saveResume(c, when);
           else c.nextIncAt = when;
-          c.serviceRetries = (c.serviceRetries || 0) + 1;
+          c.serviceRetries = retries;
         });
         if (cursor) await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
         await setAlert(account, `X 暂时不可用（HTTP ${res.status}），请稍后重试`);
@@ -296,7 +306,7 @@ export async function maybeIncremental(account, manual = false, opts = {}) {
         : !p.bottomCursor ? 'no_next_page'
         : (p.oldestTs != null && p.oldestTs < floorTs) ? 'retention_boundary'
         : null;
-      const endedBeforeCheckpoint = !targetTs && stopAt !== EMPTY_SYNC_ID && !overlapped &&
+      const endedBeforeCheckpoint = stopAt !== EMPTY_SYNC_ID && !overlapped && !reachedWindow && (canEarlyStop || !targetTs) &&
         (stopReason === 'empty_page' || stopReason === 'no_next_page');
       if (endedBeforeCheckpoint) {
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'ended_before_checkpoint', checkpoint: stopAt });

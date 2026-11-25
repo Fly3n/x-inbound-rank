@@ -69,6 +69,8 @@ const XIRFetcher = (() => {
       rateResetAt: reset ? reset * 1000 : null,
       cfMitigated: res.headers.get('cf-mitigated') || null,
       contentType: res.headers.get('content-type') || null,
+      redirected: Boolean(res.redirected),
+      finalUrl: res.redirected ? String(res.url || '') : null,
     };
     if (diagnose) {
       out.responseMetadata = {

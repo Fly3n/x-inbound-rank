@@ -11,7 +11,7 @@ import {
 } from './runtime.js';
 import { clearAccountAlarms, recoverAlarms } from './alarms.js';
 import { senderAccount, activePage, pingPages, hasVisiblePage, setAccountEnabled, refreshActiveStaleTab } from './accounts.js';
-import { mentionsApi, clearAccountCircuit } from './transport.js';
+import { mentionsApi } from './transport.js';
 import { startBackfill, pauseJob, resumeJob } from './backfill.js';
 import { maybeIncremental, handleInboundTap } from './incremental.js';
 import { handleOutboundTap, handleRepliesTap, syncOut, syncOutNow } from './outbound.js';
@@ -128,21 +128,19 @@ export const handlers = {
     return {};
   },
 
-  // 弹窗：别人回我手动补读（≤24 小时走轻量节奏，>24 小时走慢速回填节奏）
+  // 弹窗：别人回我手动补读（≤24 小时走轻量节奏，>24 小时走慢速回填节奏；半开试探仅在请求成功后解除熔断）
   async manualFetchIn({ account, hours }) {
     const h = Math.round(Number(hours));
     if (!Number.isInteger(h) || h < 1 || h > 15 * 24) return { error: '补读时长仅支持 1–24 小时或 1–15 天。' };
     if (h <= 24) return handlers.updateNowWithReceipt({ account, hours: h });
     if (!(await hasVisiblePage(account))) return { error: '请切到该账号的 X 页面后再补读。' };
-    await clearAccountCircuit(account);
     return startBackfill(account, { hours: h });
   },
-  // 弹窗：我回别人手动补读（支持自定义小时/天 + 智能早停）
+  // 弹窗：我回别人手动补读（支持自定义小时/天 + 智能早停；半开试探仅在请求成功后解除熔断）
   async manualFetchOut({ account, hours }) {
     const h = Math.round(Number(hours));
     if (!Number.isInteger(h) || h < 1 || h > 15 * 24) return { error: '补读时长仅支持 1–24 小时或 1–15 天。' };
     if (!(await hasVisiblePage(account))) return { error: '请切到该账号的 X 页面后再补读。' };
-    await clearAccountCircuit(account);
     return syncOutNow({ account, hours: h });
   },
 
@@ -155,7 +153,6 @@ export const handlers = {
     const beforeManual = await kvGet(keys.cursor(account), {});
     const wait = PACE.manualCooldownMs - (now() - (beforeManual.lastManualAt || 0));
     if (wait > 0) return { error: `刚刚更新过，请 ${Math.ceil(wait / 60_000)} 分钟后再试。` };
-    await clearAccountCircuit(account);
     const result = await maybeIncremental(account, true, hours ? { hours } : {});
     if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
     if (!result?.ok && !result?.deferred) return result;
@@ -177,7 +174,6 @@ export const handlers = {
     if (blockedUntil > now()) {
       return { error: `接口正在退避，请在 ${new Date(blockedUntil).toLocaleTimeString()} 后再试。` };
     }
-    await clearAccountCircuit(account);
     await syncOut(account, true);
     const after = (await kvGet(keys.cursor(account), {})).out;
     if (after?.status === 'need_tpl') return { message: after.message };
@@ -217,19 +213,10 @@ export const handlers = {
   },
   exportAll: async ({ account }) => ({ inbound: await getEvents(account), out: await getEvents(account, OUT) }),
   getReplies: async ({ account, actorId }) => repliesOf(await getEvents(account), actorId, await getSettings(account), now(), 50, await getEvents(account, OUT)),
-  startBackfill: async ({ account }) => {
-    await clearAccountCircuit(account);
-    return startBackfill(account);
-  },
-  syncOutNow: async ({ account }) => {
-    await clearAccountCircuit(account);
-    return syncOutNow({ account });
-  },
+  startBackfill: ({ account }) => startBackfill(account),
+  syncOutNow: ({ account }) => syncOutNow({ account }),
   pauseJob: async ({ account }) => (await pauseJob(account), { ok: true }),
-  resumeJob: async ({ account }) => {
-    await clearAccountCircuit(account);
-    return resumeJob(account);
-  },
+  resumeJob: ({ account }) => resumeJob(account),
   async setSettings({ account, patch }) {
     if ('windowDays' in patch && !WINDOWS.includes(patch.windowDays)) return { error: '榜单范围只能是 7 天、15 天、30 天、2 个月或 3 个月' };
     if ('initDays' in patch && !INIT_WINDOWS.includes(patch.initDays)) return { error: '补历史范围只能是 7 天或 15 天' };

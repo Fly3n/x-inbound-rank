@@ -499,3 +499,93 @@ test('统一手动补读（manualFetchOut）：自定义小时窗口截断与连
     delete alarms['out:me'];
   }
 });
+
+test('出站异常中止防死循环：第 2 轮起非 2xx/解析异常与连续 3 次 503 清空 resume/manualTask/闹钟，tick 与 hello 零重打', { timeout: 20_000 }, async () => {
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  const savedCursor = structuredClone(store['cursor:me']);
+  const savedNow = env.getNow();
+  const realSend = chrome.tabs.sendMessage;
+  try {
+    // 场景 1：已有第 2 轮 resume 且 manualTask: true 时遇到 HTTP 500，必须清空 resume/retryAt/manualTask/OUT_ALARM
+    store['cursor:me'] = {
+      ...(store['cursor:me'] || {}),
+      out: {
+        status: 'queued', manualTask: true, fullFor: 0, initDays: 7, targetTs: Date.now() - 7 * env.DAY,
+        resume: { cursor: '2', topId: '9005', rounds: 1, full: true, stopAt: null, nextAt: 0 },
+      },
+    };
+    let fetchHits = 0;
+    chrome.tabs.sendMessage = async (id, msg) => {
+      if (msg.type === 'xir:fetch' && msg.kind === 'out') {
+        fetchHits++;
+        return { ok: false, status: 500, userId: '1' };
+      }
+      return realSend(id, msg);
+    };
+    await fire('out');
+    assert.equal(fetchHits, 1);
+    assert.equal(store['cursor:me'].out.status, 'error');
+    assert.equal(store['cursor:me'].out.resume, null, '非 2xx 失败必须清空 resume');
+    assert.equal(store['cursor:me'].out.retryAt, null);
+    assert.equal(store['cursor:me'].out.manualTask, false, '非 2xx 失败必须清空 manualTask');
+    assert.equal(alarms['out:me'], undefined, '非 2xx 失败必须清理 OUT_ALARM');
+
+    // 后续 tick / xir:hello / fire('out') 不得重新排期或继续重打
+    await listeners.alarm({ name: 'tick' });
+    await pageSend({ type: 'xir:hello', handle: 'Me', userId: '1' });
+    assert.equal(alarms['out:me'], undefined, 'error 状态的出站任务绝不被 tick 或 hello 重新武装闹钟');
+    await fire('out');
+    assert.equal(fetchHits, 1, '失败后不再发出任何出站请求');
+
+    // 场景 2：ParseError 同样清空 resume/manualTask/OUT_ALARM
+    store['cursor:me'].out = {
+      status: 'queued', manualTask: true, fullFor: 0, initDays: 7, targetTs: Date.now() - 7 * env.DAY,
+      resume: { cursor: '2', topId: '9005', rounds: 1, full: true, stopAt: null, nextAt: 0 },
+    };
+    chrome.tabs.sendMessage = async (id, msg) => {
+      if (msg.type === 'xir:fetch' && msg.kind === 'out') {
+        fetchHits++;
+        return { ok: true, status: 200, userId: '1', body: { data: {} } };
+      }
+      return realSend(id, msg);
+    };
+    await fire('out');
+    assert.equal(fetchHits, 2);
+    assert.equal(store['cursor:me'].out.status, 'error');
+    assert.equal(store['cursor:me'].out.resume, null, 'ParseError 必须清空 resume');
+    assert.equal(store['cursor:me'].out.manualTask, false);
+    assert.equal(alarms['out:me'], undefined);
+    await listeners.alarm({ name: 'tick' });
+    assert.equal(alarms['out:me'], undefined);
+
+    // 场景 3：连续 3 次 503 到达上限后中止，不得无限重打
+    let s503Hits = 0;
+    store['cursor:me'].out = { status: 'ok', lastManualAt: 0, retryAt: 0, resume: null, manualTask: false };
+    chrome.tabs.sendMessage = async (id, msg) => {
+      if (msg.type === 'xir:fetch' && msg.kind === 'out') {
+        s503Hits++;
+        return { ok: false, status: 503, userId: '1' };
+      }
+      return realSend(id, msg);
+    };
+    await send({ type: 'manualFetchOut', account: 'me', hours: 3 });
+    await until(() => s503Hits === 1 && alarms['out:me'], '第 1 次 503 排退避重试');
+    env.setNow(store['cursor:me'].out.retryAt + 1_000);
+    await fire('out');
+    assert.equal(s503Hits, 2);
+    assert.ok(alarms['out:me'], '第 2 次 503 排退避重试');
+    env.setNow(store['cursor:me'].out.retryAt + 1_000);
+    await fire('out');
+    assert.equal(s503Hits, 3);
+    assert.equal(store['cursor:me'].out.status, 'error', '第 3 次连续 503 到达上限直接中止');
+    assert.match(store['cursor:me'].out.message, /连续 3 次/);
+    assert.equal(store['cursor:me'].out.resume, null);
+    assert.equal(store['cursor:me'].out.manualTask, false);
+    assert.equal(alarms['out:me'], undefined);
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+    env.setNow(savedNow);
+    store['cursor:me'] = savedCursor;
+    delete alarms['out:me'];
+  }
+});

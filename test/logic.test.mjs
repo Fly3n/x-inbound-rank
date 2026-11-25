@@ -490,8 +490,12 @@ test('detectAccountAnomaly：精准识别 401/403、cf-mitigated、非 5xx HTML 
   assert.equal(detectAccountAnomaly(200, { errors: [{ code: 64, message: 'Your account is suspended' }] })?.code, 64);
   assert.ok(detectAccountAnomaly(200, { errors: [{ kind: 'Bounce', message: 'Challenge required' }] }));
   assert.equal(detectAccountAnomaly(200, undefined, { cfMitigated: 'challenge', error: 'not_json' })?.code, 'cf_mitigated');
+  assert.equal(detectAccountAnomaly(429, undefined, { cfMitigated: 'challenge', error: 'not_json' })?.code, 'cf_mitigated');
+  assert.equal(detectAccountAnomaly(200, undefined, { redirected: true, finalUrl: 'https://x.com/account/access' })?.code, 'challenge_redirect');
+  assert.equal(detectAccountAnomaly(200, undefined, { redirected: true, finalUrl: 'https://x.com/i/flow/login?redirect_after_login=%2Fhome' })?.code, 'challenge_redirect');
   assert.equal(detectAccountAnomaly(200, undefined, { error: 'not_json', contentType: 'text/html; charset=utf-8', detail: '<!DOCTYPE html><title>Just a moment...</title>' })?.code, 'html_challenge');
-  assert.equal(detectAccountAnomaly(503, undefined, { error: 'not_json', contentType: 'text/html', detail: '<!DOCTYPE html>503 Service Unavailable' }), null, '5xx 临时网关错误页不能误触发硬熔断');
+  assert.equal(detectAccountAnomaly(503, undefined, { error: 'not_json', contentType: 'text/html; charset=utf-8', detail: '<!DOCTYPE html><title>Just a moment...</title>' })?.code, 'html_challenge', '503 携带强 Cloudflare/Arkose 挑战页应触发硬熔断');
+  assert.equal(detectAccountAnomaly(503, undefined, { error: 'not_json', contentType: 'text/html', detail: '<!DOCTYPE html>503 Service Unavailable' }), null, '普通 5xx 临时网关错误页不能误触发硬熔断');
   assert.equal(detectAccountAnomaly(429, { errors: [{ code: 88, message: 'Rate limit exceeded' }] }), null);
   assert.equal(detectAccountAnomaly(503, {}), null);
   assert.equal(detectAccountAnomaly(404, {}), null);

@@ -46,6 +46,7 @@ export async function startBackfill(account, opts = {}) {
     ...(customHours ? { hours: customHours } : {}),
     targetTs,
     ...(stopAt ? { stopAt, prevOldestTs } : {}),
+    probeCircuit: true,
     cursor: null,
     pages: 0,
     added: 0,
@@ -114,11 +115,12 @@ export async function stepBackfill(account) {
     }
 
     const trace = { account, mode: 'inbound_backfill', run: job.startedAt, page: job.pages + 1 };
-    const res = await pull(account, job.cursor, 'gql', undefined, trace);
+    const res = await pull(account, job.cursor, 'gql', undefined, trace, false, { allowCircuitProbe: !!job.probeCircuit });
     // 请求的这一两秒里，用户可能点了暂停、重新初始化或清空：那就以存储里的为准，这一步的结果不再写回
     const latest = await kvGet(keys.job(account));
     if (!await enabledAccount(account) || !latest || latest.startedAt !== job.startedAt || latest.status !== 'running') return;
     if (res.kind === 'circuit_broken') return;
+    if (res.kind === 'ok' && job.probeCircuit) job.probeCircuit = false;
 
     if (res.kind === 'tpl_bad') {
       // 通知模板缺失或已过期：不再降级打废弃旧 REST，等待用户打开一次 X 通知页后自动继续
@@ -143,13 +145,23 @@ export async function stepBackfill(account) {
       job.message = '账号正在限流退避，到时间自动继续';
       await scheduleJob(account, job, Math.max(PACE.backoffStartMs, (res.retryAt || 0) - now()));
     } else if (res.kind === 'unavailable') {
-      job.status = 'paused';
-      job.auto = true;
-      job.message = `X 暂时不可用（HTTP ${res.status}），稍后从当前页重试`;
-      const wait = serviceWait(job.serviceRetries);
-      job.serviceRetries = (job.serviceRetries || 0) + 1;
-      await scheduleJob(account, job, wait);
-      await record('retry_scheduled', { ...trace, source: 'backfill', status: res.status, waitMs: wait });
+      const retries = (job.serviceRetries || 0) + 1;
+      job.serviceRetries = retries;
+      if (retries >= PACE.maxServiceRetries) {
+        job.status = 'error';
+        job.auto = false;
+        job.nextAt = null;
+        job.message = `X 连续 ${retries} 次暂时不可用（HTTP ${res.status}），已停止补读，请稍后手动继续`;
+        await chrome.alarms.clear(alarmFor(JOB_ALARM, account));
+        await setAlert(account, job.message);
+      } else {
+        job.status = 'paused';
+        job.auto = true;
+        job.message = `X 暂时不可用（HTTP ${res.status}），稍后从当前页重试`;
+        const wait = serviceWait(retries - 1);
+        await scheduleJob(account, job, wait);
+        await record('retry_scheduled', { ...trace, source: 'backfill', status: res.status, waitMs: wait });
+      }
     } else if (res.kind === 'rate') {
       job.status = 'paused';
       job.auto = true;
@@ -235,6 +247,8 @@ export async function resumeJob(account) {
   if (!job || !['paused', 'error', 'waiting_tab'].includes(job.status)) return { error: '没有可继续的任务' };
   job.status = 'running';
   job.auto = false;
+  job.probeCircuit = true;
+  job.serviceRetries = 0;
   job.message = null;
   await saveJob(account, job);
   stepBackfill(account);

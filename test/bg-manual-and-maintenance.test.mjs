@@ -231,12 +231,113 @@ test('账号异常硬熔断：命中 403/验证锁定信号、连续 3 次 429 �
   assert.deepEqual([server.calls, server.outCalls], beforeNoAuto, '熔断期间任何路径均不得发请求');
   assert.equal(alarms['inc:me'], undefined, '熔断期间页面上线与 tick 不排期');
 
-  // 仅用户显式手动触发读取时解除熔断并正常执行
+  // 仅用户显式手动触发读取时以「半开探测」尝试恢复：
+  // 1) 退避期或夜间窗口被拦下时，绝不预先清除 circuitBroken
+  const savedNowBeforeProbe = env.getNow();
+  store['cursor:me'].lastManualAt = 0;
+  store['cursor:me'].rateUntil = Date.now() + 30 * 60_000;
+  const blockedProbe = await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.match(blockedProbe.error, /退避/);
+  assert.equal(store['cursor:me'].circuitBroken.code, 326, '退避期点手动更新绝不提前清空熔断标记');
+  store['cursor:me'].rateUntil = 0;
+
+  env.setNow(new Date(2026, 10, 21, 2, 0, 0, 0).getTime());
+  const nightProbe = await send({ type: 'updateNowWithReceipt', account: 'me' });
+  assert.match(nightProbe.error, /08:00/);
+  assert.equal(store['cursor:me'].circuitBroken.code, 326, '夜间点手动更新绝不提前清空熔断标记');
+  env.setNow(savedNowBeforeProbe);
+
+  // 2) 探测请求失败（非 2xx）时，熔断标记保持不解除
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') return { ok: false, status: 500, userId: '1' };
+    return realSend(id, msg);
+  };
+  try {
+    store['cursor:me'].lastManualAt = 0;
+    const failedProbe = await send({ type: 'updateNowWithReceipt', account: 'me' });
+    assert.ok(failedProbe.error);
+    assert.equal(store['cursor:me'].circuitBroken.code, 326, '探测失败不得解除熔断标记');
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+  }
+
+  // 3) 仅探测拿到 X 正常 ok 响应后，才解除熔断与告警
   store['cursor:me'].lastManualAt = 0;
   const recovered = await send({ type: 'updateNowWithReceipt', account: 'me' });
   assert.equal(recovered.ok, true);
-  assert.equal(store['cursor:me'].circuitBroken, undefined, '用户手动更新后解除熔断标记');
+  assert.equal(store['cursor:me'].circuitBroken, undefined, '探测成功后解除熔断标记');
   assert.equal(store['alert:me'], undefined, '解除熔断后清除告警');
+
+  // 429 同时携带 cf-mitigated 信号时，第 1 次即直接硬熔断，不被 429 早返回遮蔽
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') return { ok: false, status: 429, userId: '1', cfMitigated: 'challenge', error: 'not_json' };
+    return realSend(id, msg);
+  };
+  try {
+    store['cursor:me'].rate429Count = 0;
+    store['cursor:me'].rateUntil = 0;
+    store['cursor:me'].lastManualAt = 0;
+    const cf429 = await send({ type: 'updateNowWithReceipt', account: 'me' });
+    assert.match(cf429.error, /熔断/);
+    assert.equal(store['cursor:me'].circuitBroken.code, 'cf_mitigated', '429 + cf-mitigated 首次即硬熔断');
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+  }
+
+  // 503 携带强 Cloudflare/Arkose 挑战页时直接硬熔断
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') {
+      return { ok: false, status: 503, userId: '1', error: 'not_json', contentType: 'text/html', detail: '<!DOCTYPE html><title>Just a moment...</title>' };
+    }
+    return realSend(id, msg);
+  };
+  try {
+    delete store['cursor:me'].circuitBroken;
+    store['cursor:me'].rateUntil = 0;
+    store['cursor:me'].lastManualAt = 0;
+    const cf503 = await send({ type: 'updateNowWithReceipt', account: 'me' });
+    assert.match(cf503.error, /熔断/);
+    assert.equal(store['cursor:me'].circuitBroken.code, 'html_challenge', '503 强挑战页直接硬熔断');
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+  }
+
+  // 连续 3 次普通 503 到达上限后中止并清空续读与闹钟（含翻页中途续读）
+  let inc503 = 0;
+  chrome.tabs.sendMessage = async (id, msg) => {
+    if (msg.type === 'xir:fetch') {
+      inc503++;
+      return { ok: false, status: 503, userId: '1' };
+    }
+    return realSend(id, msg);
+  };
+  const savedNow503 = env.getNow();
+  try {
+    delete store['cursor:me'].circuitBroken;
+    store['cursor:me'].rateUntil = 0;
+    store['cursor:me'].lastManualAt = 0;
+    store['cursor:me'].nextIncAt = 0;
+    store['cursor:me'].serviceRetries = 0;
+    store['cursor:me'].incResume = { cursor: '3', topId: '1000', stopAt: '1000', api: 'gql', manual: true, startedAt: Date.now(), rounds: 0, pages: 1 };
+    await fire('inc');
+    assert.equal(inc503, 1);
+    assert.ok(alarms['inc:me'], '翻页中途第 1 次 503 排重试');
+    env.setNow(alarms['inc:me'].when + 1_000);
+    await fire('inc');
+    assert.equal(inc503, 2);
+    assert.ok(alarms['inc:me'], '翻页中途第 2 次 503 排重试');
+    env.setNow(alarms['inc:me'].when + 1_000);
+    await fire('inc');
+    assert.equal(inc503, 3);
+    assert.equal(alarms['inc:me'], undefined, '第 3 次连续 503 到达上限清空闹钟');
+    assert.equal(store['cursor:me'].incResume, undefined, '第 3 次连续 503 清空续读');
+    assert.match(store['alert:me'].message, /连续 3 次/);
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+    env.setNow(savedNow503);
+    delete alarms['inc:me'];
+    store['cursor:me'].serviceRetries = 0;
+  }
 
   // 连续 3 次 429 升级为硬熔断（前 2 次正常指数退避，第 3 次直接硬熔断）
   store['cursor:me'].rate429Count = 2;

@@ -154,7 +154,7 @@ export async function syncOut(account, manual = false) {
     const cur = await kvGet(keys.cursor(account), {});
 
     const prev = cur.out || {};
-    const pending = !!prev.resume || !!prev.retryAt || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(prev.status);
+    const pending = prev.status !== 'error' && (!!prev.resume || !!prev.retryAt || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(prev.status));
     // 仅允许用户手动发起（补历史 / 立即更新）或续完该次未结束的手动任务；不再后台定时自动刷回复栏。
     const taskManual = manual || (!!prev.manualTask && pending);
     if (!taskManual) return;
@@ -215,7 +215,7 @@ export async function syncOut(account, manual = false) {
       if (pages) await sleep(humanIncDelay());
       if (!await enabledAccount(account)) return;
       const trace = { account, mode: full ? 'outbound_backfill' : 'outbound_manual', run, page: pages + 1 };
-      const r = await fetchViaTab(account, { kind: 'out', tpl: tpl.url, cursor }, trace);
+      const r = await fetchViaTab(account, { kind: 'out', tpl: tpl.url, cursor, allowCircuitProbe: manual && pages === 0 }, trace);
       if (r.error === 'circuit_broken') return;
       if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, message: '打开此账号的 X 页面后自动继续。' });
       if (r.error === 'outside_window') {
@@ -225,9 +225,18 @@ export async function syncOut(account, manual = false) {
         return;
       }
       if (temporaryUnavailable(r.status)) {
+        const retries = (prev.serviceRetries || 0) + 1;
+        if (retries >= PACE.maxServiceRetries) {
+          await saveOut(account, {
+            status: 'error', retryAt: null, running: null, resume: null, manualTask: false, serviceRetries: retries,
+            message: `X 连续 ${retries} 次暂时不可用（HTTP ${r.status}），本次读取已停止，请稍后重试。`,
+          });
+          await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+          return;
+        }
         const wait = serviceWait(prev.serviceRetries);
         const retryAt = now() + wait;
-        await saveOut(account, { status: 'queued', retryAt, resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, serviceRetries: (prev.serviceRetries || 0) + 1,
+        await saveOut(account, { status: 'queued', retryAt, resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, serviceRetries: retries,
           message: `X 暂时不可用（HTTP ${r.status}），稍后继续读取。` });
         await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: retryAt });
         await record('retry_scheduled', { ...trace, source: 'replies', status: r.status, waitMs: wait });
@@ -248,14 +257,20 @@ export async function syncOut(account, manual = false) {
         await kvRemove(keys.tpl(account)); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
         return saveOut(account, { status: 'need_tpl', resume: null, message: 'X 的读取方式已更新。打开「回复」页后自动继续。' });
       }
-      if (!r.ok) return saveOut(account, { status: 'error', message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
+      if (!r.ok) {
+        await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
+        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+        return;
+      }
 
       let p;
       try {
         p = parseMyReplies(r.body, me);
       } catch (e) {
         await record('parse_failed', { ...trace, source: 'replies', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
-        return saveOut(account, { status: 'error', message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
+        await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
+        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+        return;
       }
       const readAt = now();
       const added = await putEvents(account, p.events, OUT);
@@ -365,8 +380,9 @@ export async function syncOut(account, manual = false) {
     } : done);
     await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
   } catch (e) {
-    // 没料到的错误也要落到状态里，不然手动点了之后界面上什么都看不到
-    await saveOut(account, { status: 'error', message: `读取时出错：${String(e?.message || e)}` });
+    // 没料到的错误也要落到状态里并清理续读标记，防止被闹钟或切页无限重试
+    await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `读取时出错：${String(e?.message || e)}` });
+    await chrome.alarms.clear(alarmFor(OUT_ALARM, account)).catch(() => {});
   } finally {
     if (started) {
       await saveOut(account, { running: null }).catch(() => {});

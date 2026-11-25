@@ -90,44 +90,57 @@ export async function fetchViaTab(account, req, trace) {
   // 429 是账号级信号：所有主动读取入口都从这里过，不能只挡当前那一路。
   // out.retryAt 只用于出站自己的等待（包括 503），不拿来封住入站和回填。
   const cur = await kvGet(keys.cursor(account), {});
-  if (cur.circuitBroken) {
+  if (cur.circuitBroken && !req.allowCircuitProbe) {
     return report({ ok: false, status: 0, error: 'circuit_broken', reason: cur.circuitBroken.reason });
   }
   const blockedUntil = Math.max(cur.rateUntil || 0, req.kind === 'out' ? cur.out?.retryAt || 0 : 0);
   if (blockedUntil > now()) {
     return report({ ok: false, status: 0, error: 'backoff', rateResetAt: blockedUntil });
   }
-  const tabs = await chrome.tabs.query(X_TABS);
+  const routeRe = req.kind === 'out'
+    ? /\/with_replies(?:[/?#]|$)/
+    : req.kind === 'scheduled'
+      ? /\/(?:compose|schedule)(?:[/?#]|$)/
+      : /\/(?:i\/)?notifications(?:[/?#]|$)/;
+  const tabScore = (t) => (req.preferTabId && t.id === req.preferTabId ? 2 : routeRe.test(t.url || '') ? 1 : 0);
+  const tabs = [...(await chrome.tabs.query(X_TABS))].sort((a, b) => tabScore(b) - tabScore(a));
+  const { allowCircuitProbe, preferTabId, ...fetchReq } = req;
   for (const tab of tabs) {
     tabsTried++;
     const page = await pingTab(tab);
     if (page?.userId !== me.userId || page.visible === false) continue;
     try {
-      const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', userId: me.userId, activation: me.activation, ...req });
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'xir:fetch', userId: me.userId, activation: me.activation, ...fetchReq });
       if (r?.userId !== me.userId || (await pingTab(tab))?.userId !== me.userId) continue;
       const saved = (await kvGet(keys.accounts, {}))[account];
       if (!saved?.enabled || saved.activation !== me.activation) return { ok: false, error: 'no_tab' };
       const result = await report(r, tab.id);
-      if (r?.status === 429) {
-        const rate = await recordRateLimit(account, r.rateResetAt);
-        if (rate.attempts >= PACE.rate429CircuitThreshold) {
-          const anomaly = { code: 429, reason: `连续 ${rate.attempts} 次触发限流（HTTP 429）` };
-          await tripAccountCircuit(account, anomaly, source);
-          return { ...result, ok: false, error: 'circuit_broken', anomaly, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
-        }
-        return { ...result, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
-      }
+      // 先判账号异常/挑战（防止 429 响应同时携带 cf-mitigated/挑战页/异常码时被早返回遮蔽）
       const anomaly = detectAccountAnomaly(r?.status, r?.body, {
         cfMitigated: r?.cfMitigated,
         contentType: r?.contentType,
         error: r?.error,
         detail: r?.detail,
+        redirected: r?.redirected,
+        finalUrl: r?.finalUrl,
       });
       if (anomaly) {
         await tripAccountCircuit(account, anomaly, source);
         return { ...result, ok: false, error: 'circuit_broken', anomaly };
       }
-      if (r?.ok) await clearRateLimit(account);
+      if (r?.status === 429) {
+        const rate = await recordRateLimit(account, r.rateResetAt);
+        if (rate.attempts >= PACE.rate429CircuitThreshold) {
+          const rateAnomaly = { code: 429, reason: `连续 ${rate.attempts} 次触发限流（HTTP 429）` };
+          await tripAccountCircuit(account, rateAnomaly, source);
+          return { ...result, ok: false, error: 'circuit_broken', anomaly: rateAnomaly, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
+        }
+        return { ...result, backoffUntil: rate.until, rate429Count: rate.attempts, rateResetAt: rate.until };
+      }
+      if (r?.ok) {
+        await clearRateLimit(account);
+        if (cur.circuitBroken && allowCircuitProbe) await clearAccountCircuit(account);
+      }
       return result;
     } catch {
       // 标签页可能已关闭，或者正在切换会话。
@@ -143,13 +156,13 @@ export const mentionsApi = async (account) => ((await kvGet(keys.tplMentions(acc
  * 抓一页提及并入库。仅使用页面旁听到的 NotificationsTimeline 模板，模板缺失或 400/404 过期时返回 tpl_bad 等待用户打开一次通知页。
  * 返回 {kind:'ok',parsed,added} | {kind:'rate',resetAt} | {kind:'no_tab'} | {kind:'tpl_bad'} | {kind:'circuit_broken',message} | {kind:'error',message}
  */
-export async function pull(account, cursor, _api = 'gql', batch = { read: 0, added: 0 }, trace, inspectOnly = false) {
+export async function pull(account, cursor, _api = 'gql', batch = { read: 0, added: 0 }, trace, inspectOnly = false, { allowCircuitProbe = false } = {}) {
   const me = (await kvGet(keys.accounts, {}))[account];
   if (!me?.enabled) return { kind: 'error', message: '账号未绑定' };
 
   const tpl = await kvGet(keys.tplMentions(account));
   if (!tpl) return { kind: 'tpl_bad' };
-  const r = await fetchViaTab(account, { cursor, tpl: tpl.url }, trace);
+  const r = await fetchViaTab(account, { cursor, tpl: tpl.url, allowCircuitProbe }, trace);
   if (r.error === 'no_tab') return { kind: 'no_tab' };
   if (r.error === 'outside_window') return { kind: 'outside_window' };
   if (r.error === 'circuit_broken') return { kind: 'circuit_broken', message: '检测到 X 账号异常，已熔断并关闭全部自动抓取；请先在 X 确认账号正常后再手动开启。' };

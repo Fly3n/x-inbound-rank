@@ -37,7 +37,7 @@ export async function recoverAlarms(account) {
   } else {
     await chrome.alarms.clear(alarmFor(INC_ALARM, account));
   }
-  const outPending = !!(out?.manualTask && !out.limitReached && (out.fullFor === 0 || out.resume || out.retryAt || ['queued', 'waiting_tab', 'reading'].includes(out.status)));
+  const outPending = !!(out?.manualTask && out.status !== 'error' && !out.limitReached && (out.fullFor === 0 || out.resume || out.retryAt || ['queued', 'waiting_tab', 'reading'].includes(out.status)));
   if (out?.manualTask && out.status === 'need_tpl' && !out.limitReached && await kvGet(keys.tpl(account))) {
     await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: now() + 3000 });
   } else if (outPending && out?.status !== 'need_tpl') {

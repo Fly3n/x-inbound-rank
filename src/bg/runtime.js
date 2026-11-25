@@ -10,6 +10,7 @@ export const PACE = {
   backoffStartMs: 15 * 60_000, // 限流后首次退避，之后每次翻倍
   backoffMaxMs: 4 * 60 * 60_000,
   rate429CircuitThreshold: 3, // 连续 3 次 429 升级为账号异常硬熔断，停止自动续跑
+  maxServiceRetries: 3, // 连续 502/503/504 临时故障最多自动重试 3 次，超限停止任务避免无限重打
   incPagesPerEvent: 6, // 增量：每个后台事件最多六页，读完休息后自动续，避免单次事件过长
   incMaxRounds: 8, // 增量：单轮最多 8 段（48 页）安全上限
   incRetryGapMs: 10 * 60_000, // 增量：两次尝试的最小间隔（接着上一轮补读时不受限）

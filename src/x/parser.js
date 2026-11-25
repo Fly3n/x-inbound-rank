@@ -502,13 +502,21 @@ export function parseScheduledTweets(body) {
 const ACCOUNT_ANOMALY_CODES = new Set([32, 64, 89, 226, 326]);
 const ACCOUNT_ANOMALY_RE = /\b(account is locked|temporarily locked|temporarily restricted|suspended|automated|challenge|verify your account|bounce)\b/i;
 const HTML_CHALLENGE_RE = /<!doctype\s+html|<html\b|just a moment|account\/access|arkose|challenge|verify your/i;
+const STRONG_CHALLENGE_RE = /just a moment|arkose|account\/access|cf-browser-verification|challenge-platform|verify your account/i;
+const CHALLENGE_REDIRECT_RE = /\/(?:account\/access|i\/flow\/|login)(?:[/?#]|$)/i;
 
-/** 识别 X 账号侧异常与验证挑战信号（401/403、cf-mitigated、非 5xx HTML 验证页、封禁/锁定/自动化错误码）；普通 429 与 5xx 不误判。 */
+/** 识别 X 账号侧异常与验证挑战信号（401/403、cf-mitigated、挑战重定向、非 5xx HTML 验证页、503 强挑战页或锁定错误码）；普通 429 与常规 5xx 网关故障不误判。 */
 export function detectAccountAnomaly(status, body, meta = {}) {
   if (meta?.cfMitigated) {
     return {
       code: 'cf_mitigated',
       reason: `Cloudflare 挑战限制（HTTP ${status || 0} / cf-mitigated: ${String(meta.cfMitigated).slice(0, 60)}）`,
+    };
+  }
+  if (meta?.redirected && CHALLENGE_REDIRECT_RE.test(String(meta.finalUrl || ''))) {
+    return {
+      code: 'challenge_redirect',
+      reason: `请求被重定向至账号验证/登录页（HTTP ${status || 0}）`,
     };
   }
   if (status === 401 || status === 403) {
@@ -520,14 +528,20 @@ export function detectAccountAnomaly(status, body, meta = {}) {
       reason: `HTTP ${status}${code ? ` / code ${code}` : ''}${msg ? `：${msg}` : ''}`,
     };
   }
-  // 非 5xx 的 HTML 响应（排除 502/503/504 网关临时报错页面，避免误熔断）
-  if (meta?.error === 'not_json' && status > 0 && status < 500) {
+  // 非 5xx 的 HTML 响应，以及 503 下带明确 Cloudflare/Arkose 挑战特征的页面（排除普通 502/503/504 网关报错页）
+  if (meta?.error === 'not_json') {
     const ct = String(meta.contentType || '').toLowerCase();
     const detail = String(meta.detail || '');
-    if (ct.includes('text/html') || HTML_CHALLENGE_RE.test(detail)) {
+    if (status > 0 && status < 500 && (ct.includes('text/html') || HTML_CHALLENGE_RE.test(detail))) {
       return {
         code: 'html_challenge',
         reason: `收到非 JSON 网页/验证响应（HTTP ${status}）`,
+      };
+    }
+    if (status === 503 && STRONG_CHALLENGE_RE.test(detail)) {
+      return {
+        code: 'html_challenge',
+        reason: `收到验证挑战页面（HTTP 503）`,
       };
     }
   }
