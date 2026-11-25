@@ -30,7 +30,7 @@
     },
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["src/content/schedule.js", "src/content/content.js", "src/content/schedule-ui.js"],
+      "js": ["src/content/schedule.js", "src/content/content.js", "src/content/schedule-ui.js", "src/content/share-copy.js"],
       "css": ["src/content/badge.css"],
       "run_at": "document_idle"
     }

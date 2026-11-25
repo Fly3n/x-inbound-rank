@@ -5,7 +5,7 @@ import test from 'node:test';
 import '../src/content/rel.js';
 
 const { extract, formatTweetText, tweetTexts, tweetText } = globalThis.XIRRel;
-const contentCode = readFileSync(new URL('../src/content/content.js', import.meta.url), 'utf8');
+const shareCopyCode = readFileSync(new URL('../src/content/share-copy.js', import.meta.url), 'utf8');
 
 test('rel.js 原文提取：外链展开、HTML 转义还原、码点安全跳过回复前缀、多图与视频最高码率直链', () => {
   const replyWithLinksAndPhotos = {
@@ -481,6 +481,7 @@ test('分享菜单注入「复制原文」：优先旁听长文、无旁听走�
     setInterval: () => 1,
     chrome: {
       runtime: {
+        id: 'test-extension',
         getManifest: () => ({ version: '0.41.0' }),
         onMessage: { addListener: () => {} },
         sendMessage: async () => null,
@@ -502,7 +503,7 @@ test('分享菜单注入「复制原文」：优先旁听长文、无旁听走�
       tweetText: (id) => relMem.get(String(id)) || null,
     },
   };
-  runInNewContext(contentCode, ctx);
+  runInNewContext(shareCopyCode, ctx);
 
   const openMenu = (kind) => {
     const backdrop = el('div', { 'data-backdrop': '1' });

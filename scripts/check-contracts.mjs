@@ -75,6 +75,7 @@ function checkModuleIsolation() {
   const domAllowed = new Set([
     'src/content/content.js',
     'src/content/schedule-ui.js',
+    'src/content/share-copy.js',
   ]);
 
   for (const file of jsFiles) {
