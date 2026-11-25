@@ -142,6 +142,173 @@ export async function handleRepliesTap(msg, sender) {
   return { ok: true, added, parsed: parsed.events.length };
 }
 
+// ---------- 手动补历史 / 立即更新：syncOut 状态机 ----------
+// 一轮的流程：gateOutRun 判断这次该不该读 → planOutRun 定读法 → 逐页 fetch（失败交给 handleFetchFailure）
+// → judgePage 判断是否读到该停的位置 → 没读完记续读位置，读完由 finishOutRun 推进接续点与覆盖范围。
+
+/** 结束本次任务并报错：清掉续读、重试与进度标记，停掉闹钟，防止被闹钟或切页无限重试。 */
+async function stopOutWithError(account, patch) {
+  await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, ...patch });
+  await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+}
+
+/** 完整读（补历史）中途停下时要一起复位的字段：记下这次是按哪个范围读的，清掉排队参数。 */
+const fullAbortPatch = (initDays) => ({ reachedEnd: false, fullFor: initDays, initDays: null, targetTs: null });
+
+/**
+ * 这次闹钟/调用要不要真的开读。只允许用户手动发起，或续完该次未结束的手动任务；不再后台定时自动刷回复栏。
+ * 不该读时顺手排好下次闹钟，返回 null；该读时返回 taskManual（本次是否属于手动任务）。
+ */
+async function gateOutRun(account, prev, manual) {
+  const pending = prev.status !== 'error' && (!!prev.resume || !!prev.retryAt || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(prev.status));
+  const taskManual = manual || (!!prev.manualTask && pending);
+  if (!taskManual) return null;
+  if (!inActiveHours()) {
+    if (!manual) {
+      const when = nextActiveAt();
+      await saveOut(account, {
+        ...(prev.resume ? { resume: { ...prev.resume, nextAt: when } } : { status: 'queued', retryAt: when }),
+      });
+      await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when });
+    }
+    return null;
+  }
+  // 达到单次上限后已经明确报错停下：等用户再次手动点补历史或立即更新再试
+  if (!manual && prev.status === 'error' && prev.limitReached) return null;
+  const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0);
+  if (nextAt > now()) {
+    await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
+    return null;
+  }
+  if (!manual && !(await hasVisiblePage(account))) return null;
+  return taskManual;
+}
+
+/** 定这一轮的读法（纯计算）：完整读 / 首次建起点 / 接续读，读到哪停、最多几页、从哪续。 */
+function planOutRun(prev, settings, me) {
+  const initDays = prev.initDays ?? settings.initDays;
+  const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
+  // 完整读：手动补历史（fullFor 被清成 0）、或旧版本已同步数据的结构升级——读到补历史范围的起点。
+  // 首次免补历史建起点（bootstrap）：从未同步过且非补历史时，只读启用时刻前后（最多 2 页）建立接续点。
+  const full = prev.fullFor === 0 || (!!(prev.lastAt || prev.syncedId) && (prev.schema || 1) < OUT_SCHEMA);
+  const bootstrap = !full && !prev.syncedId;
+  const startFloor = me?.enabledAt || now();
+  // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
+  const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
+  const stopAt = full || bootstrap ? null : resume?.stopAt || prev.syncedId;
+  // 这个接口一轮最多读五页；首次建起点最多读 2 页，与入站免补历史口径一致。
+  const maxPages = bootstrap ? Math.min(PACE.outPages, 2) : PACE.outPages;
+  return {
+    initDays, targetTs, full, bootstrap, startFloor, resume, stopAt, maxPages,
+    earlyStopId: prev.earlyStopId || null,
+    customHours: prev.hours || null,
+  };
+}
+
+/**
+ * 一页请求没成功时决定怎么收场（等页面 / 夜间排队 / 服务退避 / 限流退避 / 模板过期 / 报错）。
+ * 已处理返回 true，调用方直接结束本轮；请求成功返回 false。
+ */
+async function handleFetchFailure(account, r, { prev, trace, resumeAt }) {
+  if (r.error === 'no_tab') {
+    await saveOut(account, { status: 'waiting_tab', resume: resumeAt, message: '打开此账号的 X 页面后自动继续。' });
+    return true;
+  }
+  if (r.error === 'outside_window') {
+    const when = nextActiveAt();
+    await saveOut(account, { status: 'queued', message: '已到夜间休息时间，明天再继续。', ...(resumeAt.cursor ? { resume: { ...resumeAt, nextAt: when } } : { retryAt: when }) });
+    await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when });
+    return true;
+  }
+  if (temporaryUnavailable(r.status)) {
+    const retries = (prev.serviceRetries || 0) + 1;
+    if (retries >= PACE.maxServiceRetries) {
+      await stopOutWithError(account, {
+        serviceRetries: retries,
+        message: `X 连续 ${retries} 次暂时不可用（HTTP ${r.status}），本次读取已停止，请稍后重试。`,
+      });
+      return true;
+    }
+    const wait = serviceWait(prev.serviceRetries);
+    const retryAt = now() + wait;
+    await saveOut(account, { status: 'queued', retryAt, resume: resumeAt, serviceRetries: retries,
+      message: `X 暂时不可用（HTTP ${r.status}），稍后继续读取。` });
+    await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: retryAt });
+    await record('retry_scheduled', { ...trace, source: 'replies', status: r.status, waitMs: wait });
+    return true;
+  }
+  if (r.error === 'backoff' || r.status === 429) {
+    const retryAt = r.backoffUntil || r.rateResetAt || now() + PACE.backoffStartMs;
+    const attempts = r.rate429Count || prev.rate429Count || 1;
+    await saveOut(account, { status: 'queued', retryAt,
+      resume: resumeAt,
+      rate429Count: attempts,
+      message: `账号正在限流退避，将在 ${new Date(retryAt).toLocaleTimeString()} 后续读。` });
+    await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: retryAt });
+    await record('retry_scheduled', { ...trace, source: 'replies', status: r.status || 0, attempts, waitMs: retryAt - now() });
+    return true;
+  }
+  if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
+    await kvRemove(keys.tpl(account)); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
+    await saveOut(account, { status: 'need_tpl', resume: null, message: 'X 的读取方式已更新。打开「回复」页后自动继续。' });
+    return true;
+  }
+  if (!r.ok) {
+    await stopOutWithError(account, { message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
+    return true;
+  }
+  return false;
+}
+
+/** 判断这一页读完后是否到了该停的位置（纯计算）。pageNo 为本页序号（从 1 开始）。 */
+function judgePage(p, plan, pageNo) {
+  const { full, bootstrap, startFloor, stopAt, maxPages, targetTs, earlyStopId, customHours } = plan;
+  const ended = !p.oldestId || !p.bottomCursor; // 列表到底了
+  const hitEarlyStop = !!(earlyStopId && p.oldestId && !idGt(p.oldestId, earlyStopId));
+  const reachedTarget = customHours && customHours <= 24
+    ? (p.oldestTs != null && p.oldestTs < targetTs)
+    : (p.newestTs != null && p.newestTs < targetTs);
+  const bootstrapReached = bootstrap && (ended || (p.oldestTs != null && p.oldestTs <= startFloor) || pageNo >= maxPages);
+  const crossedCheckpoint = !stopAt || !!(p.oldestId && !idGt(p.oldestId, stopAt));
+  const stoppedByTime = full ? (reachedTarget || hitEarlyStop) : bootstrap ? bootstrapReached : crossedCheckpoint;
+  const endedBeforeCheckpoint = ended && !full && !bootstrap && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
+  const reachedEnd = ended && !reachedTarget && !hitEarlyStop && !(bootstrap && p.oldestTs != null && p.oldestTs <= startFloor);
+  return { done: ended || stoppedByTime, endedBeforeCheckpoint, hitEarlyStop, reachedEnd };
+}
+
+/** 读完了（读到该停的位置、列表到底）：推进接续点 syncedId 与覆盖范围 coverTs。 */
+async function finishOutRun(account, prev, plan, { topId, reachedTs, pages, earlyStopped, reachedEnd }) {
+  const { full, bootstrap, initDays, targetTs, customHours } = plan;
+  const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId))
+    ? topId
+    : prev.syncedId || topId || ((full || bootstrap) && !reachedTs ? EMPTY_SYNC_ID : null);
+  const done = {
+    status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId,
+    schema: OUT_SCHEMA, resume: null, lastAt: now(), manualTask: false, earlyStopId: null, prevCoverTs: null,
+  };
+  const nextCoverTs = earlyStopped
+    ? (reachedTs && prev.prevCoverTs ? Math.min(reachedTs, prev.prevCoverTs) : prev.prevCoverTs || reachedTs || null)
+    : customHours
+      ? (reachedTs || targetTs)
+      : (reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null);
+  await saveOut(account, full ? {
+    ...done,
+    coverTs: nextCoverTs,
+    attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
+    reachedEnd,
+    limitReached: null,
+    fullFor: initDays,
+    schema: OUT_SCHEMA,
+    lastFullAt: now(),
+    lastFullDays: initDays,
+    ...(customHours ? { lastFullHours: customHours } : {}),
+    hours: null,
+    initDays: null,
+    targetTs: null,
+  } : done);
+  await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+}
+
 /** 读取已排队的补历史，或更新已经同步过的账号。 */
 export async function syncOut(account, manual = false) {
   if (!await enabledAccount(account)) return;
@@ -152,42 +319,11 @@ export async function syncOut(account, manual = false) {
   let started = false;
   try {
     const cur = await kvGet(keys.cursor(account), {});
-
     const prev = cur.out || {};
-    const pending = prev.status !== 'error' && (!!prev.resume || !!prev.retryAt || ['need_tpl', 'queued', 'waiting_tab', 'reading'].includes(prev.status));
-    // 仅允许用户手动发起（补历史 / 立即更新）或续完该次未结束的手动任务；不再后台定时自动刷回复栏。
-    const taskManual = manual || (!!prev.manualTask && pending);
+    const taskManual = await gateOutRun(account, prev, manual);
     if (!taskManual) return;
-    if (!inActiveHours()) {
-      if (!manual) {
-        const when = nextActiveAt();
-        await saveOut(account, {
-          ...(prev.resume ? { resume: { ...prev.resume, nextAt: when } } : { status: 'queued', retryAt: when }),
-        });
-        await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when });
-      }
-      return;
-    }
-    // 达到单次上限后已经明确报错停下：等用户再次手动点补历史或立即更新再试
-    if (!manual && prev.status === 'error' && prev.limitReached) return;
-    const nextAt = Math.max(prev.resume?.nextAt || 0, prev.retryAt || 0);
-    if (nextAt > now()) {
-      await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
-      return;
-    }
-    if (!manual && !(await hasVisiblePage(account))) return;
-    const initDays = prev.initDays ?? settings.initDays;
-    const targetTs = prev.targetTs ?? now() - initDays * DAY_MS;
-    // 完整读：手动补历史（fullFor 被清成 0）、或旧版本已同步数据的结构升级——读到补历史范围的起点。
-    // 首次免补历史建起点（bootstrap）：从未同步过且非补历史时，只读启用时刻前后（最多 2 页）建立接续点。
-    const full = prev.fullFor === 0 || (!!(prev.lastAt || prev.syncedId) && (prev.schema || 1) < OUT_SCHEMA);
-    const bootstrap = !full && !prev.syncedId;
-    const startFloor = me?.enabledAt || now();
-    // 上一轮被页数上限截断、留了续读位置：同一种读法就接着读；读法变了（比如范围调大了）就从头来
-    const resume = prev.resume && (prev.resume.full ?? true) === full ? prev.resume : null;
-    const stopAt = full || bootstrap ? null : resume?.stopAt || prev.syncedId;
-    // 这个接口一轮最多读五页；首次建起点最多读 2 页，与入站免补历史口径一致。
-    const maxPages = bootstrap ? Math.min(PACE.outPages, 2) : PACE.outPages;
+    const plan = planOutRun(prev, settings, me);
+    const { initDays, full, resume, stopAt, maxPages } = plan;
 
     // running：正在读，读到第几页。弹窗据此显示进度；不管怎么结束，finally 里都会清掉
     started = true;
@@ -209,67 +345,21 @@ export async function syncOut(account, manual = false) {
     let pages = 0;
     const run = now();
     const batch = { read: 0, added: 0 };
-    const earlyStopId = prev.earlyStopId || null;
-    const customHours = prev.hours || null;
     for (; pages < maxPages; pages++) {
       if (pages) await sleep(humanIncDelay());
       if (!await enabledAccount(account)) return;
       const trace = { account, mode: full ? 'outbound_backfill' : 'outbound_manual', run, page: pages + 1 };
       const r = await fetchViaTab(account, { kind: 'out', tpl: tpl.url, cursor, allowCircuitProbe: manual && pages === 0 }, trace);
       if (r.error === 'circuit_broken') return;
-      if (r.error === 'no_tab') return saveOut(account, { status: 'waiting_tab', resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, message: '打开此账号的 X 页面后自动继续。' });
-      if (r.error === 'outside_window') {
-        const when = nextActiveAt();
-        await saveOut(account, { status: 'queued', message: '已到夜间休息时间，明天再继续。', ...(cursor ? { resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt, nextAt: when } } : { retryAt: when }) });
-        await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when });
-        return;
-      }
-      if (temporaryUnavailable(r.status)) {
-        const retries = (prev.serviceRetries || 0) + 1;
-        if (retries >= PACE.maxServiceRetries) {
-          await saveOut(account, {
-            status: 'error', retryAt: null, running: null, resume: null, manualTask: false, serviceRetries: retries,
-            message: `X 连续 ${retries} 次暂时不可用（HTTP ${r.status}），本次读取已停止，请稍后重试。`,
-          });
-          await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
-          return;
-        }
-        const wait = serviceWait(prev.serviceRetries);
-        const retryAt = now() + wait;
-        await saveOut(account, { status: 'queued', retryAt, resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt }, serviceRetries: retries,
-          message: `X 暂时不可用（HTTP ${r.status}），稍后继续读取。` });
-        await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: retryAt });
-        await record('retry_scheduled', { ...trace, source: 'replies', status: r.status, waitMs: wait });
-        return;
-      }
-      if (r.error === 'backoff' || r.status === 429) {
-        const retryAt = r.backoffUntil || r.rateResetAt || now() + PACE.backoffStartMs;
-        const attempts = r.rate429Count || prev.rate429Count || 1;
-        await saveOut(account, { status: 'queued', retryAt,
-          resume: { cursor, topId, rounds: resume?.rounds || 0, full, stopAt },
-          rate429Count: attempts,
-          message: `账号正在限流退避，将在 ${new Date(retryAt).toLocaleTimeString()} 后续读。` });
-        await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: retryAt });
-        await record('retry_scheduled', { ...trace, source: 'replies', status: r.status || 0, attempts, waitMs: retryAt - now() });
-        return;
-      }
-      if (r.error === 'bad_tpl' || r.status === 400 || r.status === 404) {
-        await kvRemove(keys.tpl(account)); // 模板过期了（X 发版换了参数）：过一会儿的下一轮会自己重新取
-        return saveOut(account, { status: 'need_tpl', resume: null, message: 'X 的读取方式已更新。打开「回复」页后自动继续。' });
-      }
-      if (!r.ok) {
-        await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `读我的回复列表失败（${r.error || 'HTTP ' + r.status}）` });
-        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
-        return;
-      }
+      const resumeAt = { cursor, topId, rounds: resume?.rounds || 0, full, stopAt };
+      if (await handleFetchFailure(account, r, { prev, trace, resumeAt })) return;
 
       let p;
       try {
         p = parseMyReplies(r.body, me);
       } catch (e) {
         await record('parse_failed', { ...trace, source: 'replies', category: e instanceof ParseError ? 'unexpected_payload' : 'parser_exception' });
-        await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
-        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+        await stopOutWithError(account, { message: `我的回复列表解析失败：${e instanceof ParseError ? e.message : String(e)}` });
         return;
       }
       const readAt = now();
@@ -282,44 +372,26 @@ export async function syncOut(account, manual = false) {
       if (p.oldestTs) reachedTs = p.oldestTs;
       if (cursor && p.bottomCursor === cursor) {
         await record('pagination_stop', { ...trace, source: 'replies', reason: 'repeated_cursor', checkpoint: stopAt });
-        const message = 'X 返回了重复的翻页位置，本轮已停止；接续点和覆盖范围没有前移。';
-        await saveOut(account, {
-          status: 'error', retryAt: null, running: null, resume: null, pages,
-          message, limitReached: false, manualTask: false,
-          ...(full ? {
-            attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
-            reachedEnd: false,
-            fullFor: initDays,
-            initDays: null,
-            targetTs: null,
-          } : {}),
+        await stopOutWithError(account, {
+          pages, limitReached: false,
+          message: 'X 返回了重复的翻页位置，本轮已停止；接续点和覆盖范围没有前移。',
+          ...(full ? { attemptCoverTs: reachedTs || prev.attemptCoverTs || null, ...fullAbortPatch(initDays) } : {}),
         });
-        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
         return;
       }
-      const ended = !p.oldestId || !p.bottomCursor; // 列表到底了
-      const hitEarlyStop = !!(earlyStopId && p.oldestId && !idGt(p.oldestId, earlyStopId));
-      const reachedTarget = customHours && customHours <= 24
-        ? (p.oldestTs != null && p.oldestTs < targetTs)
-        : (p.newestTs != null && p.newestTs < targetTs);
-      const bootstrapReached = bootstrap && (ended || (p.oldestTs != null && p.oldestTs <= startFloor) || pages + 1 >= maxPages);
-      const crossedCheckpoint = !stopAt || !!(p.oldestId && !idGt(p.oldestId, stopAt));
-      const stoppedByTime = full ? (reachedTarget || hitEarlyStop) : bootstrap ? bootstrapReached : crossedCheckpoint;
-      const endedBeforeCheckpoint = ended && !full && !bootstrap && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
-      if (endedBeforeCheckpoint) {
+      const verdict = judgePage(p, plan, pages + 1);
+      if (verdict.endedBeforeCheckpoint) {
         await record('pagination_stop', { ...trace, source: 'replies', reason: 'ended_before_checkpoint', checkpoint: stopAt });
-        await saveOut(account, {
-          status: 'error', retryAt: null, running: null, resume: null, pages,
+        await stopOutWithError(account, {
+          pages, limitReached: false,
           message: 'X 的回复列表在接上上次位置前提前结束，本轮已停止；接续点没有前移。',
-          limitReached: false, manualTask: false,
         });
-        await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
         return;
       }
-      if (ended || stoppedByTime) {
+      if (verdict.done) {
         complete = true;
-        earlyStopped = hitEarlyStop;
-        reachedEnd = ended && !reachedTarget && !hitEarlyStop && !(bootstrap && p.oldestTs != null && p.oldestTs <= startFloor);
+        earlyStopped = verdict.hitEarlyStop;
+        reachedEnd = verdict.reachedEnd;
         pages++;
         break;
       }
@@ -327,58 +399,23 @@ export async function syncOut(account, manual = false) {
     }
     const rounds = (resume?.rounds || 0) + 1;
     if (!complete && rounds >= PACE.outMaxRounds) {
-      const message = full
-        ? '本次初始化达到单次页数上限，仍未读到所选范围。可重新初始化或缩小范围。'
-        : '本次读取达到单次页数上限，仍未接上上次进度。稍后可再点「立即更新」。';
-      await saveOut(account, {
-        status: 'error', retryAt: null, running: null, resume: null, pages,
-        message, limitReached: true, manualTask: false, attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
-        ...(full ? {
-          reachedEnd: false,
-          fullFor: initDays,
-          initDays: null,
-          targetTs: null,
-        } : {}),
+      await stopOutWithError(account, {
+        pages, limitReached: true, attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
+        message: full
+          ? '本次初始化达到单次页数上限，仍未读到所选范围。可重新初始化或缩小范围。'
+          : '本次读取达到单次页数上限，仍未接上上次进度。稍后可再点「立即更新」。',
+        ...(full ? fullAbortPatch(initDays) : {}),
       });
-      await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
       return;
     }
-    if (!complete && rounds < PACE.outMaxRounds) {
+    if (!complete) {
       // 一轮没读完：记下位置，休息一批的间隔后在新的闹钟事件里接着读。读完之前接续点不动
       const nextAt = now() + humanRestDelay(PACE.outRestMs);
       await saveOut(account, { status: 'ok', serviceRetries: 0, message: null, pages, limitReached: null, ...(full ? { attemptCoverTs: reachedTs } : {}), resume: { cursor, topId, rounds, full, stopAt, nextAt } });
       await chrome.alarms.create(alarmFor(OUT_ALARM, account), { when: nextAt });
       return;
     }
-    // 读完了（读到该停的位置、列表到底，或续读轮数用完到此为止）
-    const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId))
-      ? topId
-      : prev.syncedId || topId || ((full || bootstrap) && !reachedTs ? EMPTY_SYNC_ID : null);
-    const done = {
-      status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId,
-      schema: OUT_SCHEMA, resume: null, lastAt: now(), manualTask: false, earlyStopId: null, prevCoverTs: null,
-    };
-    const nextCoverTs = earlyStopped
-      ? (reachedTs && prev.prevCoverTs ? Math.min(reachedTs, prev.prevCoverTs) : prev.prevCoverTs || reachedTs || null)
-      : customHours
-        ? (reachedTs || targetTs)
-        : (reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null);
-    await saveOut(account, full ? {
-      ...done,
-      coverTs: nextCoverTs,
-      attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
-      reachedEnd,
-      limitReached: null,
-      fullFor: initDays,
-      schema: OUT_SCHEMA,
-      lastFullAt: now(),
-      lastFullDays: initDays,
-      ...(customHours ? { lastFullHours: customHours } : {}),
-      hours: null,
-      initDays: null,
-      targetTs: null,
-    } : done);
-    await chrome.alarms.clear(alarmFor(OUT_ALARM, account));
+    await finishOutRun(account, prev, plan, { topId, reachedTs, pages, earlyStopped, reachedEnd });
   } catch (e) {
     // 没料到的错误也要落到状态里并清理续读标记，防止被闹钟或切页无限重试
     await saveOut(account, { status: 'error', resume: null, retryAt: null, running: null, manualTask: false, message: `读取时出错：${String(e?.message || e)}` });
