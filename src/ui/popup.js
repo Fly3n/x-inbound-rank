@@ -75,7 +75,7 @@ function renderList() {
   const q = $('search').value.trim().toLowerCase().replace(/^@/, '');
   const rows = q ? view.rows.filter((r) => `${r.handle || ''} ${r.name || ''}`.toLowerCase().includes(q)) : view.rows;
   const empty = !eventCount
-    ? '还没有数据，可在「设置」开启自动更新或点「补历史」'
+    ? '还没有数据，刷一下 X 通知页即可旁听收集，或在「设置」手动补读'
     : q
       ? '榜上没有匹配的人'
       : `这个范围内还没有人回复我 ${view.rules.minCount} 次及以上`;

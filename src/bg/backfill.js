@@ -9,7 +9,7 @@ import {
   enabledAccount, now, humanBackfillDelay, humanBatchPages, humanRestDelay,
   inActiveHours, nextActiveAt, serviceWait,
   isBusy, tryAcquireBusy, releaseBusy, serial, updateCursor,
-  refreshSnapshot, flushSnapshot, setAlert, completeBackfillRound, armInc,
+  refreshSnapshot, flushSnapshot, setAlert, completeBackfillRound,
 } from './runtime.js';
 import { retryAlarm } from './alarms.js';
 import { pull } from './transport.js';

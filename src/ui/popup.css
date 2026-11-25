@@ -69,6 +69,9 @@ button.danger { color: var(--err-fg); }
 .card { background: var(--card); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
 .actions { margin-top: 10px; justify-content: flex-end; }
 .between { justify-content: space-between; }
+.preview-row { flex-wrap: nowrap; align-items: center; }
+.preview-row > #preview { min-width: 0; flex: 1 1 auto; }
+.preview-row > #reset { flex-shrink: 0; }
 
 /* 数据读取卡片里的两份数据，各占一块 */
 .src { padding: 8px 0; border-bottom: 1px solid var(--line); }

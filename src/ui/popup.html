@@ -133,7 +133,7 @@
 
       <section class="card">
         <h2>页面显示 <button class="q" data-tip="tip-show" aria-label="页面显示说明">?</button></h2>
-        <div class="tip" id="tip-show" hidden><p>选择 X 页面名字旁显示的标签，以及排期弹窗里的快捷档期。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。排期开关不受自动更新开关影响。</p></div>
+        <div class="tip" id="tip-show" hidden><p>选择 X 页面名字旁显示的标签，以及排期弹窗里的快捷档期。互是互关，粉是对方关注你，M 表示通知里的回复发生在你的帖子下。排期开关不受旁听收集开关影响。</p></div>
         <label class="line"><input type="checkbox" id="showRank"> 名次标签（名次 + 回复次数）</label>
         <label class="line"><input type="checkbox" id="showOut"> 名次标签里带上「我回他几次」</label>
         <label class="line"><input type="checkbox" id="showRel"> 关系（互 / 粉）</label>
@@ -160,8 +160,8 @@
           <button id="addTier">＋ 加一档</button>
         </div>
         <p class="hint">效果预览：</p>
-        <div class="row" id="preview"></div>
-        <div class="row actions">
+        <div class="row between preview-row">
+          <div class="row" id="preview"></div>
           <button id="reset">恢复默认</button>
         </div>
       </section>
