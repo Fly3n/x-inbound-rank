@@ -186,6 +186,7 @@ test('页面仅旁听已启用会话（走私有随机通道、零 window.postMe
     assert.equal(isolated.XIRRel.session(), null);
     assert.equal(isolated.XIRRel.notificationsTaps.length, 0, `${order}: 切号清空通知旁听缓冲`);
     assert.equal(isolated.XIRRel.repliesTaps.length, 0, `${order}: 切号清空回复栏旁听缓冲`);
+    assert.equal(isolated.XIRRel.tweetTexts.size, 0, `${order}: 切号清空推文原文内存缓存`);
     assert.equal(postMessages.length, 0, `${order}: 全程零 window.postMessage 明文广播`);
   }
 });

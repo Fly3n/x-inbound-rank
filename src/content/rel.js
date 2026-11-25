@@ -1,16 +1,135 @@
-// 关系和帖子归属：接收 tap.js 转来的 X 接口返回，从里面挑出两样东西，只放在这个页面的内存里，不落盘：
+// 关系、帖子归属与原文缓存：接收 tap.js 转来的 X 接口返回，从里面挑出三样东西，只放在这个页面的内存里，不落盘：
 //   ① 每个用户和我的关注关系（我是否关注他、他是否关注我）
 //   ② 每条帖子的作者、所在对话的根帖、回复的是哪条 / 回复给谁
-// content.js 给用户名旁加关系小标（互 / 粉）和通知列表的帖子归属小标（M）时来这里查。
+//   ③ 每条帖子的完整原文（含折叠长文 note_tweet、展开后的外链与媒体直链），供分享菜单「复制原文」零请求使用
+// content.js 给用户名旁加关系小标（互 / 粉）、通知列表加帖子归属小标（M）或复制原文时来这里查。
 // 字段名是按 X 网页版的返回结构假设的；对不上时只是查不到、不显示，不会报错。
 const XIRRel = (() => {
+  const decodeHtml = (s) => String(s || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+
+  /** 从单条媒体对象选出最具体的直链：视频/动图优先最高码率 mp4，图片取 media_url_https，兜底 expanded_url。 */
+  function mediaUrlOf(m) {
+    if (!m || typeof m !== 'object') return null;
+    if (m.type === 'video' || m.type === 'animated_gif') {
+      const variants = Array.isArray(m.video_info?.variants) ? m.video_info.variants : [];
+      const mp4s = variants.filter((v) => v && typeof v.url === 'string' && (!v.content_type || v.content_type === 'video/mp4'));
+      if (mp4s.length) {
+        mp4s.sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+        return mp4s[0].url;
+      }
+    }
+    return (typeof m.media_url_https === 'string' && m.media_url_https)
+      || (typeof m.expanded_url === 'string' && m.expanded_url)
+      || null;
+  }
+
+  /**
+   * 从一条 GraphQL/REST 帖子对象构造可直接复制的完整原文：
+   * - 优先取 note_tweet 全文（折叠长文无需展开），其次取 legacy.full_text 并按码点跳过回复隐藏前缀；
+   * - 将外链与引用短链替换为 expanded_url；
+   * - 将媒体短链（或长文附带媒体）转为具体媒体直链，多条按行排列。
+   * @returns {{ text: string, isNote: boolean } | null}
+   */
+  function formatTweetText(o, t) {
+    if (!t || typeof t !== 'object') return null;
+    const article = o?.article?.article_results?.result || null;
+    const articleBlocks = Array.isArray(article?.content_state?.blocks) ? article.content_state.blocks : null;
+    if (articleBlocks?.length) {
+      const parts = [];
+      if (typeof article.title === 'string' && article.title.trim()) parts.push(article.title.trim());
+      for (const b of articleBlocks) {
+        if (typeof b?.text === 'string' && b.text.trim()) parts.push(b.text);
+      }
+      if (parts.length) return { text: decodeHtml(parts.join('\n\n')).trim(), isNote: true };
+    }
+
+    const note = o?.note_tweet?.note_tweet_results?.result || o?.note_tweet_results?.result || null;
+    const isNote = typeof note?.text === 'string' && note.text.length > 0;
+    let raw = isNote
+      ? note.text
+      : (typeof t.full_text === 'string' ? t.full_text : typeof t.text === 'string' ? t.text : '');
+    if (!isNote && raw && Array.isArray(t.display_text_range) && Number.isInteger(t.display_text_range[0]) && t.display_text_range[0] > 0) {
+      raw = Array.from(raw).slice(t.display_text_range[0]).join('');
+    }
+    let text = decodeHtml(raw);
+
+    // 外链与引用帖短链展开（在 HTML 解码后替换，避免误改 URL 查询参数）
+    const urlMap = new Map();
+    const collectUrls = (list) => {
+      if (!Array.isArray(list)) return;
+      for (const u of list) {
+        if (typeof u?.url === 'string' && u.url && typeof u?.expanded_url === 'string' && u.expanded_url) {
+          urlMap.set(u.url, u.expanded_url);
+        }
+      }
+    };
+    collectUrls(t.entities?.urls);
+    collectUrls(note?.entity_set?.urls);
+    const qp = o?.quoted_status_permalink;
+    if (typeof qp?.url === 'string' && qp.url && typeof qp?.expanded === 'string' && qp.expanded) {
+      urlMap.set(qp.url, qp.expanded);
+    }
+    for (const [shortUrl, expanded] of urlMap) {
+      if (text.includes(shortUrl)) text = text.split(shortUrl).join(expanded);
+    }
+
+    // 媒体短链替换为具体直链；长文 note_tweet 不含尾部媒体短链时追加在末尾
+    const mediaList = Array.isArray(t.extended_entities?.media) && t.extended_entities.media.length
+      ? t.extended_entities.media
+      : Array.isArray(t.entities?.media) ? t.entities.media : [];
+    const byShort = new Map();
+    const extraMedia = [];
+    const pushUnique = (arr, val) => {
+      if (val && !arr.includes(val)) arr.push(val);
+    };
+    for (const m of mediaList) {
+      const target = mediaUrlOf(m);
+      if (!target) continue;
+      if (typeof m.url === 'string' && m.url) {
+        if (!byShort.has(m.url)) byShort.set(m.url, []);
+        pushUnique(byShort.get(m.url), target);
+      } else {
+        pushUnique(extraMedia, target);
+      }
+    }
+    for (const [shortUrl, urls] of byShort) {
+      if (text.includes(shortUrl)) {
+        const replacement = urls.join('\n');
+        const idx = text.indexOf(shortUrl);
+        const before = text.slice(0, idx).replace(/[ \t]+$/, '');
+        const after = text.slice(idx + shortUrl.length).replace(/^[ \t]+/, '');
+        const joinBefore = before && !before.endsWith('\n') ? '\n' : '';
+        const joinAfter = after && !after.startsWith('\n') ? '\n' : '';
+        text = `${before}${joinBefore}${replacement}${joinAfter}${after}`;
+      } else {
+        for (const u of urls) pushUnique(extraMedia, u);
+      }
+    }
+    if (extraMedia.length) {
+      const missing = extraMedia.filter((u) => !text.includes(u));
+      if (missing.length) {
+        const trimmed = text.trimEnd();
+        text = trimmed ? `${trimmed}\n${missing.join('\n')}` : missing.join('\n');
+      }
+    }
+
+    text = text.trim();
+    return text ? { text, isNote } : null;
+  }
+
   /**
    * 从一份接口返回里挑出用户关系和帖子。
-   * @returns {{ users: Array<{id, handle, following, followedBy}>, tweets: Array<{id, uid, conv, rtoStatus, rtoUser}> }}
+   * @returns {{ users: Array<{id, handle, following, followedBy}>, tweets: Array<{id, uid, conv, rtoStatus, rtoUser, text, isNote}> }}
    */
   function extract(body) {
     const users = [];
     const tweets = [];
+    const seenLegacy = new WeakSet();
     const stack = [body];
     while (stack.length) {
       const o = stack.pop();
@@ -29,16 +148,21 @@ const XIRRel = (() => {
         const src = [o.relationship_perspectives, lg, o].find((s) => s && typeof s === 'object' && ('following' in s || 'followed_by' in s));
         if (src) users.push({ id: uid, handle: handle.toLowerCase(), following: src.following === true, followedBy: src.followed_by === true });
       }
-      // 帖子：GraphQL 是 { rest_id, legacy: { conversation_id_str, ... } }，REST 是帖子对象本身
-      const t = lg?.conversation_id_str ? lg : typeof o.conversation_id_str === 'string' ? o : null;
+      // 帖子：GraphQL 是 { rest_id, legacy: { conversation_id_str, ... } }，REST 是帖子对象本身；
+      // GraphQL 外层已合入 legacy 后标记 seenLegacy，避免再次把内层 legacy 当独立帖子重提、丢失外层 note_tweet/quoted_status_permalink
+      const t = lg?.conversation_id_str ? lg : (!seenLegacy.has(o) && typeof o.conversation_id_str === 'string' ? o : null);
       const tid = t && (t === lg ? o.rest_id || t.id_str : t.id_str);
       if (t && tid) {
+        if (t === lg) seenLegacy.add(lg);
+        const formatted = formatTweetText(o, t);
         tweets.push({
           id: tid,
           uid: t.user_id_str || o.core?.user_results?.result?.rest_id || null,
           conv: t.conversation_id_str,
           rtoStatus: t.in_reply_to_status_id_str || null,
           rtoUser: t.in_reply_to_user_id_str || null,
+          text: formatted?.text || null,
+          isNote: Boolean(formatted?.isNote),
         });
       }
       for (const k in o) if (o[k] && typeof o[k] === 'object') stack.push(o[k]);
@@ -64,10 +188,12 @@ const XIRRel = (() => {
 
   const rel = new Map(); // 小写 handle -> 'mutual' | 'fan' | 'following' | 'none'
   const tweets = new Map(); // 帖子 ID -> { uid, conv, rtoStatus, rtoUser }
+  const tweetTexts = new Map(); // 帖子 ID -> { text, isNote }
+  const tweetText = (id) => (id ? tweetTexts.get(String(id))?.text || null : null);
   const ops = new Set(); // 这个页面发过的接口请求的名字，只留最近 40 个（诊断用）
   // tpls / notificationsTaps / repliesTaps：content.js 就绪之前来的先短缓冲，就绪后由对应回调接手
   const api = {
-    extract, relOf, placeOf, rel, tweets, ops,
+    extract, formatTweetText, relOf, placeOf, rel, tweets, tweetTexts, tweetText, ops,
     tpls: [], notificationsTaps: [], repliesTaps: [],
     onNotificationsTap: null, onRepliesTap: null,
     onChange: null, onTpl: null, onCreateTweetTap: null, onScheduledTap: null, onPostEvent: null,
@@ -99,10 +225,17 @@ const XIRRel = (() => {
     }
     for (const t of got.tweets) {
       if (!tweets.has(t.id)) changed = true;
-      tweets.set(t.id, t);
+      tweets.set(t.id, { id: t.id, uid: t.uid, conv: t.conv, rtoStatus: t.rtoStatus, rtoUser: t.rtoUser });
+      if (t.text) {
+        const prev = tweetTexts.get(t.id);
+        if (!prev || !prev.isNote || t.isNote) {
+          tweetTexts.set(t.id, { text: t.text, isNote: Boolean(t.isNote) });
+        }
+      }
     }
     trim(rel, 8000);
     trim(tweets, 8000);
+    trim(tweetTexts, 2000);
     if (changed) api.onChange?.();
   }
 
@@ -150,6 +283,7 @@ const XIRRel = (() => {
     session = account ? { account, userId, activation: entry.activation, handle: entry.handle } : null;
     rel.clear();
     tweets.clear();
+    tweetTexts.clear();
     ops.clear();
     api.tpls.length = 0;
     api.notificationsTaps.length = 0;
