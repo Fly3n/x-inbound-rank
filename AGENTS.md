@@ -22,9 +22,10 @@ Chrome 插件「X 友」（Manifest V3，原生 JS，无构建步骤，零运行
 
 - `src/background.js` + `src/bg/`：Service Worker 入口与 9 个无环 ESM 领域模块（`runtime` / `alarms` / `accounts` / `transport` / `backfill` / `incremental` / `outbound` / `scheduled` / `rpc`）；Chrome 事件监听仅在 `src/background.js` 注册。
 - `src/x/`：`fetcher.js`、`parser.js`、`mentions-diagnostics.js`（主动请求的 X 接口字段与路径只允许出现在此处）。
-- `src/content/`：`tap.js`、`rel.js`（仅作旁听路由与内存解析的例外，不发请求不落候选数据）、`content.js`、`schedule.js`、`schedule-ui.js`、`badge.css`（X 页面 DOM 选择器只允许在 `content.js` 与 `schedule-ui.js`）。
+- `src/content/`：`tap.js`、`rel.js`（仅作旁听路由与内存解析的例外，不发请求不落候选数据）、`content.js`、`schedule.js`、`schedule-ui.js`、`share-copy.js`、`badge.css`（X 页面 DOM 选择器只允许在 `content.js`、`schedule-ui.js`、`share-copy.js`）。新的页面增强功能优先做成独立内容脚本，不往 `content.js` 里堆。
 - `src/rank.js`、`src/db.js`、`src/diagnostics.js`、`src/snapshot.js`、`src/bridge.js`：纯统计口径与规则合法化、存储封装、7 天诊断日志、维护期快照/开发桥。
 - `src/ui/`：`popup.html` / `popup.js` / `popup-helpers.js` / `popup.css`、`snapshot.*`。
+- `test/`：按被测模块命名（`rank` / `parser` / `rel` / `schedule` / `fetcher` / `bg-*` / `popup-*` / `share-copy` 等），共用样本在 `test/helpers/fixtures.mjs`，后台测试环境在 `test/helpers/bg-env.mjs`；改哪个模块就在同名测试文件补用例。
 - `scripts/`：`check-contracts.mjs`、`release-check.mjs`、`popup-preview.mjs`、`live-bridge.mjs`、`install-bridge.mjs`。
 
 ## 工程命令

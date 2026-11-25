@@ -27,7 +27,8 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/content/rel.js` | 解析旁听数据里的关注关系、帖子归属、推文完整原文（`note_tweet` / 外链展开 / 媒体直链）、请求模板（`tplKind`）、通知页/个人回复栏/`CreateTweet` 旁听数据（含加载期短缓冲）与排期事件；仅放页面内存（`rel` / `tweets` 各最多 8000 条、`tweetTexts` 最多 2000 条），不落盘、不发请求 | 改旁听字段、关系判断或原文提取 |
 | `src/content/schedule.js` | 发帖排期纯逻辑：07:00–24:00 半小时档、±15 分钟归档、25 分钟硬防撞、中点均分 / 30–40 分钟顺排、具体档 ±1–3 分钟微调与前后参考时间差；无 DOM/Chrome 依赖 | 改档位规则 |
 | `src/content/schedule-ui.js` | X 原生排期弹窗快捷档期条：找原生表单（`data-testid` 优先、语义兜底）、上下空档切换、左右分栏前后参考卡、展示占用并点击填入日期/时间，不代点确认或发布 | X 改排期弹窗结构 |
-| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、分享菜单注入「复制原文」（优先读 `rel.js` 原文内存，无则退回纯 DOM 解析）、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/content/content.js` | 账号识别、代发请求、注入名次/关系/`M` 标签、上报接口模板与通知页/`UserRepliesTimeline`/`CreateTweet` 旁听响应（过滤自身主动请求）、记录近期页面交互 `lastActiveAt` 并节流发送 `xir:active`；X DOM 选择器集中在顶部 `SEL` | X 改页面结构 |
+| `src/content/share-copy.js` | 分享菜单注入「复制原文」：优先读 `rel.js` 原文内存（`XIRRel.tweetText`），无则退回纯 DOM 解析；自带本功能的 `SEL`，不读本机数据、不发消息、不发请求 | X 改分享菜单或推文 DOM |
 | `src/background.js` | Service Worker 入口：初始化与集中注册 Chrome 事件监听（`tabs.onActivated`/`tabs.onUpdated`/`windows.onFocusChanged`/`runtime.onInstalled`/`runtime.onStartup`/`alarms.onAlarm`/`runtime.onMessage`） | 增删顶级事件入口 |
 | `src/bg/runtime.js` | 后台公共常量 `PACE`、模拟真人停顿函数（`humanIncDelay`/`humanBackfillDelay`/`humanBatchPages`）、双窗口调度（含 `nextOutAutoSlot`）、并发 `busy` 锁、串行 `cursor` 队列、`board` 与快照节流计算 | 调风控节奏或锁 |
 | `src/bg/alarms.js` | 按账号命名闹钟清理、重试与恢复未完成的手动任务（`job:` / 手动 `inc:` / 手动 `out:`），清理历史遗留的自动定时闹钟 | 改闹钟恢复条件 |
@@ -35,14 +36,14 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 | `src/bg/transport.js` | `fetchViaTab`、`recordRateLimit`/`clearRateLimit` 账号级 429 退避、账号异常硬熔断、提及 `pull` 入库与诊断记录 | 改请求退避或入库流程 |
 | `src/bg/backfill.js` | 别人回我手动历史补读状态机（启动、逐页、暂停、恢复、唤醒） | 改回填流程 |
 | `src/bg/incremental.js` | 别人回我通知页/提及页旁听收集 `handleInboundTap`（受 `tapInEnabled` 控制，写诊断日志并推桥），以及手动「立即更新」增量拉取（发现重叠即停、单轮 8 段/48 页安全上限，不再定时自动跑） | 改入站旁听或手动增量逻辑 |
-| `src/bg/outbound.js` | 我回别人发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`（受 `tapOutEnabled` 控制），以及手动补历史与手动「立即更新」（`syncOut` / `syncOutNow`，不再定时自动跑） | 改出站旁听或手动同步策略 |
+| `src/bg/outbound.js` | 我回别人发帖实时旁听 `handleOutboundTap`（同时仅对非回复主帖刷新 `lastPostAt`）与本人主页回复栏旁听 `handleRepliesTap`（受 `tapOutEnabled` 控制），以及手动补历史与手动「立即更新」（`syncOut` / `syncOutNow`，不再定时自动跑）；`syncOut` 按阶段拆为 `gateOutRun`（该不该读）→ `planOutRun`（读法）→ `handleFetchFailure`（请求失败收场）→ `judgePage`（是否到停点）→ `finishOutRun`（推进接续点与覆盖） | 改出站旁听或手动同步策略 |
 | `src/bg/scheduled.js` | 发帖排期按需同步、`xir:scheduled:tap` 与 `xir:postEvent`（排期增删缓存失效）处理 | 改排期同步与退避 |
 | `src/bg/rpc.js` | `maybePrune`、`clearData`、双路独立手动立即更新（`updateNowWithReceipt` / `updateOutNowWithReceipt`）与全量 `handlers` 消息路由表（含 `xir:inbound:tap`、`xir:replies:tap`、`xir:outbound:tap` 及弹窗打开补刷兜底） | 改 RPC 消息接口 |
 | `src/rank.js` | 纯函数：口径过滤 `underMyPosts`、聚合、榜单、标签快照、`countsFromMe`、规则默认值 `DEFAULT_RULES`（含 `tapInEnabled: true`、`tapOutEnabled: true`）与 `cleanRules` | 改统计口径或规则范围 |
 | `src/db.js` | IndexedDB 封装与 `chrome.storage.local` 键名 `keys`；重读同一条按 `mergeKnown` 合并；整表冻结缓存 | 改数据模型或存储键 |
 | `src/diagnostics.js` | 本机诊断日志按小时分键静默写入，保留最近 7 天，读取时清理过期小时 | 改日志字段或保留期 |
-| `src/ui/popup-helpers.js` | 弹窗纯函数与常量：格式化、状态文案、步进与 CSV 导出构造 | 改弹窗文案或导出格式 |
-| `src/ui/popup.html` / `popup.js` / `popup.css` | 弹窗「榜单」「设置」两页渲染与事件处理；引入 `badge.css` 共用色板 | 改界面 |
+| `src/ui/popup-helpers.js` | 弹窗纯函数与常量：格式化、状态文案（含两路任务阶段 `inTaskPhase` / `outTaskState`）、步进与 CSV 导出构造 | 改弹窗文案或导出格式 |
+| `src/ui/popup.html` / `popup.js` / `popup.css` | 弹窗「榜单」「设置」两页渲染与事件处理；`draw()` 只取数据并分发给 `renderAccountPicker` / `renderBanners` / `renderTabs` / `renderBoardPage` / `renderDataSettings` / `renderRuleSettings`；引入 `badge.css` 共用色板 | 改界面 |
 | `src/snapshot.js` / `src/ui/snapshot.*` | 开发用只读本机快照页：把 `chrome.storage.local` 与 IndexedDB 合成 JSON；不挂弹窗入口 | 改快照格式 |
 | `src/bridge.js` | 开发用本机数据桥：将快照推送到 `127.0.0.1:17321`；2.5 秒合并、离线静默退避 60 秒 | 改开发数据通道 |
 | `scripts/live-bridge.mjs` / `install-bridge.mjs` | 回环 HTTP 接收器（写 `.local/xir-live.json` 与摘要）及用户级 LaunchAgent 启停 | 改本机桥服务 |
@@ -52,7 +53,7 @@ Chrome Manifest V3 插件，无构建步骤，零运行时依赖，Service Worke
 
 1. **接口/DOM 隔离红线**（由 `scripts/check-contracts.mjs` 自动校验）：
    - 主动请求 X 接口字段与路径只能出现在 `src/x/fetcher.js`、`src/x/parser.js`、`src/x/mentions-diagnostics.js`；旁听层 `src/content/tap.js` 与 `src/content/rel.js` 为明确例外，仅做旁听路由与内存解析，不得发请求或落候选数据。
-   - X 页面 DOM 选择器只能出现在 `src/content/content.js` 与 `src/content/schedule-ui.js`。
+   - X 页面 DOM 选择器只能出现在 `src/content/content.js`、`src/content/schedule-ui.js` 与 `src/content/share-copy.js`，各自在顶部 `SEL` 集中维护本功能用到的选择器。
 2. **后台模块化红线**（同样受契约校验）：
    - `src/bg/*.js` 之间保持严格无环 DAG，且内部不得注册 `chrome.*.addListener`，所有监听集中于 `src/background.js`。
 3. **与其他插件共存**（2026-11-13 实测 FeedSieve）：

@@ -36,7 +36,10 @@
   ```
   在 `check` 基础上检查无维护期 `127.0.0.1` 权限、无 `.local` 跟踪文件、工作区干净。
 - **测试文件说明**（依赖仅 `fake-indexeddb`，假数据按预期接口形态编写，验证调度/解析自洽性，不证明 X 真实返回结构）：
-  - `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色分档、解析边界（含 `parseCreatedReply`）、抓取模板与集合上限、`PACE` 真人节律
+  - `test/rank.test.mjs`：榜单、统计口径、规则合法化、颜色分档、覆盖判定
+  - `test/parser.test.mjs`：提及/我的回复/`parseCreatedReply`/通知旁听/已排期解析边界与账号异常识别
+  - `test/rel.test.mjs` / `test/schedule.test.mjs` / `test/fetcher.test.mjs` / `test/bg-runtime.test.mjs`：关系与帖子归属、排期档位与防撞、抓取模板与集合上限、`PACE` 真人节律
+  - `test/share-copy.test.mjs`：原文提取与分享菜单「复制原文」注入（迷你 DOM 跑 `share-copy.js`）
   - `test/bg-backfill.test.mjs`：账号迁移、提及脱敏证据、回填状态机、重复游标与可信空列表
   - `test/bg-incremental.test.mjs`：重叠即停、免补历史直启、60 页安全上限、双窗口、模板切换与 404 回退、并发锁与多段续读
   - `test/bg-outbound.test.mjs`：方案 A 默认浏览器旁听、方案 B 每 2 天低频同步开关、手动补历史、范围切换、429 退避、轮数上限与列表到底

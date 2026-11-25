@@ -144,13 +144,14 @@ Chrome 会随时回收扩展的后台 Service Worker。插件不靠内存里的�
 | `src/content/schedule.js` | 发帖排期的纯逻辑：半小时档位、25 分钟硬防撞、中点均分 / 30–40 分钟顺排、具体档 ±1–3 分钟微调与前后参考时间差 |
 | `src/content/schedule-ui.js` | 在 X 原生排期弹窗里画快捷档期并填入原生下拉框 |
 | `src/content/content.js` | 账号识别、代后台发请求、注入名次/关系/M 标签。页面选择器集中在顶部 `SEL` |
+| `src/content/share-copy.js` | 分享菜单「复制原文」：优先用页面旁听到的完整原文，没有时读页面上的正文 |
 | `src/background.js` + `src/bg/` | 后台 Service Worker 入口与领域模块：补历史、增量、出站旁听/同步、排期、退避、账号隔离、跨窗口刷新、消息路由 |
 | `src/rank.js` | 纯函数：统计口径、榜单、标签快照、颜色分档和规则合法化 |
 | `src/db.js` | IndexedDB 和 `chrome.storage.local` 键名 |
 | `src/diagnostics.js` | 诊断日志写入、读取和 7 天过期清理 |
 | `src/ui/` | 弹窗界面与纯逻辑辅助（`popup.js` / `popup-helpers.js`） |
 
-隔离原则：只有 `fetcher.js`、`parser.js`、`mentions-diagnostics.js` 知道主动请求的 X 接口字段，只有 `content.js` 和 `schedule-ui.js` 知道 X 页面选择器。`tap.js` 与 `rel.js` 是明确例外，只做旁听路由和内存解析，不发请求、不落候选数据。其他文件不直接依赖 X 的 DOM 或接口结构。
+隔离原则：只有 `fetcher.js`、`parser.js`、`mentions-diagnostics.js` 知道主动请求的 X 接口字段，只有 `content.js`、`schedule-ui.js` 和 `share-copy.js` 知道 X 页面选择器。`tap.js` 与 `rel.js` 是明确例外，只做旁听路由和内存解析，不发请求、不落候选数据。其他文件不直接依赖 X 的 DOM 或接口结构。
 
 ## 测试
 
@@ -161,7 +162,8 @@ npm install
 npm run check
 ```
 
-- `test/logic.test.mjs`：榜单、统计口径、规则合法化、颜色、解析边界（含 `CreateTweet`）、抓取模板与集合上限、`PACE` 真人节律。
+- `test/rank.test.mjs` / `parser.test.mjs` / `rel.test.mjs` / `schedule.test.mjs` / `fetcher.test.mjs` / `bg-runtime.test.mjs`：按模块分别覆盖榜单与统计口径、解析边界（含 `CreateTweet`）、关系与帖子归属、排期档位、抓取模板与集合上限、`PACE` 真人节律；共用样本在 `test/helpers/fixtures.mjs`。
+- `test/share-copy.test.mjs`：原文提取与分享菜单「复制原文」注入。
 - `test/bg-backfill.test.mjs` / `bg-incremental.test.mjs` / `bg-outbound.test.mjs` / `bg-manual-and-maintenance.test.mjs` / `bg-accounts-and-tabs.test.mjs`：基于复用测试环境 `test/helpers/bg-env.mjs`，覆盖回填、重叠即停、免补历史直启、60 页上限、方案 A 旁听、方案 B 48 小时兜底、立即更新、清理、多账号隔离和多窗口旧页刷新全流程。
 - `test/db.test.mjs`：重复写入的合并规则，空值不覆盖已知的根帖归属、正文和头像。
 - `test/session.test.mjs`：账号会话切换、`CreateTweet` 旁听触发和页面缓存隔离。
