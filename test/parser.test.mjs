@@ -1,148 +1,12 @@
-// 运行：node --test test
-// 解析用例的输入是按「预期的接口形态」手写的，验证的是分类与边界逻辑；真实返回是否长这样要靠 README 的实测。
+// X 返回解析与账号异常识别（src/x/parser.js）；输入按「预期的接口形态」手写，验证分类与边界，真实形态见 docs/x-endpoints.md
+// 运行：npm test
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
-import '../src/content/rel.js';
-import '../src/content/schedule.js';
-import {
-  ranking, outboundCounts, countsFromMe, replyPlaces, repliesOf, badgeSnapshot, underMyPosts,
-  cleanRules, colorOf, DEFAULT_RULES, DAY_MS, inboundInitCovered, outboundInitCovered,
-} from '../src/rank.js';
-import {
-  parseCreatedReply, parseMentions, parseNotificationsTap, parseMyReplies, parseScheduledTweets,
-  repliesTapTargetUserId, repliesTapHasCursor, detectAccountAnomaly, ParseError,
-} from '../src/x/parser.js';
+import { ranking, outboundCounts, countsFromMe, badgeSnapshot, DAY_MS } from '../src/rank.js';
+import { parseCreatedReply, parseMentions, parseNotificationsTap, parseMyReplies, parseScheduledTweets, repliesTapTargetUserId, repliesTapHasCursor, detectAccountAnomaly, ParseError } from '../src/x/parser.js';
+import { NOW, ev, rules } from './helpers/fixtures.mjs';
 
-const board = (events, rules, now) => ranking(events, rules, now).rows;
-
-const NOW = Date.UTC(2026, 10, 13);
-const ev = (id, actor, daysAgo) => ({
-  id: String(id), actor_id: actor, actor_handle: actor.toUpperCase(), actor_name: actor, actor_avatar: '', created_at: NOW - daysAgo * DAY_MS, conversation_id: 'c' + id, target_post_id: 'c' + id, root_mine: true, // 直接评论我的帖子 c{id}
-});
-
-const rules = (o = {}) => cleanRules({ ...DEFAULT_RULES, ...o });
-
-test('回复榜：时间窗、同分按最近回复、次数不够的不上榜', () => {
-  const events = [ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'a', 20), ev(4, 'b', 2), ev(5, 'b', 3), ev(6, 'c', 0.5), ev(7, 'c', 40)];
-  // 15 天窗：a、b 都是 2 条，a 最近一次更近；c 只有 1 条不上榜
-  assert.deepEqual(board(events, rules({ windowDays: 15 }), NOW).map((r) => [r.rank, r.handle, r.count]), [[1, 'A', 2], [2, 'B', 2]]);
-  // 7 天窗：a 只剩 1 条，也掉出去
-  assert.deepEqual(board(events, rules(), NOW).map((r) => r.handle), ['B']);
-  // 最少次数调到 1：都上榜；总量不受口径影响
-  const all = ranking(events, rules({ minCount: 1 }), NOW);
-  assert.deepEqual(all.rows.map((r) => r.handle), ['B', 'C', 'A']);
-  assert.deepEqual([all.people, all.replies], [3, 4]);
-  assert.deepEqual([ranking(events, rules(), NOW).people, ranking(events, rules(), NOW).replies], [3, 4]);
-});
-
-test('回复榜：名次上限可调，默认 100', () => {
-  const events = [];
-  for (let i = 0; i < 120; i++) events.push(ev(i * 2, 'u' + i, 1), ev(i * 2 + 1, 'u' + i, 2));
-  assert.equal(board(events, rules(), NOW).length, 100);
-  assert.equal(board(events, rules({ topN: 10 }), NOW).length, 10);
-  assert.equal(board(events, rules({ topN: 500 }), NOW).length, 120);
-});
-
-test('规则整理：越界夹回范围，档位排序去重，非法颜色兜底', () => {
-  assert.deepEqual(cleanRules({}), DEFAULT_RULES);
-  assert.equal(DEFAULT_RULES.tapInEnabled, true);
-  assert.equal(DEFAULT_RULES.tapOutEnabled, true);
-  const r = cleanRules({ windowDays: 45, topN: 9999, minCount: 0, baseColor: 'pink', tapInEnabled: false, tapOutEnabled: 0, showRel: false, showPlace: 0, tiers: [{ min: 5, color: 'green' }, { min: 30, color: 'nope' }, { min: 5, color: 'red' }, { min: 'x', color: 'red' }] });
-  // 布尔开关：只有明确写 false 才是关
-  assert.deepEqual(r, { windowDays: 7, initDays: 7, tapInEnabled: false, tapOutEnabled: true, topN: 500, minCount: 1, baseColor: 'gray', showRank: true, showOut: true, showRel: false, showPlace: true, showSchedule: true, tiers: [{ min: 30, color: 'gray' }, { min: 5, color: 'green' }] });
-  assert.equal(cleanRules({ topN: 3 }).topN, 10);
-  assert.equal(cleanRules({ tiers: [1, 2, 3, 4, 5, 6].map((min) => ({ min, color: 'red' })) }).tiers.length, 4);
-  assert.deepEqual(cleanRules({ tiers: [] }).tiers, []);
-});
-
-test('两个范围：榜单范围可到 3 个月，补历史范围只有 7/15；旧 30 天降级到 15，老设置沿用当时统计范围', () => {
-  assert.deepEqual([60, 90].map((d) => cleanRules({ windowDays: d }).windowDays), [60, 90]);
-  assert.equal(cleanRules({ initDays: 60 }).initDays, 7);
-  assert.equal(cleanRules({ initDays: 30 }).initDays, 15, '旧版 30 天设置平滑降级为 15 天');
-  assert.equal(cleanRules({ windowDays: 15 }).initDays, 15, '0.10 存的设置：统计范围 15 天，补历史也按 15 天');
-  assert.equal(cleanRules({ windowDays: 90 }).initDays, 7);
-  // 榜单范围比补历史长：照常按榜单范围算
-  const evs = [ev(1, 'a', 50), ev(2, 'a', 80), ev(3, 'a', 95)];
-  assert.equal(board(evs, rules({ windowDays: 90, minCount: 1 }), NOW)[0].count, 2);
-});
-
-test('覆盖判定：提前到底不冒充覆盖，完整到底才算数', () => {
-  const out = (patch) => ({ lastAt: NOW, schema: 2, ...patch });
-
-  assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, '100', 7, NOW), true);
-  assert.equal(inboundInitCovered({ oldestTs: NOW - 3 * DAY_MS, reachedEnd: true }, '100', 7, NOW), false);
-  assert.equal(inboundInitCovered({ oldestTs: null, reachedEnd: true }, '100', 7, NOW), true, '空列表到底也覆盖');
-  assert.equal(inboundInitCovered({ oldestTs: NOW - 8 * DAY_MS }, null, 7, NOW), false);
-
-  assert.equal(outboundInitCovered(out({ coverTs: NOW - 8 * DAY_MS, reachedEnd: false }), 7, NOW), true);
-  assert.equal(outboundInitCovered(out({ coverTs: NOW - 3 * DAY_MS, reachedEnd: true }), 7, NOW), false);
-  assert.equal(outboundInitCovered(out({ coverTs: null, reachedEnd: true }), 7, NOW), true);
-});
-
-test('标签颜色：按次数分档，不按名次', () => {
-  assert.deepEqual([2, 4, 5, 9, 10, 19, 20, 50].map((n) => colorOf(n, DEFAULT_RULES)), ['gray', 'gray', 'blue', 'blue', 'orange', 'orange', 'red', 'red']);
-  assert.equal(colorOf(99, cleanRules({ tiers: [], baseColor: 'purple' })), 'purple');
-});
-
-test('点开某人：窗口内、我帖子下的回复，新的在前', () => {
-  const events = [{ ...ev(1, 'a', 1), text: '早' }, ev(2, 'a', 3), ev(3, 'a', 10), { ...ev(4, 'a', 2), root_mine: false }, { ...ev(6, 'a', 1.5), target_post_id: 'deep' }, ev(5, 'b', 1)];
-  const d = repliesOf(events, 'a', rules(), NOW);
-  assert.deepEqual([d.total, d.items.map((x) => [x.id, x.text])], [3, [['1', '早'], ['6', ''], ['2', '']]], '深层回复也算，别人帖子下的不算');
-  assert.equal(repliesOf(events, 'a', rules(), NOW, 1).items.length, 1);
-});
-
-test('点开某人：我回他的时间和原帖 ID 对应榜单次数', () => {
-  const out = (id, days, patch = {}) => ({
-    id, created_at: NOW - days * DAY_MS, conversation_id: 'root', reply_to_id: 'root', root_user_id: 'a', ...patch,
-  });
-  const sent = [
-    out('older', 7), out('newer', 1), out('after-now', -1), out('out-of-range', 8),
-    out('deep', 1, { reply_to_id: 'comment' }), out('mine', 1, { own: true }),
-    out('another-author', 1, { root_user_id: 'b' }),
-  ];
-  const { outbound } = repliesOf([], 'a', rules(), NOW, 1, sent);
-  assert.equal(outbound.total, outboundCounts(sent, 7, NOW).get('a'));
-  assert.deepEqual(outbound, { total: 2, items: [{ id: 'newer', created_at: NOW - DAY_MS, text: '' }] });
-  assert.deepEqual(repliesOf([], 'a', rules(), NOW, 50, sent).outbound.items.map(({ id }) => id), ['newer', 'older']);
-});
-
-test('标签快照：就是榜上的人，键为小写 handle', () => {
-  const snap = badgeSnapshot([ev(1, 'a', 1), ev(2, 'a', 10), ev(3, 'b', 2), ev(4, 'c', 3), ev(5, 'c', 16)], rules({ windowDays: 15 }), NOW, [], false);
-  assert.deepEqual(snap, { a: { rank: 1, count: 2, color: 'gray', last: NOW - DAY_MS } });
-  // 「我回别人」读过之后带上我回他几次；一次没回是 0
-  const mine = [{ id: 'o1', created_at: NOW - DAY_MS, conversation_id: 'x1', reply_to_id: 'x1', root_user_id: 'a' }, { id: 'o2', created_at: NOW - 20 * DAY_MS, conversation_id: 'x2', reply_to_id: 'x2', root_user_id: 'a' }];
-  const evs = [ev(1, 'a', 1), ev(2, 'a', 10)];
-  assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, mine).a.replied, 1);
-  assert.equal(badgeSnapshot(evs, rules({ windowDays: 15 }), NOW, []).a.replied, 0);
-});
-
-test('口径：别人回我，在我帖子下回我的都算、不分层；别人帖子下的不算', () => {
-  const e = (id, conv, target, root_mine) => ({ ...ev(id, 'a', 1), conversation_id: conv, target_post_id: target, root_mine });
-  const events = [
-    e(1, 'p', 'p', true), // 直接评论我的帖子 p
-    e(2, 'p', 'my-comment', null), // 我帖子下：他评论 → 我回他 → 他再回我。根帖看不出来，但同一对话里第 1 条证明是我的
-    e(3, 'q', 'x', false), // 别人的帖子（包括他自己的）下回我
-    e(4, 'r', 'x', null), // 看不出根帖是谁的、也没有旁证：不算
-    e(5, 's', 'my-thread', null), // 我自己串推下回我：「我回别人」表里我在 s 下回过（own），证明 s 是我的
-  ];
-  const own = [{ id: 'o', own: true, conversation_id: 's', reply_to_id: 's', root_user_id: '1', created_at: NOW - DAY_MS }];
-  assert.deepEqual(ranking(events, rules(), NOW).rows.map((r) => r.count), [2]);
-  assert.deepEqual(ranking(events, rules(), NOW, own).rows.map((r) => [r.count, r.replied]), [[3, 0]], 'own 只用来认对话，不算「我回 N」');
-});
-
-test('通知列表 M 的「在我帖子下」不分层：根帖归属未知的靠同一对话补判', () => {
-  const e = (id, conversation_id, root_mine) => ({ ...ev(id, 'a', 1), conversation_id, root_mine });
-  const kept = underMyPosts([
-    e(1, 'mine', true), // 直接评论我的帖子
-    e(2, 'mine', null), // 同一对话里的深层回复，根帖已被上一条证明是我的
-    e(3, 'theirs', false), // 我在别人帖子下评论，对方回我
-    e(4, 'unknown', null), // 看不出根帖是谁的，也没有旁证
-  ]);
-  assert.deepEqual(kept.map((x) => x.id), ['1', '2']);
-});
-
+// ---- 旧版提及接口（REST globalObjects）样本 ----
 const user = (id, screen_name) => ({ id_str: id, screen_name, name: screen_name, profile_image_url_https: `https://pbs.twimg.com/${id}.jpg` });
 const tweet = (id, uid, extra = {}) => ({ id_str: id, user_id_str: uid, created_at: 'Thu Nov 12 08:00:00 +0000 2026', ...extra });
 const entry = (id) => ({ entryId: `tweet-${id}`, content: { item: { content: { tweet: { id, displayType: 'Tweet' } } } } });
@@ -320,8 +184,6 @@ test('解析：结构不对就报错，不返回空结果', () => {
   assert.deepEqual(parseMentions(empty, me), { events: [], entryIds: [], newestId: null, newestTs: null, oldestId: null, oldestTs: null, bottomCursor: null });
 });
 
-// ---- 我在别人帖子下的回复 ----
-
 test('我回：只算我直接评论他的帖子（第一级），记在帖子主人名下', () => {
   const o = (id, daysAgo, conv, root, replyTo = conv) => ({ id, created_at: NOW - daysAgo * DAY_MS, conversation_id: conv, reply_to_id: replyTo, root_user_id: root, to_user_id: 'x' });
   const out = [
@@ -341,6 +203,7 @@ test('我回：只算我直接评论他的帖子（第一级），记在帖子�
 });
 
 // GraphQL 时间线的假返回：形态与 parseMyReplies 的假设一致
+// ---- 我在别人帖子下的回复 ----
 const gt = (id, uid, extra = {}) => ({
   __typename: 'Tweet',
   rest_id: id,
@@ -350,13 +213,13 @@ const gt = (id, uid, extra = {}) => ({
 const item = (t) => ({ itemContent: { tweet_results: { result: t } } });
 const single = (t) => ({ entryId: `tweet-${t.rest_id}`, content: { entryType: 'TimelineTimelineItem', ...item(t) } });
 const thread = (...ts) => ({ entryId: `profile-conversation-${ts[0].rest_id}`, content: { entryType: 'TimelineTimelineModule', items: ts.map((t) => ({ item: item(t) })) } });
+const re = (to, uid, conv) => ({ in_reply_to_status_id_str: to, in_reply_to_user_id_str: uid, in_reply_to_screen_name: `u${uid}`, conversation_id_str: conv });
 const gql = (entries, pinned) => ({
   data: { user: { result: { timeline: { timeline: { instructions: [
     ...(pinned ? [{ type: 'TimelinePinEntry', entry: single(pinned) }] : []),
     { type: 'TimelineAddEntries', entries: [...entries, { entryId: 'cursor-bottom-1', content: { entryType: 'TimelineTimelineCursor', value: 'NEXT', cursorType: 'Bottom' } }] },
   ] } } } } },
 });
-const re = (to, uid, conv) => ({ in_reply_to_status_id_str: to, in_reply_to_user_id_str: uid, in_reply_to_screen_name: `u${uid}`, conversation_id_str: conv });
 
 test('解析我的回复：只留别人帖子下的，置顶、原创、转发、我自己帖子下的不算', () => {
   const old = { created_at: 'Thu Oct 01 08:00:00 +0000 2026' };
@@ -427,39 +290,6 @@ test('解析：账号没有 handle 时只用用户 ID 也能工作', () => {
   assert.equal(parseMyReplies(replies, noHandle).events.length, 1);
 });
 
-test('关系：从 X 的返回里挑出每个人和我的关注关系，新旧两种结构都认', () => {
-  const { extract, relOf } = globalThis.XIRRel;
-  const body = {
-    data: {
-      a: { __typename: 'User', rest_id: '2', core: { screen_name: 'Mutual' }, relationship_perspectives: { following: true, followed_by: true }, legacy: {} },
-      b: [{ rest_id: '3', legacy: { screen_name: 'Fan', followed_by: true } }],
-      c: { rest_id: '4', core: { screen_name: 'Idol' }, relationship_perspectives: { following: true } },
-      d: { rest_id: '5', core: { screen_name: 'Stranger' }, relationship_perspectives: { following: false, followed_by: false } },
-      e: { rest_id: '6', core: { screen_name: 'Unknown' }, legacy: {} }, // 没有任何关系字段：不知道，不记
-    },
-    globalObjects: { users: { 7: { id_str: '7', screen_name: 'Rest', following: false, followed_by: true } } },
-  };
-  const got = Object.fromEntries(extract(body).users.map((u) => [u.handle, relOf(u)]));
-  assert.deepEqual(got, { mutual: 'mutual', fan: 'fan', idol: 'following', stranger: 'none', rest: 'fan' });
-});
-
-test('帖子归属：页面数据能定的直接定，定不了的靠本机两张表', () => {
-  const { extract, placeOf } = globalThis.XIRRel;
-  const tw = (id, uid, conv, rtoStatus, rtoUser) => ({ rest_id: id, legacy: { user_id_str: uid, conversation_id_str: conv, in_reply_to_status_id_str: rtoStatus, in_reply_to_user_id_str: rtoUser } });
-  const body = { x: [tw('10', '1', '10'), tw('11', '2', '10', '10', '1'), tw('20', '2', '20'), tw('22', '2', '20', '21', '1'), tw('30', '3', '30'), tw('32', '2', '30', '31', '1'), tw('42', '2', '40', '41', '1'), tw('50', '2', '50', '49', '9')] };
-  const tweets = new Map(extract(body).tweets.map((t) => [t.id, t]));
-  assert.equal(tweets.size, 8);
-  assert.deepEqual(['11', '22', '32', '42', '50', '99'].map((id) => placeOf(id, '1', tweets)), ['me', 'him', 'other', null, null, null]);
-
-  // 本机数据：入站事件 + 我回别人
-  const inb = (id, actor, conv, rootMine) => ({ id, actor_id: actor, conversation_id: conv, root_mine: rootMine, created_at: 1 });
-  const events = [inb('a', '2', 'c1', true), inb('b', '2', 'c2', false), inb('c', '2', 'c3', false), inb('d', '2', 'c4', false)];
-  const out = [{ id: 'o1', conversation_id: 'c2', root_user_id: '2' }, { id: 'o2', conversation_id: 'c3', root_user_id: '8' }];
-  assert.deepEqual(replyPlaces(events, out, ['a', 'b', 'c', 'd', 'zz']), { a: 'me', b: 'him', c: 'other', d: null, zz: null });
-});
-
-// ---- 发帖排期辅助 ----
-
 test('解析已排期列表：兼容秒和毫秒时间戳，按时间升序，结构不对抛错', () => {
   const t1 = 1_795_000_000; // 秒
   const t2 = 1_795_003_600_000; // 毫秒
@@ -500,204 +330,6 @@ test('detectAccountAnomaly：精准识别 401/403、cf-mitigated、非 5xx HTML 
   assert.equal(detectAccountAnomaly(503, {}), null);
   assert.equal(detectAccountAnomaly(404, {}), null);
   assert.equal(detectAccountAnomaly(200, { data: {} }), null);
-});
-
-test('排期档位：07:00–24:00 半小时一档，过去与过近的档跳过，刚发帖后自动顺延', () => {
-  const { buildDaySlots, buildSchedulePlan } = globalThis.XIRSchedule;
-  const at = (h, m, dayOffset = 0) => new Date(2026, 10, 20 + dayOffset, h, m, 0, 0).getTime();
-
-  // 中午 12:00 打开：上午的都不显示，第一个档是 12:30，最后一个是 24:00
-  const noon = buildDaySlots({ nowTs: at(12, 0), dayOffset: 0 });
-  assert.equal(noon.slots[0].label, '12:30');
-  assert.equal(noon.slots[noon.slots.length - 1].label, '24:00');
-
-  // 12:25 打开：距离 12:30 不足 10 分钟，首个档顺延到 13:00
-  const tight = buildDaySlots({ nowTs: at(12, 25), dayOffset: 0 });
-  assert.equal(tight.slots[0].label, '13:00');
-
-  // 12:19 刚发过主帖，12:20 打开：12:19 + 30m = 12:49 > 12:30，跳过 12:30 从 13:00 开始
-  const justPosted = buildDaySlots({ nowTs: at(12, 20), dayOffset: 0, lastPostAt: at(12, 19) });
-  assert.equal(justPosted.slots[0].label, '13:00');
-  // 12:05 刚发过主帖，12:20 打开：12:05 + 30m = 12:35 > 12:30，同样跳过 12:30 从 13:00 开始
-  const postedEarlier = buildDaySlots({ nowTs: at(12, 20), dayOffset: 0, lastPostAt: at(12, 5) });
-  assert.equal(postedEarlier.slots[0].label, '13:00');
-
-  // 明天完整覆盖 07:00–24:00（共 35 档）
-  const plan = buildSchedulePlan({ nowTs: at(12, 0), days: 7 });
-  assert.equal(plan.groups.length, 7);
-  assert.equal(plan.groups[1].slots.length, 35);
-  assert.equal(plan.groups[1].slots[0].label, '07:00');
-  assert.equal(plan.groups[1].slots[34].label, '24:00');
-});
-
-test('排期冲突与安全间距：硬性 25 分钟防撞、优先贴合 30–40 分钟、夹缝档自动置灰与上下空档', () => {
-  const { buildDaySlots, buildSchedulePlan, availableSlots, pickJitteredTime } = globalThis.XIRSchedule;
-  const at = (h, m) => new Date(2026, 10, 20, h, m, 0, 0).getTime();
-  const scheduled = [
-    { id: '1', executeAt: at(15, 22), text: '下午茶' }, // 落在 15:30 档 [15:15, 15:45)
-    { id: '2', executeAt: at(15, 45), text: '边界测试' }, // 正好 15:45，归入 16:00 档 [15:45, 16:15)，不重复占 15:30
-  ];
-  const day = buildDaySlots({ nowTs: at(14, 0), dayOffset: 0, scheduled });
-  const byLabel = Object.fromEntries(day.slots.map((s) => [s.label, s]));
-  assert.equal(byLabel['15:00'].occupied, false);
-  assert.equal(byLabel['15:30'].occupied, true);
-  assert.deepEqual(byLabel['15:30'].items.map((x) => x.id), ['1']);
-  assert.equal(byLabel['16:00'].occupied, true);
-  assert.deepEqual(byLabel['16:00'].items.map((x) => x.id), ['2']);
-  assert.equal(byLabel['16:30'].occupied, false);
-
-  // 点「具体档位 15:00」：15:22 已排，±1-3m 内（14:57-15:03）里 14:57 与 15:22 相距恰好 25 分钟，满足硬性安全间距
-  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
-    const picked = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled, random: () => r, mode: 'slot' });
-    const diffMin = Math.round((picked - at(15, 0)) / 60_000);
-    const gapMin = Math.round(Math.abs(picked - at(15, 22)) / 60_000);
-    assert.ok(Math.abs(diffMin) >= 1 && Math.abs(diffMin) <= 3, `点具体档位应小幅浮动 ±1-3m，实际 ${diffMin} 分钟`);
-    assert.ok(gapMin >= 25, `与 15:22 间距必须 >= 25 分钟，实际 ${gapMin} 分钟`);
-  }
-
-  // 点「下一空档 →」：前一条在 21:05（占 21:00），后面无排期 -> 落在 21:35–21:45（距 21:05 正好 30–40 分钟）
-  const tightPrev = [{ id: 'p', executeAt: at(21, 5), text: '上一条' }];
-  for (const r of [0, 0.3, 0.7, 0.99]) {
-    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: tightPrev, random: () => r, mode: 'next' });
-    const gapMin = Math.round((picked - at(21, 5)) / 60_000);
-    assert.ok(gapMin >= 30 && gapMin <= 40, `应距 21:05 间隔 30-40 分钟，实际 ${gapMin} 分钟`);
-  }
-
-  // 点「下一空档 →」：前后正好差 1 小时（21:00 与 22:00）-> 居中均分落在 21:27–21:33（两边各 27–33 分钟）
-  const oneHourGap = [
-    { id: 'h1', executeAt: at(21, 0), text: '前' },
-    { id: 'h2', executeAt: at(22, 0), text: '后' },
-  ];
-  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
-    const picked = pickJitteredTime(at(21, 30), { nowTs: at(20, 0), scheduled: oneHourGap, random: () => r, mode: 'next' });
-    const gapPrev = Math.round((picked - at(21, 0)) / 60_000);
-    const gapNext = Math.round((at(22, 0) - picked) / 60_000);
-    assert.ok(gapPrev >= 27 && gapPrev <= 33 && gapNext >= 27 && gapNext <= 33, `1 小时夹缝应居中均分，实际前 ${gapPrev}m / 后 ${gapNext}m`);
-  }
-
-  // 夹缝档检测：20:50 与 21:35 之间仅隔 45 分钟，21:00 与 21:30 周围都没有 >=25m 的安全分钟，均自动置灰
-  const squeezed = [
-    { id: 'a', executeAt: at(20, 50), text: '前' },
-    { id: 'b', executeAt: at(21, 35), text: '后' },
-  ];
-  const squeezedDay = buildDaySlots({ nowTs: at(20, 0), dayOffset: 0, scheduled: squeezed });
-  const sqMap = Object.fromEntries(squeezedDay.slots.map((s) => [s.label, s]));
-  assert.equal(sqMap['21:00'].occupied, true);
-  assert.equal(sqMap['21:30'].occupied, true);
-  assert.equal(sqMap['22:00'].occupied, false);
-
-  // availableSlots 按时间顺序列出全部未占用空档，供「← 上一档」「下一空档 →」使用
-  const free = availableSlots(buildSchedulePlan({ nowTs: at(20, 0), days: 2, scheduled: squeezed }));
-  assert.equal(free[0].label, '20:30');
-  assert.ok(!free.some((s) => s.ts === at(21, 0) || s.ts === at(21, 30)));
-
-  // 无紧邻排期时：点具体档位做 ±1–3 分钟小幅浮动；点「下一空档」做 ±5–12 分钟自然浮动
-  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) {
-    const pickedSlot = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r, mode: 'slot' });
-    const diffSlot = Math.round((pickedSlot - at(15, 0)) / 60_000);
-    assert.ok(Math.abs(diffSlot) >= 1 && Math.abs(diffSlot) <= 3, `无紧邻排期点具体档位应浮动 1-3 分钟，实际 ${diffSlot}`);
-    const pickedNext = pickJitteredTime(at(15, 0), { nowTs: at(14, 0), scheduled: [], random: () => r, mode: 'next' });
-    const diffNext = Math.round((pickedNext - at(15, 0)) / 60_000);
-    assert.ok(Math.abs(diffNext) >= 5 && Math.abs(diffNext) <= 12, `无紧邻排期点下一空档应浮动 5-12 分钟，实际 ${diffNext}`);
-  }
-
-  // 首尾档位浮动不能越出当天 07:00–24:00
-  const tomorrow = buildDaySlots({ nowTs: at(12, 0), dayOffset: 1 });
-  const firstSlot = tomorrow.slots[0];
-  const lastSlot = tomorrow.slots.at(-1);
-  const firstPicked = pickJitteredTime(firstSlot.ts, { nowTs: at(12, 0), dayStart: firstSlot.dayStart, random: () => 0 });
-  const lastPicked = pickJitteredTime(lastSlot.ts, { nowTs: at(12, 0), dayStart: lastSlot.dayStart, random: () => 0.999 });
-  assert.ok(firstPicked >= firstSlot.ts, '07:00 档不能向前浮动到早上 7 点前');
-  assert.ok(lastPicked <= lastSlot.ts, '24:00 档不能向后浮动到次日');
-
-  // 实际填入也要避开「现在 10 分钟」和「刚发主帖 30 分钟」两个门槛
-  const boundarySlot = buildDaySlots({ nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45) }).slots.find((slot) => slot.ts === at(13, 30));
-  const boundaryPicked = pickJitteredTime(boundarySlot.ts, {
-    nowTs: at(12, 50), scheduled: [], lastPostAt: at(12, 45), random: () => 0,
-  });
-  assert.ok(boundaryPicked >= at(13, 15), '浮动后不能早于最近主帖 30 分钟');
-
-  // 前后参考时间差计算：有上一条和下一条都返回；后面无排期时 next 为 null；刚发主帖比更早排期近时优先显示刚发主帖
-  const { neighborSummary, formatGap } = globalThis.XIRSchedule;
-  const both = neighborSummary(at(22, 8), {
-    scheduled: [{ id: '1', executeAt: at(21, 32) }, { id: '2', executeAt: at(22, 45) }],
-  });
-  assert.equal(both.prev.kind, 'scheduled');
-  assert.equal(formatGap(both.prev.gapMs), '36 分钟');
-  assert.equal(both.next.kind, 'scheduled');
-  assert.equal(formatGap(both.next.gapMs), '37 分钟');
-
-  const onlyPrevPost = neighborSummary(at(22, 8), {
-    scheduled: [{ id: '1', executeAt: at(20, 0) }],
-    lastPostAt: at(21, 30),
-  });
-  assert.equal(onlyPrevPost.prev.kind, 'post');
-  assert.equal(formatGap(onlyPrevPost.prev.gapMs), '38 分钟');
-  assert.equal(onlyPrevPost.next, null);
-  assert.equal(formatGap(95 * 60_000), '1 小时 35 分钟');
-});
-
-test('抓取层：模板识别且自有请求集合有容量上限', async () => {
-  const fetcherCode = readFileSync(new URL('../src/x/fetcher.js', import.meta.url), 'utf8');
-  const sentUrls = [];
-  const ctx = {
-    location: { origin: 'https://x.com' },
-    URL,
-    URLSearchParams,
-    document: { cookie: 'twid=u%3D1; ct0=tok', documentElement: { lang: 'en' } },
-    fetch: async (url) => {
-      sentUrls.push(url);
-      return { ok: true, status: 200, headers: new Map(), text: async () => '{}' };
-    },
-  };
-  runInNewContext(fetcherCode, ctx);
-  const { tplKind, fetchMentions, fetchMyReplies, fetchScheduled, isOwn } = ctx.XIRFetcher;
-
-  assert.equal(tplKind('https://x.com/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D'), 'replies');
-  assert.equal(tplKind('https://x.com/i/api/graphql/Q2/NotificationsTimeline?variables=%7B%7D'), 'mentions');
-  assert.equal(tplKind('https://x.com/i/api/graphql/Q3/FetchScheduledTweets'), 'scheduled');
-  assert.equal(tplKind('https://evil.example/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D'), null);
-  assert.equal(tplKind('https://x.com/i/api/graphql/Q4/HomeTimeline?variables=%7B%7D'), null);
-
-  const missingTpl = await fetchMentions('c_no_tpl');
-  assert.equal(missingTpl.error, 'bad_tpl', '无通知模板时拒绝降级旧 REST');
-  assert.equal(sentUrls.length, 0);
-
-  const ntTpl = 'https://x.com/i/api/graphql/Q2/NotificationsTimeline?variables=%7B%7D';
-  for (let i = 0; i < 505; i++) {
-    await fetchMentions(`c${i}`, ntTpl);
-  }
-  await fetchMyReplies('https://x.com/i/api/graphql/Q1/UserRepliesTimeline?variables=%7B%7D', 'c_out');
-  await fetchScheduled('https://x.com/i/api/graphql/Q3/FetchScheduledTweets');
-
-  assert.equal(sentUrls.length, 507);
-  assert.equal(isOwn(sentUrls[0]), false, '最早的请求应被淘汰');
-  assert.equal(isOwn(sentUrls[6]), false, '超出 500 上限的早期请求应被淘汰');
-  assert.equal(isOwn(sentUrls[7]), true, '第 500 个起的最新请求应保留');
-  assert.equal(isOwn(sentUrls.at(-1)), true, '最近发出的请求应保留');
-});
-
-test('模拟真人节律：连续平滑分布无断层、低于空闲回收线，可选出站同步间隔不少于 48 小时', async () => {
-  const { PACE, humanIncDelay, humanBackfillDelay, humanRestDelay, humanBatchPages, nextOutAutoSlot } = await import('../src/bg/runtime.js');
-  let incMidGapHits = 0;
-  let backfillMidGapHits = 0;
-  for (let i = 0; i < 400; i++) {
-    const incDelay = humanIncDelay();
-    assert.ok(incDelay >= 4_000 && incDelay < 28_000, `增量页间停顿 ${incDelay}ms 须严格在 [4s, 28s)`);
-    if (incDelay >= 10_000 && incDelay < 12_000) incMidGapHits++;
-    const backfillDelay = humanBackfillDelay();
-    assert.ok(backfillDelay >= 15_000 && backfillDelay < 110_000, `补历史停顿 ${backfillDelay}ms 应在预期区间内`);
-    if (backfillDelay >= 28_000 && backfillDelay < 30_000) backfillMidGapHits++;
-    const rest = humanRestDelay();
-    assert.ok(rest >= 180_000 && rest < 300_000, `批间休息 ${rest}ms 应在 [180s, 300s)`);
-    const batch = humanBatchPages();
-    assert.ok(batch >= 8 && batch <= 12, `补历史每批页数 ${batch} 应在 8–12 页`);
-  }
-  assert.ok(incMidGapHits > 0, '增量停顿 10–12s 区间不再存在零概率断层');
-  assert.ok(backfillMidGapHits > 0, '补历史停顿 28–30s 区间不再存在零概率断层');
-  const base = new Date(2026, 10, 21, 9, 0, 0, 0).getTime();
-  const nextOut = nextOutAutoSlot(base);
-  assert.ok(nextOut - base >= PACE.outAutoGapMs, '可选低频出站自动同步间隔至少 48 小时');
 });
 
 test('parseCreatedReply：实时旁听 CreateTweet 回复解析（直评/深层/自回复/异常结构）', () => {
