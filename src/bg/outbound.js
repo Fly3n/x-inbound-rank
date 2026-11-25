@@ -204,10 +204,13 @@ export async function syncOut(account, manual = false) {
     let topId = resume?.topId || null;
     let reachedTs = null;
     let complete = false; // 读到了该停的位置（不是被页数上限截断）
+    let earlyStopped = false;
     let reachedEnd = false; // 本次完整读是因为列表到底才停下
     let pages = 0;
     const run = now();
     const batch = { read: 0, added: 0 };
+    const earlyStopId = prev.earlyStopId || null;
+    const customHours = prev.hours || null;
     for (; pages < maxPages; pages++) {
       if (pages) await sleep(humanIncDelay());
       if (!await enabledAccount(account)) return;
@@ -280,10 +283,13 @@ export async function syncOut(account, manual = false) {
         return;
       }
       const ended = !p.oldestId || !p.bottomCursor; // 列表到底了
-      const reachedTarget = p.newestTs != null && p.newestTs < targetTs;
+      const hitEarlyStop = !!(earlyStopId && p.oldestId && !idGt(p.oldestId, earlyStopId));
+      const reachedTarget = customHours && customHours <= 24
+        ? (p.oldestTs != null && p.oldestTs < targetTs)
+        : (p.newestTs != null && p.newestTs < targetTs);
       const bootstrapReached = bootstrap && (ended || (p.oldestTs != null && p.oldestTs <= startFloor) || pages + 1 >= maxPages);
       const crossedCheckpoint = !stopAt || !!(p.oldestId && !idGt(p.oldestId, stopAt));
-      const stoppedByTime = full ? reachedTarget : bootstrap ? bootstrapReached : crossedCheckpoint;
+      const stoppedByTime = full ? (reachedTarget || hitEarlyStop) : bootstrap ? bootstrapReached : crossedCheckpoint;
       const endedBeforeCheckpoint = ended && !full && !bootstrap && !!stopAt && stopAt !== EMPTY_SYNC_ID && !crossedCheckpoint;
       if (endedBeforeCheckpoint) {
         await record('pagination_stop', { ...trace, source: 'replies', reason: 'ended_before_checkpoint', checkpoint: stopAt });
@@ -297,7 +303,8 @@ export async function syncOut(account, manual = false) {
       }
       if (ended || stoppedByTime) {
         complete = true;
-        reachedEnd = ended && !reachedTarget && !(bootstrap && p.oldestTs != null && p.oldestTs <= startFloor);
+        earlyStopped = hitEarlyStop;
+        reachedEnd = ended && !reachedTarget && !hitEarlyStop && !(bootstrap && p.oldestTs != null && p.oldestTs <= startFloor);
         pages++;
         break;
       }
@@ -332,10 +339,18 @@ export async function syncOut(account, manual = false) {
     const syncedId = topId && (!prev.syncedId || idGt(topId, prev.syncedId))
       ? topId
       : prev.syncedId || topId || ((full || bootstrap) && !reachedTs ? EMPTY_SYNC_ID : null);
-    const done = { status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId, schema: OUT_SCHEMA, resume: null, lastAt: now(), manualTask: false };
+    const done = {
+      status: 'ok', serviceRetries: 0, rate429Count: 0, message: null, pages, syncedId,
+      schema: OUT_SCHEMA, resume: null, lastAt: now(), manualTask: false, earlyStopId: null, prevCoverTs: null,
+    };
+    const nextCoverTs = earlyStopped
+      ? (reachedTs && prev.prevCoverTs ? Math.min(reachedTs, prev.prevCoverTs) : prev.prevCoverTs || reachedTs || null)
+      : customHours
+        ? (reachedTs || targetTs)
+        : (reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null);
     await saveOut(account, full ? {
       ...done,
-      coverTs: reachedTs && prev.coverTs ? Math.min(prev.coverTs, reachedTs) : reachedTs || prev.coverTs || null,
+      coverTs: nextCoverTs,
       attemptCoverTs: reachedTs || prev.attemptCoverTs || null,
       reachedEnd,
       limitReached: null,
@@ -343,6 +358,8 @@ export async function syncOut(account, manual = false) {
       schema: OUT_SCHEMA,
       lastFullAt: now(),
       lastFullDays: initDays,
+      ...(customHours ? { lastFullHours: customHours } : {}),
+      hours: null,
       initDays: null,
       targetTs: null,
     } : done);
@@ -360,7 +377,7 @@ export async function syncOut(account, manual = false) {
   }
 }
 
-export async function syncOutNow({ account }) {
+export async function syncOutNow({ account, hours }) {
   if (!await enabledAccount(account)) return { error: '请先为此账号开启插件。' };
   if (!inActiveHours()) return { error: '读取只在每天 08:00–24:00 进行，夜间不运行。' };
   const cur = await kvGet(keys.cursor(account), {});
@@ -368,12 +385,27 @@ export async function syncOutNow({ account }) {
   if (blockedUntil > now()) {
     return { error: `接口正在退避，请在 ${new Date(blockedUntil).toLocaleTimeString()} 后再试。` };
   }
-  const { initDays } = await getSettings(account);
-  const queued = await updateCursor(account, (cur) => {
-    const out = cur.out || {};
+  const customHours = Number.isInteger(hours) && hours >= 1 && hours <= 15 * 24 ? hours : null;
+  if (customHours) {
+    const wait = PACE.manualCooldownMs - (now() - (cur.out?.lastManualAt || 0));
+    if (wait > 0) return { error: `刚刚补读过，请 ${Math.ceil(wait / 60_000)} 分钟后再试。` };
+  }
+  const { initDays: savedInitDays } = await getSettings(account);
+  const initDays = customHours ? Math.max(1, Math.ceil(customHours / 24)) : savedInitDays;
+  const targetTs = now() - (customHours ? customHours * 3_600_000 : initDays * DAY_MS);
+  const queued = await updateCursor(account, (c) => {
+    const out = c.out || {};
     if (out.running && now() - out.running.at < 120_000) return;
     if (['queued', 'waiting_tab'].includes(out.status) || out.resume && out.status !== 'error') return;
-    cur.out = { ...out, status: 'queued', message: null, manualTask: true, fullFor: 0, resume: null, initDays, targetTs: now() - initDays * DAY_MS };
+    const earlyStopId = customHours && out.syncedId && out.syncedId !== EMPTY_SYNC_ID && out.coverTs != null && out.coverTs <= targetTs
+      ? out.syncedId
+      : null;
+    c.out = {
+      ...out, status: 'queued', message: null, manualTask: true, fullFor: 0, resume: null,
+      initDays, hours: customHours, targetTs,
+      earlyStopId, prevCoverTs: earlyStopId ? out.coverTs : null,
+      ...(customHours ? { lastManualAt: now() } : {}),
+    };
     return true;
   });
   if (!queued) return { ok: true };

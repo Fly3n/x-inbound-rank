@@ -452,3 +452,55 @@ test('通知页与提及页零请求旁听收集：开关控制、All 过滤非�
     await send({ type: 'setSettings', account: 'me', patch: { tapInEnabled: true } });
   }
 });
+
+test('统一手动补读（manualFetchIn）：自定义小时窗口截断、连续覆盖智能早停与长窗口切换回填', { timeout: 20_000 }, async () => {
+  const savedCursor = structuredClone(store['cursor:me'] || {});
+  const savedFeed = [...feed];
+  try {
+    // 1. 场景：30 天没点过主动 fetch（旧 syncedId 在 30 天前），现在手动补读「最近 3 小时」→ 到 3 小时边界即停，不追 30 天前旧点
+    feed.splice(0, feed.length,
+      { ...env.mention(0.5 / 24, '2', '50', '50'), id_str: '96010' },
+      { ...env.mention(1.5 / 24, '2', '50', '50'), id_str: '96009' },
+      { ...env.mention(4 / 24, '2', '50', '50'), id_str: '96008' },
+      { ...env.mention(10 / 24, '2', '50', '50'), id_str: '96007' },
+      { ...env.mention(20 / 24, '2', '50', '50'), id_str: '96006' },
+      { ...env.mention(30, '2', '50', '50'), id_str: '96001' },
+    );
+    store['cursor:me'] = {
+      syncedId: '96001',
+      lastManualAt: 0,
+      lastBackfill: { rangeDays: 7, finishedAt: Date.now() - 30 * 86_400_000, oldestTs: Date.now() - 37 * 86_400_000, reachedEnd: false },
+    };
+    const beforeShort = server.calls;
+    const shortRes = await send({ type: 'manualFetchIn', account: 'me', hours: 3 });
+    assert.equal(shortRes.ok, true);
+    assert.equal(server.calls - beforeShort, 1, '第 1 页最旧已早于 3 小时，立刻停止不追 30 天前旧点');
+    assert.equal(store['cursor:me'].syncedId, '96010');
+    assert.equal(store['cursor:me'].lastBackfill.hours, 3);
+    // 跳过空白期后，lastBackfill.oldestTs 重建为本次实际覆盖，不冒充覆盖了中间 30 天
+    assert.ok(store['cursor:me'].lastBackfill.oldestTs > Date.now() - 24 * 3_600_000);
+
+    // 2. 场景：刚刚连续补读覆盖到 12 小时前，2 小时后又点「最近 6 小时」→ 命中 syncedId 直接早停
+    store['cursor:me'].lastBackfill.oldestTs = Date.now() - 12 * 3_600_000;
+    store['cursor:me'].lastManualAt = 0;
+    feed.unshift({ ...env.mention(0.1 / 24, '2', '50', '50'), id_str: '96011' });
+    const beforeEarly = server.calls;
+    assert.equal((await send({ type: 'manualFetchIn', account: 'me', hours: 6 })).ok, true);
+    assert.equal(server.calls - beforeEarly, 1, '上次连续覆盖已盖过 6 小时，命中 syncedId 自动早停');
+    assert.ok(store['cursor:me'].lastBackfill.oldestTs <= Date.now() - 12 * 3_600_000, '早停后保留更早的连续覆盖起点');
+
+    // 3. 非法时长拦截，长窗口（> 24 小时）走慢速回填状态机
+    assert.match((await send({ type: 'manualFetchIn', account: 'me', hours: 0 })).error, /仅支持/);
+    assert.match((await send({ type: 'manualFetchIn', account: 'me', hours: 400 })).error, /仅支持/);
+    assert.equal((await send({ type: 'manualFetchIn', account: 'me', hours: 72 })).ok, true);
+    await until(() => job()?.hours === 72 && (job().status === 'done' || job().pages >= 1), '长窗口进入回填任务');
+    if (job()?.status !== 'done') await send({ type: 'pauseJob', account: 'me' });
+  } finally {
+    feed.splice(0, feed.length, ...savedFeed);
+    store['cursor:me'] = savedCursor;
+    delete store['job:me'];
+    delete store['alert:me'];
+    delete alarms['job:me'];
+    delete alarms['inc:me'];
+  }
+});

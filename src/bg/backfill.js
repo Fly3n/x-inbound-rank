@@ -23,7 +23,7 @@ export async function scheduleJob(account, job, delayMs) {
   await chrome.alarms.create(alarmFor(JOB_ALARM, account), { when: job.nextAt });
 }
 
-export async function startBackfill(account) {
+export async function startBackfill(account, opts = {}) {
   if (!await enabledAccount(account)) return { error: '请先为此账号开启插件。' };
   const settings = await getSettings(account);
   if (!inActiveHours()) return { error: '读取只在每天 08:00–24:00 进行，夜间不运行。' };
@@ -31,12 +31,21 @@ export async function startBackfill(account) {
   if ((cur.rateUntil || 0) > now()) {
     return { error: `接口正在退避，请在 ${new Date(cur.rateUntil).toLocaleTimeString()} 后再试。` };
   }
-  const rangeDays = settings.initDays; // 往回读多远看初始化范围，和榜单范围分开
+  const customHours = Number.isInteger(opts?.hours) && opts.hours >= 1 && opts.hours <= 15 * 24 ? opts.hours : null;
+  const rangeDays = customHours ? Math.max(1, Math.ceil(customHours / 24)) : settings.initDays;
+  const targetTs = now() - (customHours ? customHours * 3_600_000 : rangeDays * DAY_MS);
+  // 若上次连续补读已经覆盖过本次目标边界，且是从手动补读入口指定时长触发的，碰到 syncedId 可智能早停
+  const stopAt = customHours && cur.syncedId && cur.syncedId !== EMPTY_SYNC_ID && cur.lastBackfill?.oldestTs != null && cur.lastBackfill.oldestTs <= targetTs
+    ? cur.syncedId
+    : null;
+  const prevOldestTs = stopAt ? cur.lastBackfill.oldestTs : null;
   const job = {
     status: 'running',
     api: 'gql', // 仅使用页面旁听到的 NotificationsTimeline 模板，不降级旧 REST
     rangeDays,
-    targetTs: now() - rangeDays * DAY_MS,
+    ...(customHours ? { hours: customHours } : {}),
+    targetTs,
+    ...(stopAt ? { stopAt, prevOldestTs } : {}),
     cursor: null,
     pages: 0,
     added: 0,
@@ -62,8 +71,14 @@ async function finishJob(account, job, { reachedEnd }) {
   job.finishedAt = now();
   job.nextAt = null;
   await saveJob(account, job);
-  const next = await updateCursor(account, (cur) => {
-    cur.lastBackfill = { rangeDays: job.rangeDays, finishedAt: job.finishedAt, oldestTs: job.oldestTs, reachedEnd };
+  await updateCursor(account, (cur) => {
+    cur.lastBackfill = {
+      rangeDays: job.rangeDays,
+      ...(job.hours ? { hours: job.hours } : {}),
+      finishedAt: job.finishedAt,
+      oldestTs: job.oldestTs,
+      reachedEnd,
+    };
     delete cur.incLimitReached;
     // syncedId：从它往后（更早）到回填终点是连续完整的；增量每次从最新读到它之后
     if (job.topId && (!cur.syncedId || idGt(job.topId, cur.syncedId))) cur.syncedId = job.topId;
@@ -157,6 +172,11 @@ export async function stepBackfill(account) {
       job.serviceRetries = 0;
       if (p.oldestTs) job.oldestTs = p.oldestTs;
 
+      if (job.stopAt && p.oldestId && !idGt(p.oldestId, job.stopAt)) {
+        if (job.prevOldestTs != null) job.oldestTs = Math.min(job.oldestTs ?? Infinity, job.prevOldestTs);
+        await finishJob(account, job, { reachedEnd: false });
+        return;
+      }
       if (p.newestTs && p.newestTs < job.targetTs) {
         await finishJob(account, job, { reachedEnd: false });
         return;

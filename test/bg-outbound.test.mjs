@@ -470,3 +470,32 @@ test('本人主页「回复」栏旁听收集：受 tapOutEnabled 控制、只�
   assert.ok(logs.some((e) => e.event === 'outbound_replies_tap_skipped' && e.status === 503));
   assert.ok(logs.some((e) => e.event === 'outbound_replies_tap_failed' && e.category === 'unexpected_payload'));
 });
+
+test('统一手动补读（manualFetchOut）：自定义小时窗口截断与连续覆盖早停', { timeout: 20_000 }, async () => {
+  assert.equal((await send({ type: 'clearData', account: 'me' })).ok, true);
+  await pageSend({ type: 'xir:tpl', url: 'https://x.com/i/api/graphql/QID/UserTweetsAndReplies?variables=%7B%7D' });
+  const savedOutFeed = [...outFeed];
+  try {
+    outFeed.splice(0, outFeed.length,
+      mine('9805', 0.5 / 24, '2'),
+      mine('9804', 2 / 24, '2'),
+      mine('9803', 6 / 24, '2'),
+      mine('9802', 2, '2'),
+      mine('9801', 10, '2'),
+    );
+    const beforeShort = server.outCalls;
+    assert.equal((await send({ type: 'manualFetchOut', account: 'me', hours: 3 })).ok, true);
+    await until(() => store['cursor:me'].out?.status === 'ok' && !store['cursor:me'].out.running, '出站 3 小时补读完成');
+    assert.equal(server.outCalls - beforeShort, 2, '翻到早于 3 小时的第 2 页即停，不继续翻 10 天前');
+    assert.equal(store['cursor:me'].out.lastFullHours, 3);
+    assert.equal(store['cursor:me'].out.syncedId, '9805');
+
+    // 10 分钟冷却保护
+    assert.match((await send({ type: 'manualFetchOut', account: 'me', hours: 3 })).error, /分钟后再试/);
+    // 非法时长拦截
+    assert.match((await send({ type: 'manualFetchOut', account: 'me', hours: 500 })).error, /仅支持/);
+  } finally {
+    outFeed.splice(0, outFeed.length, ...savedOutFeed);
+    delete alarms['out:me'];
+  }
+});

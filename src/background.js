@@ -65,7 +65,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const h = msg && handlers[msg.type];
   if (!h) return false;
-  const logged = ['startBackfill', 'syncOutNow', 'pauseJob', 'resumeJob', 'clearData', 'updateNowWithReceipt', 'updateOutNowWithReceipt'].includes(msg.type);
+  const logged = ['startBackfill', 'syncOutNow', 'manualFetchIn', 'manualFetchOut', 'pauseJob', 'resumeJob', 'clearData', 'updateNowWithReceipt', 'updateOutNowWithReceipt'].includes(msg.type);
   Promise.resolve().then(async () => {
     await migrateAccounts();
     if (msg.type.startsWith('xir:')) return h(msg, _sender);

@@ -134,7 +134,7 @@ async function incDue(account, manual) {
   return { account, cur, settings };
 }
 
-export async function maybeIncremental(account, manual = false) {
+export async function maybeIncremental(account, manual = false, opts = {}) {
   const inProgress = { error: '已有读取任务正在运行，请等这次完成。' };
   const eligibility = await incDue(account, manual);
   if (!eligibility || eligibility.error) return eligibility || false;
@@ -144,22 +144,30 @@ export async function maybeIncremental(account, manual = false) {
     if (!due || due.error) return due || false;
     const { cur } = due;
 
-    // 每次从最新一页往回读：已有接续点时一发现与上次位置重叠即停（再往前都已读过）；
-    // 从未补过历史的账号直接从启用时刻建立起点（单轮最多读 2 页）。
+    // 每次从最新一页往回读：
+    // - 指定小时窗口（手动短补读）时：到达 targetTs 或在连续覆盖区间内重叠 syncedId，谁先到即停；
+    // - 未指定窗口时沿用旧逻辑：已有接续点重叠即停，首次免补历史最多读 2 页建立起点。
     // 每个后台事件最多读 6 页；没接上则休息 3–5 分钟续读，单轮最多 8 段（48 页）。
     const stopAt = cur.syncedId || null;
     const resume = (cur.incResume?.stopAt || null) === stopAt ? cur.incResume : null;
     const taskManual = manual || !!resume?.manual;
     const run = now();
+    const hours = Number.isInteger(opts?.hours) && opts.hours >= 1 && opts.hours <= 24 ? opts.hours : (resume?.hours ?? null);
+    const targetTs = hours ? (resume?.targetTs ?? (run - hours * 3_600_000)) : null;
+    const canEarlyStop = !targetTs
+      ? !!stopAt
+      : !!(stopAt && stopAt !== EMPTY_SYNC_ID && cur.lastBackfill?.oldestTs != null && cur.lastBackfill.oldestTs <= targetTs);
     const floorTs = run - KEEP_DAYS * DAY_MS;
     const me = (await kvGet(keys.accounts, {}))[account];
     const startFloor = me?.activation || run;
     const api = 'gql';
     const canRequest = !!(await kvGet(keys.tplMentions(account)));
-    const maxPages = stopAt ? PACE.incPagesPerEvent : Math.min(PACE.incPagesPerEvent, 2);
+    const maxPages = (stopAt || targetTs) ? PACE.incPagesPerEvent : Math.min(PACE.incPagesPerEvent, 2);
     let cursor = resume?.cursor || null;
     let topId = resume?.topId || null;
+    let oldestSeenTs = resume?.oldestSeenTs ?? null;
     let caughtUp = false;
+    let stopReasonFinal = null;
     let manualMarked = false;
     let pagesRead = 0;
     const roundStartedAt = resume?.startedAt || run;
@@ -175,6 +183,7 @@ export async function maybeIncremental(account, manual = false) {
           startedAt: roundStartedAt,
           rounds: resume?.rounds || 0,
           pages: (resume?.pages || 0) + pagesRead,
+          ...(hours ? { hours, targetTs, oldestSeenTs } : {}),
         };
       }
       c.nextIncAt = nextAt;
@@ -257,6 +266,7 @@ export async function maybeIncremental(account, manual = false) {
       const p = res.parsed;
       pagesRead += 1;
       if (page === 0 && !resume) topId = p.newestId;
+      if (p.oldestTs != null && (oldestSeenTs == null || p.oldestTs < oldestSeenTs)) oldestSeenTs = p.oldestTs;
       const repeatedCursor = !!cursor && p.bottomCursor === cursor;
       if (repeatedCursor) {
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'repeated_cursor', checkpoint: stopAt });
@@ -267,23 +277,26 @@ export async function maybeIncremental(account, manual = false) {
         await setAlert(account, 'X 的提及列表返回了重复的翻页位置，本轮已停止；接续点没有前移。');
         return { error: '别人回我翻页异常，已停止本轮。' };
       }
-      if (!stopAt) {
+      if (!stopAt && !targetTs) {
         const totalInitialPages = (resume?.pages || 0) + pagesRead;
         if (!p.entryIds.length || !p.bottomCursor || (p.oldestTs != null && p.oldestTs <= startFloor) || totalInitialPages >= 2) {
           await record('pagination_stop', { ...trace, source: 'mentions', reason: 'initial_anchor', checkpoint: null });
           caughtUp = true;
+          stopReasonFinal = 'initial_anchor';
           break;
         }
         cursor = p.bottomCursor;
         continue;
       }
-      const overlapped = stopAt !== EMPTY_SYNC_ID && !!(p.oldestId && !idGt(p.oldestId, stopAt));
+      const overlapped = canEarlyStop && stopAt !== EMPTY_SYNC_ID && !!(p.oldestId && !idGt(p.oldestId, stopAt));
+      const reachedWindow = targetTs != null && p.oldestTs != null && p.oldestTs < targetTs;
       const stopReason = overlapped ? 'reached_overlap'
+        : reachedWindow ? 'reached_window'
         : !p.entryIds.length ? 'empty_page'
         : !p.bottomCursor ? 'no_next_page'
         : (p.oldestTs != null && p.oldestTs < floorTs) ? 'retention_boundary'
         : null;
-      const endedBeforeCheckpoint = stopAt !== EMPTY_SYNC_ID && !overlapped &&
+      const endedBeforeCheckpoint = !targetTs && stopAt !== EMPTY_SYNC_ID && !overlapped &&
         (stopReason === 'empty_page' || stopReason === 'no_next_page');
       if (endedBeforeCheckpoint) {
         await record('pagination_stop', { ...trace, source: 'mentions', reason: 'ended_before_checkpoint', checkpoint: stopAt });
@@ -297,6 +310,7 @@ export async function maybeIncremental(account, manual = false) {
       if (stopReason) {
         await record('pagination_stop', { ...trace, source: 'mentions', reason: stopReason, checkpoint: stopAt });
         caughtUp = true;
+        stopReasonFinal = stopReason;
         break;
       }
       cursor = p.bottomCursor;
@@ -316,7 +330,11 @@ export async function maybeIncremental(account, manual = false) {
       const when = nextActiveAt(now() + humanRestDelay(PACE.restMs));
       await updateCursor(account, (c) => {
         if ((c.syncedId || null) !== stopAt) return; // 读的过程中被补历史或清空改掉了
-        c.incResume = { cursor, topId, stopAt, api, manual: true, startedAt: roundStartedAt, rounds, pages: (resume?.pages || 0) + pagesRead };
+        c.incResume = {
+          cursor, topId, stopAt, api, manual: true, startedAt: roundStartedAt, rounds,
+          pages: (resume?.pages || 0) + pagesRead,
+          ...(hours ? { hours, targetTs, oldestSeenTs } : {}),
+        };
         c.nextIncAt = when;
       });
       await chrome.alarms.create(alarmFor(INC_ALARM, account), { when });
@@ -327,6 +345,19 @@ export async function maybeIncremental(account, manual = false) {
       if (!c.syncedId) c.syncedId = topId || EMPTY_SYNC_ID;
       else if (topId && idGt(topId, c.syncedId)) c.syncedId = topId;
       nextSyncedId = c.syncedId;
+      if (hours) {
+        const prevOldest = stopReasonFinal === 'reached_overlap' ? c.lastBackfill?.oldestTs ?? null : null;
+        const coverOldest = prevOldest != null && oldestSeenTs != null
+          ? Math.min(prevOldest, oldestSeenTs)
+          : prevOldest ?? oldestSeenTs ?? targetTs;
+        c.lastBackfill = {
+          rangeDays: Math.ceil(hours / 24),
+          hours,
+          finishedAt: now(),
+          oldestTs: coverOldest,
+          reachedEnd: stopReasonFinal === 'empty_page' || stopReasonFinal === 'no_next_page',
+        };
+      }
       delete c.incResume;
       delete c.serviceRetries;
       delete c.incLimitReached;

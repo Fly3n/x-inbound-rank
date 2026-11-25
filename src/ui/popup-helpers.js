@@ -40,6 +40,25 @@ export function readSummary(at, counts, exact = false) {
     (counts ? ` · 扫描 ${counts.read} 条 · 新增 ${counts.added} 条` : ' · 暂无条数');
 }
 
+export function formatDurationLabel(hours) {
+  if (!Number.isFinite(hours) || hours <= 0) return '';
+  if (hours <= 24 || hours % 24 !== 0) return `${hours} 小时`;
+  return `${hours / 24} 天`;
+}
+
+/** 按本机最近一次旁听或手动补读时间推算建议补读时长（向上取整，上限 15 天）。 */
+export function suggestFetchWindow(lastSyncAt, now = Date.now()) {
+  if (!lastSyncAt) return { amount: 3, unit: 'h', note: '暂无同步记录，可按需调整时长手动补读' };
+  const gapMs = Math.max(0, now - lastSyncAt);
+  if (gapMs < 60 * 60_000) return { amount: 1, unit: 'h', note: '刚刚已旁听/更新，通常无需补读' };
+  if (gapMs <= 24 * 3_600_000) {
+    const h = Math.min(24, Math.ceil(gapMs / 3_600_000));
+    return { amount: h, unit: 'h', note: `距上次同步约 ${h} 小时（已预填，可自调）` };
+  }
+  const d = Math.min(15, Math.ceil(gapMs / 86_400_000));
+  return { amount: d, unit: 'd', note: `距上次同步约 ${d} 天（已预填，可自调）` };
+}
+
 // 加减按钮：名次上限每次 50（10 和 50 之间直接跳），次数每次 1
 export function stepRuleValue(key, current, dir) {
   if (key === 'topN') return dir > 0 ? (current < 50 ? 50 : current + 50) : current <= 50 ? LIMITS.topN[0] : current - 50;

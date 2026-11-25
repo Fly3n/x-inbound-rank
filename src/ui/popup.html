@@ -68,37 +68,59 @@
 
     <!-- 设置页：顶部默认折叠补历史卡 + 3 张核心功能卡 + 底部统一高级与说明折叠区 -->
     <section id="view-settings" hidden>
-      <details class="card fold" id="backfillCard">
-        <summary>补历史</summary>
+      <section class="card">
+        <h2>数据同步</h2>
+
+        <div class="row between sync-row">
+          <span class="inline-opt sync-opt">
+            <label class="line"><input type="checkbox" id="tapInEnabled"> 旁听收集 <span class="scope">[别人回我]</span></label>
+            <button class="q" data-tip="tip-in-auto" aria-label="旁听收集（别人回我）说明">?</button>
+          </span>
+          <span class="read-at" id="inLastAt"></span>
+        </div>
+        <div class="tip" id="tip-in-auto" hidden>
+          <p>开启后，你在电脑浏览 X「通知 / 提及」页时自动旁听并去重记录回复（零主动请求、无时间窗口限制，后台不再定时抓接口）。</p>
+          <p id="inReadSummary"></p>
+        </div>
+
+        <div class="row between sync-row">
+          <span class="inline-opt sync-opt">
+            <label class="line"><input type="checkbox" id="tapOutEnabled"> 旁听收集 <span class="scope">[我回别人]</span></label>
+            <button class="q" data-tip="tip-out-auto" aria-label="旁听收集（我回别人）说明">?</button>
+          </span>
+          <span class="read-at" id="outLastAt"></span>
+        </div>
+        <div class="tip" id="tip-out-auto" hidden>
+          <p>开启后，你在电脑发回复或浏览本人主页「回复」栏时自动旁听并去重记录（零主动请求，后台不再定时抓接口）。</p>
+          <p id="outReadSummary"></p>
+        </div>
+
+        <div class="sub-divider"></div>
+
         <div class="row between">
-          <span class="inline-opt"><span>补读范围</span><button class="q" data-tip="tip-backfill" aria-label="补历史说明">?</button></span>
-          <select id="initRange" aria-label="补历史范围">
-            <option value="7">最近 7 天</option>
-            <option value="15">最近半个月</option>
-          </select>
+          <span class="inline-opt"><span>手动补读</span><button class="q" data-tip="tip-manual-fetch" aria-label="手动补读说明">?</button></span>
+          <span class="row fetch-range">
+            <span class="dim-label">最近</span>
+            <input type="number" id="fetchAmount" min="1" max="24" value="3" aria-label="手动补读时长">
+            <select id="fetchUnit" aria-label="手动补读单位">
+              <option value="h">小时</option>
+              <option value="d">天</option>
+            </select>
+          </span>
         </div>
-        <div class="tip" id="tip-backfill" hidden><p>按需手动拉取过去 7 天或半个月的历史补齐；不补也能靠日常「旁听收集」慢慢攒。仅在 X 页面前台可见时继续，切走自动暂停。</p></div>
+        <div class="tip" id="tip-manual-fetch" hidden>
+          <p>按需从当下往回手动拉取（1–24 小时或 1–15 天），用于补齐手机端或未刷到的历史。仅在 08:00–24:00 且 X 页面前台可见时执行；≤ 24 小时走轻量节奏，2–15 天自动走慢速回填节奏；命中上次连续覆盖区间时自动早停。两路各自 10 分钟冷却。</p>
+        </div>
+        <p class="hint" id="fetchSuggest"></p>
 
-        <div class="src">
-          <div class="row between">
-            <span class="inline-opt"><span>别人回我</span><button class="q" data-tip="tip-in" aria-label="别人回我说明">?</button></span>
-            <span class="row">
-              <span id="inReason" class="init-reason" role="status"></span>
-              <button aria-describedby="inReason" id="start" class="primary">补历史</button>
-              <button id="pause" hidden>暂停</button>
-              <button id="resume" hidden>继续</button>
-            </span>
-          </div>
-          <div class="tip" id="tip-in" hidden><p>统计在我自己的帖子下回复我的次数，各层都算，决定榜单排名。</p></div>
+        <div class="row fetch-actions">
+          <button id="fetchInBtn" class="primary" aria-describedby="updateStatus">补读 [别人回我]</button>
+          <button id="fetchOutBtn" aria-describedby="updateOutStatus">补读 [我回别人]</button>
+          <button id="pause" hidden>暂停</button>
+          <button id="resume" hidden>继续</button>
         </div>
-
-        <div class="src">
-          <div class="row between">
-            <span class="inline-opt"><span>我回别人</span><button class="q" data-tip="tip-out" aria-label="我回别人说明">?</button></span>
-            <span class="row"><span id="outReason" class="init-reason" role="status"></span><button aria-describedby="outReason" id="outSync" class="primary">补历史</button></span>
-          </div>
-          <div class="tip" id="tip-out" hidden><p>统计我直接评论对方根帖的次数，在榜单显示「我回 N」。默认通过浏览器发帖旁听实时记录（零主动请求），也可按需手动补历史。</p></div>
-        </div>
+        <p class="hint" id="updateStatus" role="status"></p>
+        <p class="hint" id="updateOutStatus" role="status"></p>
 
         <div id="jobControls" class="sync-notice" hidden>
           <p id="jobStatus" hidden></p>
@@ -107,38 +129,6 @@
           <p class="hint" id="outIssue" role="status" hidden></p>
           <a id="outRepliesLink" target="_blank" rel="noreferrer" hidden>打开我的回复页</a>
         </div>
-      </details>
-
-      <section class="card">
-        <h2>数据同步</h2>
-
-        <div class="row between sync-row">
-          <span class="inline-opt sync-opt">
-            <label class="line"><input type="checkbox" id="tapInEnabled"> 旁听收集 <span class="scope">[别人回我]</span></label>
-            <button class="q" data-tip="tip-in-auto" aria-label="旁听收集（别人回我）说明">?</button>
-            <span class="read-at" id="inLastAt"></span>
-          </span>
-          <button id="updateNow" aria-describedby="updateStatus">立即更新</button>
-        </div>
-        <div class="tip" id="tip-in-auto" hidden>
-          <p>开启后，你在电脑浏览 X「通知 / 提及」页时自动旁听并去重记录回复（零主动请求，后台不再定时抓接口）。右侧「立即更新」为按需手动拉取（10 分钟冷却），仅在你主动点击时发请求。</p>
-          <p id="inReadSummary"></p>
-        </div>
-        <p class="hint" id="updateStatus" role="status"></p>
-
-        <div class="row between sync-row">
-          <span class="inline-opt sync-opt">
-            <label class="line"><input type="checkbox" id="tapOutEnabled"> 旁听收集 <span class="scope">[我回别人]</span></label>
-            <button class="q" data-tip="tip-out-auto" aria-label="旁听收集（我回别人）说明">?</button>
-            <span class="read-at" id="outLastAt"></span>
-          </span>
-          <button id="updateOutNow" aria-describedby="updateOutStatus">立即更新</button>
-        </div>
-        <div class="tip" id="tip-out-auto" hidden>
-          <p>开启后，你在电脑发回复或浏览本人主页「回复」栏时自动旁听并去重记录（零主动请求，后台不再定时抓接口）。右侧「立即更新」为按需手动拉取（10 分钟冷却），可用于补齐手机端回复。</p>
-          <p id="outReadSummary"></p>
-        </div>
-        <p class="hint" id="updateOutStatus" role="status"></p>
       </section>
 
       <section class="card">

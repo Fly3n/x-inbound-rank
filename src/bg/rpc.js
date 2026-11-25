@@ -128,8 +128,26 @@ export const handlers = {
     return {};
   },
 
+  // 弹窗：别人回我手动补读（≤24 小时走轻量节奏，>24 小时走慢速回填节奏）
+  async manualFetchIn({ account, hours }) {
+    const h = Math.round(Number(hours));
+    if (!Number.isInteger(h) || h < 1 || h > 15 * 24) return { error: '补读时长仅支持 1–24 小时或 1–15 天。' };
+    if (h <= 24) return handlers.updateNowWithReceipt({ account, hours: h });
+    if (!(await hasVisiblePage(account))) return { error: '请切到该账号的 X 页面后再补读。' };
+    await clearAccountCircuit(account);
+    return startBackfill(account, { hours: h });
+  },
+  // 弹窗：我回别人手动补读（支持自定义小时/天 + 智能早停）
+  async manualFetchOut({ account, hours }) {
+    const h = Math.round(Number(hours));
+    if (!Number.isInteger(h) || h < 1 || h > 15 * 24) return { error: '补读时长仅支持 1–24 小时或 1–15 天。' };
+    if (!(await hasVisiblePage(account))) return { error: '请切到该账号的 X 页面后再补读。' };
+    await clearAccountCircuit(account);
+    return syncOutNow({ account, hours: h });
+  },
+
   // 弹窗：别人回我独立立即更新
-  async updateNowWithReceipt({ account }) {
+  async updateNowWithReceipt({ account, hours }) {
     const startedAt = now();
     if (!account) return { error: '请先选择已登录的 X 账号。' };
     if (!inActiveHours()) return { error: '读取只在每天 08:00–24:00 进行，夜间不运行。' };
@@ -138,7 +156,7 @@ export const handlers = {
     const wait = PACE.manualCooldownMs - (now() - (beforeManual.lastManualAt || 0));
     if (wait > 0) return { error: `刚刚更新过，请 ${Math.ceil(wait / 60_000)} 分钟后再试。` };
     await clearAccountCircuit(account);
-    const result = await maybeIncremental(account, true);
+    const result = await maybeIncremental(account, true, hours ? { hours } : {});
     if (result === false) return { error: '读取暂不可用，请确认已有登录的 X 页面并稍后再试。' };
     if (!result?.ok && !result?.deferred) return result;
     if (result?.deferred) return { message: result.message };

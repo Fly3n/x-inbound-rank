@@ -1,19 +1,19 @@
 // 弹窗：榜单页、设置页。只和后台通信，不直接发任何 X 请求。
 import {
   COLORS, LIMITS, DEFAULT_RULES, KEEP_DAYS, WARN_DAYS, DAY_MS,
-  colorOf, inboundInitCovered, outboundInitCovered,
+  colorOf,
 } from '../rank.js';
 import {
   COLOR_NAMES, SHOW_KEYS, STORAGE_WATCH,
   pad, fmtDay, fmtShortDay, fmtTime, fullTime, windowLabel,
-  jobText, readSummary, stepRuleValue,
+  jobText, readSummary, formatDurationLabel, suggestFetchWindow, stepRuleValue,
   buildCsv, buildBoardExportRows, buildAllExportRows,
 } from './popup-helpers.js';
 
 const $ = (id) => document.getElementById(id);
 const call = (type, extra = {}) => chrome.runtime.sendMessage({ type, ...extra });
 
-const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outCountable: false }; // open：榜单里点开的那个人
+const view = { account: null, tab: null, rows: [], rules: null, eventCount: 0, tiersKey: '', open: null, detail: null, outCountable: false, fetchTouched: false }; // open：榜单里点开的那个人
 
 function el(tag, props = {}, children = []) {
   const { dataset, ...rest } = props;
@@ -185,6 +185,7 @@ async function draw() {
   if (view.account !== view.selected) {
     $('updateStatus').textContent = '';
     $('updateOutStatus').textContent = '';
+    view.fetchTouched = false;
   }
   view.account = view.selected;
   view.activationUserId = inactivePage ? g.active.userId : null;
@@ -231,12 +232,7 @@ async function draw() {
   const label = windowLabel(rules.windowDays);
   const outHasData = s.db.out.count > 0 || !!out?.lastAt;
   Object.assign(view, { rows, rules, eventCount: s.db.in.count, outCountable: outHasData });
-  // 本机数据是不是已经覆盖了所选的补历史范围（覆盖了就把按钮置灰）：
-  const initStart = Date.now() - rules.initDays * DAY_MS;
   const lbIn = s.cursor.lastBackfill;
-  const inCovered = inboundInitCovered(lbIn, s.cursor.syncedId, rules.initDays);
-  const outCovered = outboundInitCovered(out, rules.initDays);
-  const outCoveredNow = outCovered && out.status !== 'error';
 
   // 保存期限：最早的数据存满 80 天时挂红字提示先导出；第一次清理之后数据每天滚动清，改成一行小字
   const oldest = Math.min(s.db.in.from ?? Infinity, s.db.out.from ?? Infinity);
@@ -271,14 +267,7 @@ async function draw() {
     : '';
   $('outLine').hidden = !$('outLine').textContent;
   $('outNotice').hidden = $('outIssue').hidden && outLink.hidden;
-  $('outReason').textContent = !isSession ? '打开此账号的 X 页面'
-    : outCoveredNow && !outPending
-      ? (out.reachedEnd ? (out.coverTs ? `已读到列表底部（最早 ${fmtDay(out.coverTs)}）` : 'X 列表到底，没有读到记录') : '已覆盖所选范围')
-      : outHasData && out.coverTs && out.coverTs > initStart && out.status !== 'error' ? `上次只读到 ${fmtDay(out.coverTs)}` : '';
-  $('outSync').disabled = !isSession || outPending || outCoveredNow || starting.has('outSync');
-  $('outSync').textContent = starting.has('outSync') ? '启动中' : outPhase || (outPending ? '排队中' : '补历史');
   $('window').value = String(rules.windowDays);
-  $('initRange').value = String(rules.initDays);
   $('exportBoard').disabled = !rows.length;
   $('exportAll').disabled = !s.db.in.count && !s.db.out.count;
   $('boardHint').textContent =
@@ -299,14 +288,7 @@ async function draw() {
   $('jobControls').hidden = $('jobStatus').hidden;
   const inPhase = job?.status === 'running' ? '进行中' : job?.status === 'waiting_tab' ? '等待 X 页面'
     : job?.status === 'paused' ? '已暂停' : '';
-  $('start').textContent = starting.has('start') ? '启动中' : inPhase || '补历史';
-  $('start').disabled = !isSession || !!inPhase || inCovered || starting.has('start');
-  $('inReason').textContent = !isSession ? '打开此账号的 X 页面'
-    : inPhase ? '' : inCovered ? (lbIn?.reachedEnd && !lbIn?.oldestTs ? 'X 列表到底，没有读到记录' : '已覆盖所选范围')
-      : lbIn?.oldestTs ? (lbIn.reachedEnd ? `X 列表到底，最早只到 ${fmtDay(lbIn.oldestTs)}` : `上次只读到 ${fmtDay(lbIn.oldestTs)}`)
-        : lbIn?.reachedEnd ? 'X 列表到底，没有读到记录' : '';
   $('resume').disabled = !isSession;
-  if (!$('jobControls').hidden || !$('outNotice').hidden) $('backfillCard').open = true;
   const inboundAt = s.cursor.inLastReadAt ?? s.cursor.lastIncrementalAt;
   const inboundTapAt = s.cursor.inLastTapAt || null;
   const outboundAt = out?.lastReadAt ?? out?.lastAt;
@@ -319,7 +301,7 @@ async function draw() {
     const sameDay = d.getFullYear() === nowD.getFullYear() && d.getMonth() === nowD.getMonth() && d.getDate() === nowD.getDate();
     return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
   };
-  const latestOf = (a, b) => Math.max(a || 0, b || 0) || null;
+  const latestOf = (...vals) => Math.max(0, ...vals.map((v) => v || 0)) || null;
   const inTapTag = { All: '全部', Mentions: '提及', Verified: '已认证' }[s.cursor.inLastTapCounts?.timeline] || '';
   const outTapTag = s.cursor.outLastTapCounts?.source === 'replies_timeline' ? '回复栏' : s.cursor.outLastTapCounts?.source === 'create_tweet' ? '发帖' : '';
   $('inLastAt').textContent = fmtCompactTime(latestOf(inboundAt, inboundTapAt));
@@ -328,8 +310,17 @@ async function draw() {
     + (inboundTapAt ? `；最近旁听${inTapTag ? `（${inTapTag}）` : ''}：${readSummary(inboundTapAt, s.cursor.inLastTapCounts, true)}` : '');
   $('outReadSummary').textContent = `最近读取：${readSummary(outboundAt, out?.lastReadCounts, true)}`
     + (outboundTapAt ? `；最近旁听${outTapTag ? `（${outTapTag}）` : ''}：${readSummary(outboundTapAt, s.cursor.outLastTapCounts, true)}` : '');
-  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, lbIn?.rangeDays, inboundAt, s.cursor.inLastReadCounts, inboundTapAt, s.cursor.inLastTapCounts);
-  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, out?.lastFullDays, outboundAt, out?.lastReadCounts, outboundTapAt, s.cursor.outLastTapCounts);
+  const suggest = suggestFetchWindow(latestOf(inboundAt, inboundTapAt, outboundAt, outboundTapAt));
+  $('fetchSuggest').textContent = suggest.note;
+  if (!view.fetchTouched) {
+    $('fetchUnit').value = suggest.unit;
+    $('fetchAmount').max = suggest.unit === 'd' ? '15' : '24';
+    setValue($('fetchAmount'), suggest.amount);
+  }
+  const inLastLabel = lbIn?.hours ? formatDurationLabel(lbIn.hours) : lbIn?.rangeDays ? `${lbIn.rangeDays} 天` : '';
+  const outLastLabel = out?.lastFullHours ? formatDurationLabel(out.lastFullHours) : out?.lastFullDays ? `${out.lastFullDays} 天` : '';
+  renderDataStatus('coverage', s.db.in, lbIn?.finishedAt, inLastLabel, inboundAt, s.cursor.inLastReadCounts, inboundTapAt, s.cursor.inLastTapCounts);
+  renderDataStatus('outStatus', s.db.out, out?.lastFullAt, outLastLabel, outboundAt, out?.lastReadCounts, outboundTapAt, s.cursor.outLastTapCounts);
   // 本机占用：这个插件的全部本地数据（两份回复 + 设置）
   navigator.storage?.estimate?.().then(
     (e) => ($('storage').textContent = `本机共存 ${s.db.in.count + s.db.out.count} 条回复，插件数据约占 ${(e.usage / 1048576).toFixed(1)} MB。只保留最近 3 个月。`),
@@ -337,10 +328,10 @@ async function draw() {
   );
   $('tapInEnabled').checked = rules.tapInEnabled;
   $('tapOutEnabled').checked = rules.tapOutEnabled;
-  $('updateNow').disabled = !isSession || updatingNow;
-  $('updateNow').textContent = updatingNow ? '更新中…' : '立即更新';
-  $('updateOutNow').disabled = !isSession || updatingOutNow;
-  $('updateOutNow').textContent = updatingOutNow ? '更新中…' : '立即更新';
+  $('fetchInBtn').disabled = !isSession || !!inPhase || updatingNow;
+  $('fetchInBtn').textContent = updatingNow ? '补读中…' : inPhase ? `别人回我（${inPhase}）` : '补读 [别人回我]';
+  $('fetchOutBtn').disabled = !isSession || outPending || updatingOutNow;
+  $('fetchOutBtn').textContent = updatingOutNow ? '补读中…' : outPhase ? `我回别人（${outPhase}）` : '补读 [我回别人]';
   for (const k of SHOW_KEYS) $(k).checked = rules[k];
 
   // 设置页：口径与颜色
@@ -349,11 +340,11 @@ async function draw() {
   renderTiers(rules);
 }
 
-function renderDataStatus(id, data, initializedAt, days, readAt, counts, tapAt, tapCounts) {
+function renderDataStatus(id, data, initializedAt, spanLabel, readAt, counts, tapAt, tapCounts) {
   const fields = [
     ['本机条数', `${data.count} 条`],
     ['记录日期', data.count ? `${fmtShortDay(data.from)} – ${fmtShortDay(data.to)}` : '暂无记录'],
-    ['上次补历史', initializedAt ? `${fmtTime(initializedAt)}（${days} 天）` : '未补历史'],
+    ['上次补读', initializedAt ? `${fmtTime(initializedAt)}${spanLabel ? `（${spanLabel}）` : ''}` : '未补读'],
     ['上次读取', readSummary(readAt, counts)],
   ];
   if (tapAt) fields.push(['上次旁听', readSummary(tapAt, tapCounts)]);
@@ -382,7 +373,24 @@ $('tabs').addEventListener('click', (e) => {
   render();
 });
 $('window').addEventListener('change', (e) => saveRules({ windowDays: Number(e.target.value) }));
-$('initRange').addEventListener('change', (e) => saveRules({ initDays: Number(e.target.value) }));
+function readSelectedHours() {
+  const unit = $('fetchUnit').value === 'd' ? 'd' : 'h';
+  const max = unit === 'd' ? 15 : 24;
+  const raw = Math.round(Number($('fetchAmount').value));
+  const clamped = Number.isFinite(raw) ? Math.min(max, Math.max(1, raw)) : 1;
+  $('fetchAmount').value = String(clamped);
+  return unit === 'd' ? clamped * 24 : clamped;
+}
+$('fetchUnit').addEventListener('change', () => {
+  view.fetchTouched = true;
+  const max = $('fetchUnit').value === 'd' ? 15 : 24;
+  $('fetchAmount').max = String(max);
+  readSelectedHours();
+});
+$('fetchAmount').addEventListener('change', () => {
+  view.fetchTouched = true;
+  readSelectedHours();
+});
 
 // 小问号：点了展开或收起它对应的说明
 document.addEventListener('click', (e) => {
@@ -458,51 +466,32 @@ $('exportAll').addEventListener('click', async () => {
   download('全量数据', buildAllExportRows(inbound, outAll));
 });
 
-$('account').addEventListener('change', (e) => { view.selected = e.target.value || null; view.tab = null; view.open = null; render(); });
-const starting = new Set();
-async function initialize(id, type) {
-  const button = $(id);
-  if (button.disabled) return;
-  starting.add(id);
-  button.disabled = true;
-  button.textContent = '启动中';
-  try {
-    const result = await call(type, { account: view.account });
-    if (result?.error) alert(result.error);
-  } catch {
-    alert('未能启动补历史，请重新打开弹窗再试。');
-  } finally {
-    starting.delete(id);
-    await render();
-  }
-}
+$('account').addEventListener('change', (e) => { view.selected = e.target.value || null; view.tab = null; view.open = null; view.fetchTouched = false; render(); });
 
 let updatingNow = false;
 let updatingOutNow = false;
-async function runManualUpdate({ buttonId, statusId, isBusy, setBusy, send, readKey, okText }) {
+async function runManualFetch({ buttonId, statusId, isBusy, setBusy, rpc, okText }) {
   const button = $(buttonId);
   const { account } = view;
   const status = $(statusId);
   if (isBusy() || button.disabled) return;
+  const hours = readSelectedHours();
   setBusy(true);
   button.disabled = true;
-  button.textContent = '更新中…';
+  button.textContent = '补读中…';
   button.setAttribute('aria-busy', 'true');
-  status.textContent = '正在处理这次更新…';
-  // 极快的返回也留出时间显示按钮状态。
+  status.textContent = `正在补读最近 ${formatDurationLabel(hours)}…`;
   const visible = new Promise((resolve) => setTimeout(resolve, 600));
   let message;
   try {
-    const startedAt = Date.now();
-    const result = await send(account);
-    const receipt = result?.readAt;
-    if (receipt?.[readKey] >= startedAt) {
-      message = okText;
+    const result = await call(rpc, { account, hours });
+    if (result?.ok) {
+      message = okText(hours);
     } else {
-      message = result?.error || result?.message || '未收到本次读取时间，请重新加载扩展再试。';
+      message = result?.error || result?.message || '未收到本次补读结果，请重新加载扩展再试。';
     }
   } catch {
-    message = '未能确认更新结果，请重新加载扩展再试。';
+    message = '未能确认补读结果，请重新加载扩展再试。';
   } finally {
     await visible;
     if (view.account === account) status.textContent = message;
@@ -511,26 +500,22 @@ async function runManualUpdate({ buttonId, statusId, isBusy, setBusy, send, read
     await render();
   }
 }
-$('updateNow').addEventListener('click', () => runManualUpdate({
-  buttonId: 'updateNow',
+$('fetchInBtn').addEventListener('click', () => runManualFetch({
+  buttonId: 'fetchInBtn',
   statusId: 'updateStatus',
   isBusy: () => updatingNow,
   setBusy: (v) => { updatingNow = v; },
-  send: (account) => call('updateNowWithReceipt', { account }),
-  readKey: 'inbound',
-  okText: '别人回我已读取，点「?」可看最近记录。',
+  rpc: 'manualFetchIn',
+  okText: (h) => h > 24 ? `已启动别人回我补读（最近 ${formatDurationLabel(h)}）。` : `别人回我已补读完成（最近 ${formatDurationLabel(h)}）。`,
 }));
-$('updateOutNow').addEventListener('click', () => runManualUpdate({
-  buttonId: 'updateOutNow',
+$('fetchOutBtn').addEventListener('click', () => runManualFetch({
+  buttonId: 'fetchOutBtn',
   statusId: 'updateOutStatus',
   isBusy: () => updatingOutNow,
   setBusy: (v) => { updatingOutNow = v; },
-  send: (account) => call('updateOutNowWithReceipt', { account }),
-  readKey: 'outbound',
-  okText: '我回别人已读取，点「?」可看最近记录。',
+  rpc: 'manualFetchOut',
+  okText: (h) => `已启动我回别人补读（最近 ${formatDurationLabel(h)}）。`,
 }));
-$('start').addEventListener('click', () => initialize('start', 'startBackfill'));
-$('outSync').addEventListener('click', () => initialize('outSync', 'syncOutNow'));
 $('keepExport').addEventListener('click', () => $('exportAll').click());
 $('pause').addEventListener('click', () => act('pauseJob'));
 $('resume').addEventListener('click', () => act('resumeJob'));

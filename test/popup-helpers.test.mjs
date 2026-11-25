@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  jobText, readSummary, stepRuleValue,
+  jobText, readSummary, formatDurationLabel, suggestFetchWindow, stepRuleValue,
   buildCsv, buildBoardExportRows, buildAllExportRows,
 } from '../src/ui/popup-helpers.js';
 
@@ -18,6 +18,16 @@ test('jobText 与 readSummary：展示进行中、等待、完成与精确扫描
   assert.equal(readSummary(null, null), '暂无读取记录');
   assert.equal(readSummary(now, { read: 10, added: 0 }, true), '11/21 10:00:00 · 扫描 10 条 · 新增 0 条');
   assert.match(readSummary(now, null), /11\/21 10:00 · 暂无条数/);
+
+  assert.equal(formatDurationLabel(3), '3 小时');
+  assert.equal(formatDurationLabel(24), '24 小时');
+  assert.equal(formatDurationLabel(72), '3 天');
+  assert.deepEqual(suggestFetchWindow(null, now), { amount: 3, unit: 'h', note: '暂无同步记录，可按需调整时长手动补读' });
+  assert.equal(suggestFetchWindow(now - 20 * 60_000, now).amount, 1);
+  assert.match(suggestFetchWindow(now - 20 * 60_000, now).note, /刚刚/);
+  assert.deepEqual(suggestFetchWindow(now - 2.3 * 3_600_000, now), { amount: 3, unit: 'h', note: '距上次同步约 3 小时（已预填，可自调）' });
+  assert.deepEqual(suggestFetchWindow(now - 36 * 3_600_000, now), { amount: 2, unit: 'd', note: '距上次同步约 2 天（已预填，可自调）' });
+  assert.equal(suggestFetchWindow(now - 40 * 86_400_000, now).amount, 15);
 });
 
 test('stepRuleValue：topN 在 10 与 50 之间直接跳，其余按步长增减', () => {

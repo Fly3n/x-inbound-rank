@@ -81,6 +81,13 @@ window.chrome = {
           for (const fn of listeners) fn({ [\`settings:\${account}\`]: { newValue: state.settings[account] } }, 'local');
           return { ok: true };
         }
+        case 'manualFetchIn':
+          cur.inLastReadAt = Date.now();
+          cur.inLastReadCounts = { read: 12, added: 0 };
+          return { ok: true, readAt: { inbound: cur.inLastReadAt } };
+        case 'manualFetchOut':
+          cur.out = { ...cur.out, lastReadAt: Date.now(), lastReadCounts: { read: 5, added: 0 } };
+          return { ok: true, readAt: { outbound: cur.out.lastReadAt } };
         default:
           return { ok: true };
       }
