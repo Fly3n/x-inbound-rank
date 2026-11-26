@@ -211,8 +211,13 @@
     askTimer = null;
     const ids = [...asking];
     asking = new Set();
+    const convs = {};
+    for (const id of ids) {
+      const t = XIRRel.tweets.get(id);
+      if (t?.rtoStatus && t.conv) convs[id] = t.conv;
+    }
     const session = currentSession;
-    sendForSession({ type: 'xir:where', ids }).then((res) => {
+    sendForSession({ type: 'xir:where', ids, convs }).then((res) => {
       if (!session || XIRRel.session() !== session) return;
       for (const id of ids) places.set(id, res?.places?.[id] ?? null);
       if (ids.some((id) => places.get(id))) rescan();
@@ -227,7 +232,7 @@
     const link = [...article.querySelectorAll(SEL.statusLink)].find((a) => a.querySelector('time'));
     const id = link?.getAttribute('href').match(/\/status\/(\d+)/)?.[1];
     if (!id) return null;
-    const known = XIRRel.placeOf(id, XIRFetcher.sessionUserId(), XIRRel.tweets);
+    const known = XIRRel.placeOf(id, XIRFetcher.sessionUserId(), XIRRel.tweets, XIRRel.convOwners);
     if (known) return known;
     if (places.has(id)) return places.get(id);
     if (account && alive) {

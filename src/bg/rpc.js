@@ -112,12 +112,13 @@ export const handlers = {
   },
   'xir:scheduled:tap': handleScheduledTap,
   'xir:postEvent': handlePostEvent,
-  // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID 来问本机数据
+  // 通知列表里的回复是在谁的帖子下：页面数据看不出来的，内容脚本拿帖子 ID（及旁听到的对话 ID）来问本机数据
   async 'xir:where'(msg, sender) {
-    const { ids } = msg;
+    const { ids, convs } = msg;
     const account = await senderAccount(msg, sender);
     if (!account || !Array.isArray(ids)) return { places: {} };
-    return { places: replyPlaces(await getEvents(account), await getEvents(account, OUT), ids.slice(0, 200).map(String)) };
+    const safeConvs = convs && typeof convs === 'object' ? convs : undefined;
+    return { places: replyPlaces(await getEvents(account), await getEvents(account, OUT), ids.slice(0, 200).map(String), safeConvs) };
   },
   async 'xir:dom'(msg, sender) {
     const account = await senderAccount(msg, sender);

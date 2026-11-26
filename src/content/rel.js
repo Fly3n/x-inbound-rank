@@ -174,26 +174,39 @@ const XIRRel = (() => {
   const relOf = (u) => (u.following && u.followedBy ? 'mutual' : u.followedBy ? 'fan' : u.following ? 'following' : 'none');
 
   /**
-   * 一条回复我的帖子，是在谁的帖子下：'me' 我的 / 'him' 回复者自己的 / 'other' 别人的 / null 看不出来。
-   * 只用页面数据能直接确定的情况；确定不了的由 content.js 再去问后台的本地数据。
+   * 通知列表里一条回复是在谁的帖子下：'me' 我的 / 'him' 回复者自己的 / 'other' 别人的 / null 看不出来。
+   * - 直接回复我：根帖归属已知时返回 'me' / 'him' / 'other'；
+   * - 非直接回复我（如我帖子下的二、三级评论）：只要能证明根帖是我的就返回 'me'，其余返回 null。
+   * 只用页面旁听内存能直接确定的情况；确定不了的由 content.js 再去问后台的本地数据。
    */
-  function placeOf(id, myId, tweets) {
+  function placeOf(id, myId, tweets, convOwners) {
     const t = tweets.get(id);
-    if (!t || !myId || t.rtoUser !== myId) return null;
-    if (t.conv === t.rtoStatus) return 'me'; // 直接回复的就是根帖，而回复对象是我
+    if (!t || !myId || !t.rtoStatus) return null;
+    if (t.rtoUser === myId && t.conv === t.rtoStatus) return 'me'; // 直接回复的就是根帖，而回复对象是我
     const root = tweets.get(t.conv);
-    if (!root?.uid) return null;
-    return root.uid === myId ? 'me' : root.uid === t.uid ? 'him' : 'other';
+    let rootUid = convOwners?.get(t.conv) || (root && !root.rtoStatus ? root.uid : null) || null;
+    if (!rootUid && !convOwners) {
+      for (const x of tweets.values()) {
+        if (x.conv === t.conv && x.rtoStatus === t.conv && x.rtoUser) {
+          rootUid = x.rtoUser;
+          break;
+        }
+      }
+    }
+    if (!rootUid) return null;
+    if (t.rtoUser !== myId) return rootUid === myId ? 'me' : null;
+    return rootUid === myId ? 'me' : rootUid === t.uid ? 'him' : 'other';
   }
 
   const rel = new Map(); // 小写 handle -> 'mutual' | 'fan' | 'following' | 'none'
   const tweets = new Map(); // 帖子 ID -> { uid, conv, rtoStatus, rtoUser }
+  const convOwners = new Map(); // 对话根帖 ID -> 根帖作者数字 ID（由根帖本身或一级回复直接推断，O(1) 查询）
   const tweetTexts = new Map(); // 帖子 ID -> { text, isNote }
   const tweetText = (id) => (id ? tweetTexts.get(String(id))?.text || null : null);
   const ops = new Set(); // 这个页面发过的接口请求的名字，只留最近 40 个（诊断用）
   // tpls / notificationsTaps / repliesTaps：content.js 就绪之前来的先短缓冲，就绪后由对应回调接手
   const api = {
-    extract, formatTweetText, relOf, placeOf, rel, tweets, tweetTexts, tweetText, ops,
+    extract, formatTweetText, relOf, placeOf, rel, tweets, convOwners, tweetTexts, tweetText, ops,
     tpls: [], notificationsTaps: [], repliesTaps: [],
     onNotificationsTap: null, onRepliesTap: null,
     onChange: null, onTpl: null, onCreateTweetTap: null, onScheduledTap: null, onPostEvent: null,
@@ -226,6 +239,11 @@ const XIRRel = (() => {
     for (const t of got.tweets) {
       if (!tweets.has(t.id)) changed = true;
       tweets.set(t.id, { id: t.id, uid: t.uid, conv: t.conv, rtoStatus: t.rtoStatus, rtoUser: t.rtoUser });
+      const owner = t.id === t.conv && !t.rtoStatus ? t.uid : t.conv && t.conv === t.rtoStatus ? t.rtoUser : null;
+      if (owner && convOwners.get(t.conv) !== owner) {
+        convOwners.set(t.conv, owner);
+        changed = true;
+      }
       if (t.text) {
         const prev = tweetTexts.get(t.id);
         if (!prev || !prev.isNote || t.isNote) {
@@ -235,6 +253,7 @@ const XIRRel = (() => {
     }
     trim(rel, 8000);
     trim(tweets, 8000);
+    trim(convOwners, 8000);
     trim(tweetTexts, 2000);
     if (changed) api.onChange?.();
   }
@@ -283,6 +302,7 @@ const XIRRel = (() => {
     session = account ? { account, userId, activation: entry.activation, handle: entry.handle } : null;
     rel.clear();
     tweets.clear();
+    convOwners.clear();
     tweetTexts.clear();
     ops.clear();
     api.tpls.length = 0;

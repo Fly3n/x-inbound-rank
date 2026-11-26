@@ -119,17 +119,21 @@ export function underMyPosts(events, out = []) {
 }
 
 /**
- * 别人回复我的那几条（ids），各自是在谁的帖子下：'me' 我的 / 'him' 回复者自己的 / 'other' 别人的 / null 本机数据看不出来。
- * 我的帖子靠入站事件的 root_mine；不是我的，就看「我回别人」那张表里同一个对话的根帖主人是谁。
+ * 通知列表里的回复（ids）各自是在谁的帖子下：'me' 我的 / 'him' 回复者自己的 / 'other' 别人的 / null 本机数据看不出来。
+ * 我的帖子靠入站事件的 root_mine 与同一对话旁证；未进入站表的深层回复（如我帖子下回别人）可凭 convById 对照 myConversations 识别。
  */
-export function replyPlaces(events, out, ids) {
-  const mine = new Set(underMyPosts(events, out).map((e) => e.id));
+export function replyPlaces(events, out, ids, convById = null) {
+  const mineConvs = myConversations(events, out);
+  const mine = new Set(events.filter((e) => e.root_mine === true || (e.root_mine === null && mineConvs.has(e.conversation_id))).map((e) => e.id));
   const byId = new Map(events.map((e) => [e.id, e]));
   const rootOf = new Map(out.filter((o) => o.root_user_id && !o.own).map((o) => [o.conversation_id, o.root_user_id]));
   return Object.fromEntries(
     ids.map((id) => {
       const e = byId.get(id);
-      if (!e) return [id, null];
+      if (!e) {
+        const conv = convById && typeof convById[id] === 'string' ? convById[id] : null;
+        return [id, conv && mineConvs.has(conv) ? 'me' : null];
+      }
       if (mine.has(id)) return [id, 'me'];
       const root = rootOf.get(e.conversation_id);
       return [id, !root ? null : root === e.actor_id ? 'him' : 'other'];
